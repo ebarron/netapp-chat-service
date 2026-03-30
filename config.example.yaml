@@ -1,0 +1,36 @@
+# Chat Service Configuration
+#
+# Environment variables are expanded: $VAR or ${VAR}
+
+llm:
+  provider: anthropic                # "openai", "anthropic", "bedrock", "custom", "llm-proxy"
+  endpoint: https://api.anthropic.com
+  api_key: $ANTHROPIC_API_KEY
+  model: claude-sonnet-4-20250514
+
+mcp_servers:
+  - name: harvest-mcp
+    url: http://localhost:8082
+    capability: harvest
+  - name: ontap-mcp
+    url: http://localhost:8083
+    capability: ontap
+
+capabilities:
+  defaults:
+    harvest: allow
+    ontap: ask
+
+interests:
+  dirs:
+    - ./interests
+
+product:
+  name: NABox
+  description: NetApp storage monitoring appliance
+  guidelines:
+    - Always verify cluster connectivity before running destructive operations
+    - Prefer read-only operations unless the user explicitly requests changes
+
+server:
+  addr: ":8090"
