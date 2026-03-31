@@ -1,0 +1,102 @@
+/* ChatPanel styles */
+.resizeHandle {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 10;
+  transition: background-color 150ms ease;
+}
+.resizeHandle:hover,
+.resizeHandle:active {
+  background-color: light-dark(var(--mantine-color-blue-2), var(--mantine-color-blue-8));
+}
+
+/* Wrapper ensures the chat column fills the drawer body height. */
+.panelWrapper {
+  flex: 1;
+  min-height: 0;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Two-column layout when canvas is active */
+.drawerBody {
+  display: flex;
+  flex-direction: row;
+  height: 100%;
+  flex: 1;
+  min-height: 0;
+}
+
+.drawerBody .panel {
+  flex: 0 0 40%;
+  min-width: 320px;
+}
+
+/* Canvas region */
+.canvasRegion {
+  flex: 0 0 60%;
+  border-left: 1px solid light-dark(var(--mantine-color-gray-3), var(--mantine-color-dark-4));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.canvasTabs {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--mantine-spacing-sm);
+  min-height: 0;
+}
+
+.inputArea {
+  border-top: 1px solid light-dark(var(--mantine-color-gray-3), var(--mantine-color-dark-4));
+  padding: var(--mantine-spacing-sm);
+}
+
+.userMessage {
+  background-color: light-dark(var(--mantine-color-blue-0), var(--mantine-color-blue-9));
+  border-radius: var(--mantine-radius-md);
+  padding: var(--mantine-spacing-xs) var(--mantine-spacing-sm);
+  margin-bottom: var(--mantine-spacing-xs);
+  max-width: 85%;
+  margin-left: auto;
+}
+
+.assistantMessage {
+  margin-bottom: var(--mantine-spacing-xs);
+  max-width: 90%;
+}
+
+.toolCard {
+  background-color: light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-6));
+  border-radius: var(--mantine-radius-sm);
+  padding: var(--mantine-spacing-xs);
+  margin: var(--mantine-spacing-xs) 0;
+  font-size: var(--mantine-font-size-xs);
+}
+
+.suggestedPrompt {
+  cursor: pointer;
+  transition: background-color 150ms ease;
+}
+
+.suggestedPrompt:hover {
+  background-color: light-dark(var(--mantine-color-gray-1), var(--mantine-color-dark-5));
+}
