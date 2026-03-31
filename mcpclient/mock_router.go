@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/ebarron/netapp-chat-service/internal/llm"
+	"github.com/ebarron/netapp-chat-service/llm"
 )
 
 // MockRouter is a deterministic Router replacement for tests. It allows tests

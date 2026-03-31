@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/ebarron/netapp-chat-service/internal/agent"
-	"github.com/ebarron/netapp-chat-service/internal/capability"
-	"github.com/ebarron/netapp-chat-service/internal/llm"
-	"github.com/ebarron/netapp-chat-service/internal/mcpclient"
+	"github.com/ebarron/netapp-chat-service/agent"
+	"github.com/ebarron/netapp-chat-service/capability"
+	"github.com/ebarron/netapp-chat-service/llm"
+	"github.com/ebarron/netapp-chat-service/mcpclient"
 	"gopkg.in/yaml.v3"
 )
 

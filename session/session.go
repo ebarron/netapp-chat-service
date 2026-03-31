@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ebarron/netapp-chat-service/internal/llm"
+	"github.com/ebarron/netapp-chat-service/llm"
 )
 
 // DefaultMaxMessages is the maximum number of messages kept per session.

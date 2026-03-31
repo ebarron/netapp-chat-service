@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"regexp"
 
-	"github.com/ebarron/netapp-chat-service/internal/llm"
+	"github.com/ebarron/netapp-chat-service/llm"
 )
 
 // getInterestInput is the expected JSON input for the get_interest tool.

@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/ebarron/netapp-chat-service/internal/llm"
+	"github.com/ebarron/netapp-chat-service/llm"
 )
 
 func TestMockRouterTools(t *testing.T) {

@@ -15,7 +15,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/ebarron/netapp-chat-service/internal/llm"
+	"github.com/ebarron/netapp-chat-service/llm"
 )
 
 // ServerConfig describes how to connect to a single MCP server.

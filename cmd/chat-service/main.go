@@ -7,13 +7,13 @@ import (
 	"os"
 	"time"
 
-	"github.com/ebarron/netapp-chat-service/internal/capability"
-	"github.com/ebarron/netapp-chat-service/internal/config"
-	"github.com/ebarron/netapp-chat-service/internal/interest"
-	"github.com/ebarron/netapp-chat-service/internal/llm"
-	"github.com/ebarron/netapp-chat-service/internal/mcpclient"
-	"github.com/ebarron/netapp-chat-service/internal/server"
-	"github.com/ebarron/netapp-chat-service/internal/session"
+	"github.com/ebarron/netapp-chat-service/capability"
+	"github.com/ebarron/netapp-chat-service/config"
+	"github.com/ebarron/netapp-chat-service/interest"
+	"github.com/ebarron/netapp-chat-service/llm"
+	"github.com/ebarron/netapp-chat-service/mcpclient"
+	"github.com/ebarron/netapp-chat-service/server"
+	"github.com/ebarron/netapp-chat-service/session"
 )
 
 func main() {

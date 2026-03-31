@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ebarron/netapp-chat-service/internal/llm"
+	"github.com/ebarron/netapp-chat-service/llm"
 )
 
 func TestNewManager(t *testing.T) {

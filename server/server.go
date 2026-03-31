@@ -11,12 +11,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ebarron/netapp-chat-service/internal/agent"
-	"github.com/ebarron/netapp-chat-service/internal/capability"
-	"github.com/ebarron/netapp-chat-service/internal/interest"
-	"github.com/ebarron/netapp-chat-service/internal/llm"
-	"github.com/ebarron/netapp-chat-service/internal/mcpclient"
-	"github.com/ebarron/netapp-chat-service/internal/session"
+	"github.com/ebarron/netapp-chat-service/agent"
+	"github.com/ebarron/netapp-chat-service/capability"
+	"github.com/ebarron/netapp-chat-service/interest"
+	"github.com/ebarron/netapp-chat-service/llm"
+	"github.com/ebarron/netapp-chat-service/mcpclient"
+	"github.com/ebarron/netapp-chat-service/session"
 )
 
 // ChatDeps holds the dependencies for the chat handlers.

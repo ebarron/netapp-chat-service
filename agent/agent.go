@@ -16,9 +16,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ebarron/netapp-chat-service/internal/capability"
-	"github.com/ebarron/netapp-chat-service/internal/llm"
-	"github.com/ebarron/netapp-chat-service/internal/mcpclient"
+	"github.com/ebarron/netapp-chat-service/capability"
+	"github.com/ebarron/netapp-chat-service/llm"
+	"github.com/ebarron/netapp-chat-service/mcpclient"
 )
 
 // DefaultMaxIterations is the safety limit for tool-call rounds per user
