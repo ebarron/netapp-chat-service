@@ -2,7 +2,9 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
+	"time"
 
 	"github.com/ebarron/netapp-chat-service/agent"
 	"github.com/ebarron/netapp-chat-service/capability"
@@ -15,6 +17,7 @@ import (
 type Config struct {
 	LLM          llm.ProviderConfig `yaml:"llm"`           // LLM provider settings.
 	MCPServers   []MCPServer        `yaml:"mcp_servers"`   // MCP servers to connect to.
+	MCPDiscovery MCPDiscoveryConfig `yaml:"mcp_discovery"` // Dynamic MCP server discovery.
 	Capabilities CapabilitiesConfig `yaml:"capabilities"`  // Capability definitions derived from MCP servers.
 	Interests    InterestsConfig    `yaml:"interests"`     // Interest directories to load.
 	Product      ProductConfig      `yaml:"product"`       // Product identity for the system prompt.
@@ -54,6 +57,47 @@ type ServerConfig struct {
 // UIConfig controls the built-in chat UI shell.
 type UIConfig struct {
 	Enabled bool `yaml:"enabled"` // serve the embedded chat UI at /
+}
+
+// MCPDiscoveryConfig controls dynamic MCP server discovery.
+type MCPDiscoveryConfig struct {
+	// Mode is the discovery mode: "static" (default) uses mcp_servers list,
+	// "docker" discovers servers from Docker container labels.
+	Mode string `yaml:"mode"`
+	// PollInterval is how often to poll for server changes (default 30s).
+	// Only used when mode is "docker".
+	PollInterval time.Duration `yaml:"poll_interval"`
+	// SocketPath is the Docker socket path (default /var/run/docker.sock).
+	SocketPath string `yaml:"socket_path"`
+	// LabelPrefix is the label prefix for discovery (default "mcp.").
+	LabelPrefix string `yaml:"label_prefix"`
+}
+
+// Discoverer creates a Discoverer from the config. For static mode (or when
+// mode is empty), it returns a StaticDiscoverer wrapping MCPServers. For
+// docker mode, it returns a DockerDiscoverer.
+func (c *Config) Discoverer(logger *slog.Logger) mcpclient.Discoverer {
+	switch c.MCPDiscovery.Mode {
+	case "docker":
+		var opts []mcpclient.DockerOption
+		if c.MCPDiscovery.SocketPath != "" {
+			opts = append(opts, mcpclient.WithSocketPath(c.MCPDiscovery.SocketPath))
+		}
+		if c.MCPDiscovery.LabelPrefix != "" {
+			opts = append(opts, mcpclient.WithLabelPrefix(c.MCPDiscovery.LabelPrefix))
+		}
+		return mcpclient.NewDockerDiscoverer(logger, opts...)
+	default:
+		return &mcpclient.StaticDiscoverer{Servers: c.ServerConfigs()}
+	}
+}
+
+// DiscoveryInterval returns the poll interval for discovery, with a default.
+func (c *Config) DiscoveryInterval() time.Duration {
+	if c.MCPDiscovery.PollInterval > 0 {
+		return c.MCPDiscovery.PollInterval
+	}
+	return 30 * time.Second
 }
 
 // Load reads and parses a config file.

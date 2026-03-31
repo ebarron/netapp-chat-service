@@ -16,6 +16,18 @@ mcp_servers:
     url: http://localhost:8083
     capability: ontap
 
+# Dynamic MCP server discovery (alternative to mcp_servers).
+# When mode is "docker", servers are discovered from Docker container labels
+# instead of the mcp_servers list above. Containers must have:
+#   mcp.discover=true, mcp.name=<name>, mcp.endpoint=<url>
+# Optional: mcp.capability=<id>
+#
+# mcp_discovery:
+#   mode: docker             # "static" (default) or "docker"
+#   poll_interval: 30s       # how often to check for new/removed servers
+#   socket_path: /var/run/docker.sock
+#   label_prefix: "mcp."
+
 capabilities:
   defaults:
     harvest: allow

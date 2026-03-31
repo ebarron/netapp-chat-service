@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log/slog"
 	"net/http"
@@ -43,10 +44,27 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Connect to MCP servers.
+	// Connect to MCP servers (initial static connection).
 	router := mcpclient.NewRouter(logger)
 	defer router.Close()
-	router.ConnectAll(cfg.ServerConfigs(), 5, 2*time.Second)
+
+	discoverer := cfg.Discoverer(logger)
+	if _, isDocker := discoverer.(*mcpclient.DockerDiscoverer); isDocker {
+		// Docker mode: do initial discovery, then start polling.
+		initial, err := discoverer.Discover(context.Background())
+		if err != nil {
+			logger.Warn("initial docker discovery failed, will retry", "error", err)
+		} else {
+			router.ConnectAll(initial, 3, 2*time.Second)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		router.RunDiscovery(ctx, discoverer, cfg.DiscoveryInterval())
+		logger.Info("mcp discovery enabled", "mode", "docker", "interval", cfg.DiscoveryInterval())
+	} else {
+		// Static mode: connect from config list.
+		router.ConnectAll(cfg.ServerConfigs(), 5, 2*time.Second)
+	}
 
 	// Build capabilities from config.
 	caps := cfg.BuildCapabilities()
