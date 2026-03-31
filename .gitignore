@@ -31,3 +31,7 @@ go.work.sum
 # .idea/
 # .vscode/
 node_modules/
+
+# UI shell build output (keep .gitkeep for go:embed)
+ui/dist/*
+!ui/dist/.gitkeep

@@ -14,6 +14,7 @@ import (
 	"github.com/ebarron/netapp-chat-service/mcpclient"
 	"github.com/ebarron/netapp-chat-service/server"
 	"github.com/ebarron/netapp-chat-service/session"
+	chatui "github.com/ebarron/netapp-chat-service/ui"
 )
 
 func main() {
@@ -81,6 +82,10 @@ func main() {
 	}
 
 	srv := server.New(deps)
+
+	if cfg.UI.Enabled {
+		srv.ServeUI(chatui.Dist)
+	}
 
 	logger.Info("starting chat service", "addr", cfg.Server.Addr)
 	if err := http.ListenAndServe(cfg.Server.Addr, srv.Handler()); err != nil {

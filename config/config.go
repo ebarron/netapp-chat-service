@@ -19,6 +19,7 @@ type Config struct {
 	Interests    InterestsConfig    `yaml:"interests"`     // Interest directories to load.
 	Product      ProductConfig      `yaml:"product"`       // Product identity for the system prompt.
 	Server       ServerConfig       `yaml:"server"`        // HTTP server settings.
+	UI           UIConfig           `yaml:"ui"`            // Built-in chat UI settings.
 }
 
 // MCPServer defines an MCP server connection.
@@ -48,6 +49,11 @@ type ProductConfig struct {
 // ServerConfig defines HTTP server settings.
 type ServerConfig struct {
 	Addr string `yaml:"addr"` // listen address (default ":8090")
+}
+
+// UIConfig controls the built-in chat UI shell.
+type UIConfig struct {
+	Enabled bool `yaml:"enabled"` // serve the embedded chat UI at /
 }
 
 // Load reads and parses a config file.

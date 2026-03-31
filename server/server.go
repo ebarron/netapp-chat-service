@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -84,6 +85,32 @@ func New(deps *ChatDeps) *Server {
 	s.mux.HandleFunc("GET /health", s.GetHealth)
 
 	return s
+}
+
+// ServeUI registers a handler that serves the embedded UI shell at /.
+// The provided fsys should be the ui.Dist embed.FS.
+func (s *Server) ServeUI(fsys fs.FS) {
+	sub, err := fs.Sub(fsys, "dist")
+	if err != nil {
+		s.logger.Warn("ui dist not available", "error", err)
+		return
+	}
+
+	fileServer := http.FileServer(http.FS(sub))
+
+	s.mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		// Try to serve the exact file; fall back to index.html for SPA routing.
+		f, err := sub.Open(r.URL.Path[1:]) // strip leading /
+		if err != nil {
+			// Serve index.html for any path that doesn't match a static file.
+			r.URL.Path = "/"
+		} else {
+			f.Close()
+		}
+		fileServer.ServeHTTP(w, r)
+	})
+
+	s.logger.Info("serving built-in chat UI at /")
 }
 
 // Handler returns the HTTP handler.

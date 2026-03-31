@@ -45,6 +45,8 @@ interface ChatPanelProps {
   subtitle?: string;
   /** Suggested prompts shown when the conversation is empty. */
   suggestedPrompts?: string[];
+  /** When true, renders as a full-page layout instead of a Drawer. */
+  fullPage?: boolean;
 }
 
 const DEFAULT_SUGGESTED_PROMPTS = [
@@ -63,6 +65,7 @@ export function ChatPanel({
   title = 'AI Assistant',
   subtitle,
   suggestedPrompts = DEFAULT_SUGGESTED_PROMPTS,
+  fullPage = false,
 }: ChatPanelProps) {
   const {
     messages,
@@ -179,34 +182,18 @@ export function ChatPanel({
     document.addEventListener('pointerup', onUp);
   }, [drawerWidth]);
 
-  return (
-    <Drawer
-      opened={opened}
-      onClose={onClose}
-      position="left"
-      size={effectiveWidth}
-      title={
-        <Group gap="xs">
-          <IconMessageChatbot size={20} />
-          <Group align="baseline" gap="xs">
-            <Text fw={600}>{title}</Text>
-            {subtitle && <Text size="xs" c="red" fw={500}>{subtitle}</Text>}
-          </Group>
-        </Group>
-      }
-      styles={{
-        body: { height: 'calc(100% - 60px)', display: 'flex', flexDirection: 'column' },
-        content: { overflow: 'visible' },
-      }}
-    >
-      {/* Resize handle on the right edge */}
-      <div
-        className={classes.resizeHandle}
-        onPointerDown={onResizeStart}
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Resize chat panel"
-      />
+  const headerBar = (
+    <Group gap="xs" className={classes.fullPageHeader}>
+      <IconMessageChatbot size={20} />
+      <Group align="baseline" gap="xs">
+        <Text fw={600}>{title}</Text>
+        {subtitle && <Text size="xs" c="red" fw={500}>{subtitle}</Text>}
+      </Group>
+    </Group>
+  );
+
+  const chatContent = (
+    <>
       <div className={hasCanvas ? classes.drawerBody : classes.panelWrapper}>
         <div className={classes.panel}>
         {/* Mode toggle + Capability controls */}
@@ -373,12 +360,56 @@ export function ChatPanel({
         )}
       </div>
 
-      {/* Phase 2: Action confirmation dialog */}
+      {/* Action confirmation dialog */}
       <ActionConfirmation
         approval={pendingApproval}
         onApprove={approveAction}
         onDeny={denyAction}
       />
+    </>
+  );
+
+  if (fullPage) {
+    if (!opened) return null;
+    return (
+      <div className={classes.fullPage}>
+        {headerBar}
+        <div className={classes.fullPageBody}>
+          {chatContent}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <Drawer
+      opened={opened}
+      onClose={onClose}
+      position="left"
+      size={effectiveWidth}
+      title={
+        <Group gap="xs">
+          <IconMessageChatbot size={20} />
+          <Group align="baseline" gap="xs">
+            <Text fw={600}>{title}</Text>
+            {subtitle && <Text size="xs" c="red" fw={500}>{subtitle}</Text>}
+          </Group>
+        </Group>
+      }
+      styles={{
+        body: { height: 'calc(100% - 60px)', display: 'flex', flexDirection: 'column' },
+        content: { overflow: 'visible' },
+      }}
+    >
+      {/* Resize handle on the right edge */}
+      <div
+        className={classes.resizeHandle}
+        onPointerDown={onResizeStart}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize chat panel"
+      />
+      {chatContent}
     </Drawer>
   );
 }

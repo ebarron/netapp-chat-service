@@ -20,5 +20,6 @@
     "sourceMap": true,
     "outDir": "dist"
   },
-  "include": ["src", "test-utils"]
+  "include": ["src", "test-utils"],
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]
 }

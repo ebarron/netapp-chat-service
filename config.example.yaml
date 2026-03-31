@@ -34,3 +34,8 @@ product:
 
 server:
   addr: ":8090"
+
+# Built-in chat UI shell. Enable this for products that don't have their own frontend.
+# When enabled, the chat service serves a full-page chat interface at /.
+ui:
+  enabled: false
