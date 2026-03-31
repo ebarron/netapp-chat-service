@@ -1,6 +1,6 @@
 module github.com/ebarron/netapp-chat-service
 
-go 1.25.1
+go 1.25.0
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.27.1
