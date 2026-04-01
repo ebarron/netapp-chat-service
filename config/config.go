@@ -27,9 +27,10 @@ type Config struct {
 
 // MCPServer defines an MCP server connection.
 type MCPServer struct {
-	Name       string `yaml:"name"`
-	URL        string `yaml:"url"`
-	Capability string `yaml:"capability"`
+	Name       string            `yaml:"name"`
+	URL        string            `yaml:"url"`
+	Capability string            `yaml:"capability"`
+	Headers    map[string]string `yaml:"headers"` // extra HTTP headers (e.g. auth tokens)
 }
 
 // CapabilitiesConfig defines capability defaults.
@@ -128,6 +129,7 @@ func (c *Config) ServerConfigs() []mcpclient.ServerConfig {
 		configs[i] = mcpclient.ServerConfig{
 			Name:     s.Name,
 			Endpoint: s.URL,
+			Headers:  s.Headers,
 		}
 	}
 	return configs

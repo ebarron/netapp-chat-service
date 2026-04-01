@@ -494,7 +494,7 @@ func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit C
 		case agent.EventError:
 			emit("error", map[string]string{
 				"type":    "error",
-				"message": evt.Text,
+				"message": evt.Error,
 			})
 
 		case agent.EventDone:

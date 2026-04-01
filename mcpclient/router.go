@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 	"time"
 
@@ -18,10 +19,24 @@ import (
 	"github.com/ebarron/netapp-chat-service/llm"
 )
 
+// headerRoundTripper wraps an http.RoundTripper to inject extra headers.
+type headerRoundTripper struct {
+	base    http.RoundTripper
+	headers map[string]string
+}
+
+func (h *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	for k, v := range h.headers {
+		req.Header.Set(k, v)
+	}
+	return h.base.RoundTrip(req)
+}
+
 // ServerConfig describes how to connect to a single MCP server.
 type ServerConfig struct {
-	Name     string `yaml:"name" json:"name"`         // e.g. "harvest-mcp", "ontap-mcp"
-	Endpoint string `yaml:"endpoint" json:"endpoint"` // e.g. "http://localhost:8082"
+	Name     string            `yaml:"name" json:"name"`         // e.g. "harvest-mcp", "ontap-mcp"
+	Endpoint string            `yaml:"endpoint" json:"endpoint"` // e.g. "http://localhost:8082"
+	Headers  map[string]string `yaml:"headers" json:"headers"`   // extra HTTP headers (e.g. auth tokens)
 }
 
 // Router manages connections to multiple MCP servers. It discovers tools from
@@ -75,8 +90,20 @@ func (r *Router) Connect(ctx context.Context, cfg ServerConfig) error {
 		Version: "1.0.0",
 	}, nil)
 
+	// Build a custom http.Client that injects auth headers if configured.
+	var httpClient *http.Client
+	if len(cfg.Headers) > 0 {
+		httpClient = &http.Client{
+			Transport: &headerRoundTripper{
+				base:    http.DefaultTransport,
+				headers: cfg.Headers,
+			},
+		}
+	}
+
 	transport := &mcp.StreamableClientTransport{
-		Endpoint: cfg.Endpoint,
+		Endpoint:   cfg.Endpoint,
+		HTTPClient: httpClient,
 	}
 
 	session, err := client.Connect(ctx, transport, nil)
