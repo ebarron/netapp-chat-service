@@ -100,7 +100,7 @@ func (d *DockerDiscoverer) Discover(ctx context.Context) ([]ServerConfig, error)
 	}
 	filtersJSON, _ := json.Marshal(filters)
 
-	u := fmt.Sprintf("http://docker/v1.40/containers/json?filters=%s",
+	u := fmt.Sprintf("http://docker/v1.41/containers/json?filters=%s",
 		url.QueryEscape(string(filtersJSON)))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
