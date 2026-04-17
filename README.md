@@ -214,7 +214,7 @@ chatServer := server.New(&server.ChatDeps{
 mux.Handle("/chat/", chatServer.Handler())
 ```
 
-**Option B: Write your own handlers** — import the packages directly and build custom route handlers that call the agent loop yourself. This is what NABox does — it wraps the agent, session, and capability packages inside its own `chi` router with product-specific auth middleware, SSE streaming, and config persistence. This approach is more work but gives you full control over the request lifecycle.
+**Option B: Write your own handlers** — import the packages directly and build custom route handlers that call the agent loop yourself. This is what NAbox does — it wraps the agent, session, and capability packages inside its own `chi` router with product-specific auth middleware, SSE streaming, and config persistence. This approach is more work but gives you full control over the request lifecycle.
 
 #### 5. Product customization points
 
@@ -250,12 +250,12 @@ The `packages/chat-component/` directory contains a reusable React chat componen
 - Use the full embedded UI from `ui/` via `server.ServeUI()`
 - Build your own frontend using the SSE event protocol above
 
-### Example: NABox integration
+### Example: NAbox integration
 
-NABox embeds the chat service as a Go library. Here's how the integration is structured:
+NAbox embeds the chat service as a Go library. Here's how the integration is structured:
 
 - **`chatbot.go`** — Initialization: loads AI config from YAML, creates provider + router + capabilities, defines custom tools (volume monitoring, alert management), configures Docker-based MCP discovery, provisions Grafana service account tokens
 - **`routes/ai.go`** — Config management API: CRUD for LLM provider settings, provider validation, model listing
-- **`routes/chat.go`** — Chat API: SSE streaming endpoint, session management, capability state persistence, tool approval workflow — all using the chat service's `agent`, `session`, and `capability` packages within NABox's own auth middleware stack
+- **`routes/chat.go`** — Chat API: SSE streaming endpoint, session management, capability state persistence, tool approval workflow — all using the chat service's `agent`, `session`, and `capability` packages within NAbox's own auth middleware stack
 - **`interests/*.md`** — Built-in interests embedded via `//go:embed` for domain-specific prompt routing
 - **`admin-ui/`** — Custom React frontend that consumes the SSE API and renders tool results, canvas views, and approval dialogs
