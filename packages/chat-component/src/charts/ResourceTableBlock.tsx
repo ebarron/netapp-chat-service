@@ -6,6 +6,27 @@ interface ResourceTableBlockProps {
   onAction?: (message: string) => void;
 }
 
+/**
+ * Normalize a column entry to {key, label}. Accepts:
+ *   - string ("User")              → {key: "User", label: "User"}
+ *   - {key, label} object          → unchanged
+ *   - {name} or {field} object     → mapped to key
+ *   - anything else                → safe fallback (prevents React crash)
+ */
+function normalizeColumn(col: unknown): { key: string; label: string } {
+  if (typeof col === 'string') {
+    return { key: col, label: col };
+  }
+  if (col && typeof col === 'object') {
+    const c = col as Record<string, unknown>;
+    const key = String(c.key ?? c.name ?? c.field ?? c.id ?? '');
+    const label = String(c.label ?? c.title ?? c.header ?? key);
+    return { key, label };
+  }
+  const s = String(col ?? '');
+  return { key: s, label: s };
+}
+
 // Well-known aliases: column display name (lowercase) → row property fallbacks
 const COLUMN_ALIASES: Record<string, string[]> = {
   resource: ['name'],
@@ -117,10 +138,14 @@ function findInlineTrend(row: Record<string, unknown>, col: string, visibleCols:
 }
 
 export function ResourceTableBlock({ data, onAction }: ResourceTableBlockProps) {
+  // Normalize columns to support both string[] and {key,label}[] formats from LLMs.
+  const cols = (data.columns ?? []).map(normalizeColumn);
+  const colKeys = cols.map((c) => c.key);
+
   const handleRowClick = (row: Record<string, unknown>) => {
     const name = String(row.name || '');
     if (!name || !onAction) return;
-    const col0 = data.columns[0]?.toLowerCase() || '';
+    const col0 = colKeys[0]?.toLowerCase() || '';
     const genericNames = new Set(['name', 'resource', '']);
     const kind = genericNames.has(col0) ? '' : col0;
     let prompt: string;
@@ -144,15 +169,15 @@ export function ResourceTableBlock({ data, onAction }: ResourceTableBlockProps) 
       <Table highlightOnHover fz="xs" aria-label={data.title}>
         <Table.Thead>
           <Table.Tr>
-            {data.columns.map((col) => (
-              <Table.Th key={col}>{col}</Table.Th>
+            {cols.map((col) => (
+              <Table.Th key={col.key}>{col.label}</Table.Th>
             ))}
           </Table.Tr>
         </Table.Thead>
         <Table.Tbody>
           {data.rows.length === 0 && (
             <Table.Tr>
-              <Table.Td colSpan={data.columns.length}>
+              <Table.Td colSpan={cols.length}>
                 <Text fz="xs" c="dimmed" ta="center">No data available</Text>
               </Table.Td>
             </Table.Tr>
@@ -162,23 +187,23 @@ export function ResourceTableBlock({ data, onAction }: ResourceTableBlockProps) 
 
             return (
               <Table.Tr
-                key={row.name ?? rowIdx}
+                key={String(row.name ?? rowIdx)}
                 style={{ cursor: onAction ? 'pointer' : undefined }}
                 onClick={() => handleRowClick(r)}
               >
-                {data.columns.map((col) => {
-                  const value = resolveCell(r, col);
+                {cols.map((col) => {
+                  const value = resolveCell(r, col.key);
 
                   // Dedicated sparkline column (e.g. visible Trend column)
                   if (isSparklineData(value)) {
-                    return <Table.Td key={col}><MiniSparkline data={value} /></Table.Td>;
+                    return <Table.Td key={col.key}><MiniSparkline data={value} /></Table.Td>;
                   }
 
                   // Inline sparkline: render next to value when a hidden trend field exists
-                  const trend = findInlineTrend(r, col, data.columns);
+                  const trend = findInlineTrend(r, col.key, colKeys);
                   if (trend) {
                     return (
-                      <Table.Td key={col}>
+                      <Table.Td key={col.key}>
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                           {value}
                           <MiniSparkline data={trend} w={60} h={20} />
@@ -187,7 +212,7 @@ export function ResourceTableBlock({ data, onAction }: ResourceTableBlockProps) 
                     );
                   }
 
-                  return <Table.Td key={col}>{value}</Table.Td>;
+                  return <Table.Td key={col.key}>{value}</Table.Td>;
                 })}
               </Table.Tr>
             );
