@@ -4,6 +4,16 @@ All notable changes to `@edjbarron/netapp-chat-component` are documented in this
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2026-04-22
+
+### Changed
+- Widened Mantine peer dependency ranges from `^8.0.0` to `^8.0.0 || ^9.0.0` (`@mantine/core`, `@mantine/charts`, `@mantine/hooks`) so consumers on Mantine 9 can install without `ERESOLVE` errors. No code changes — Mantine 9 is API-compatible for the components used.
+
+## [0.1.3] - 2026-04-22
+
+### Fixed
+- `ResourceTableBlock` object-column fix (republish of the 0.1.2 fix; see commit `bb69bdd`).
+
 ## [0.1.2] - 2026-04-22
 
 ### Added
@@ -21,5 +31,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Hook: `useChatPanel`.
 - API: `createChatAPI`, `ChatAPIProvider`, `useChatAPI`.
 
+[0.1.4]: https://github.com/ebarron/netapp-chat-service/releases/tag/chat-component-v0.1.4
+[0.1.3]: https://github.com/ebarron/netapp-chat-service/releases/tag/chat-component-v0.1.3
 [0.1.2]: https://github.com/ebarron/netapp-chat-service/releases/tag/chat-component-v0.1.2
 [0.1.0]: https://github.com/ebarron/netapp-chat-service/releases/tag/chat-component-v0.1.0
