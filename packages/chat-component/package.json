@@ -1,7 +1,7 @@
 {
-  "name": "chat-component",
+  "name": "@edjbarron/netapp-chat-component",
   "version": "0.1.0",
-  "private": true,
+  "description": "React chat UI component for the netapp-chat-service agentic chat backend (LLM + MCP tool routing).",
   "type": "module",
   "main": "dist/index.cjs",
   "module": "dist/index.js",
@@ -15,14 +15,41 @@
     "./styles.css": "./dist/styles.css"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "dev": "vite build --watch",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ebarron/netapp-chat-service.git",
+    "directory": "packages/chat-component"
+  },
+  "homepage": "https://github.com/ebarron/netapp-chat-service/tree/main/packages/chat-component#readme",
+  "bugs": {
+    "url": "https://github.com/ebarron/netapp-chat-service/issues"
+  },
+  "keywords": [
+    "react",
+    "chat",
+    "chatbot",
+    "llm",
+    "mcp",
+    "agent",
+    "mantine",
+    "netapp"
+  ],
+  "author": "ebarron",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
   },
   "peerDependencies": {
     "@mantine/charts": "^8.0.0",
