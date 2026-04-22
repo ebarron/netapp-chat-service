@@ -246,9 +246,84 @@ When using Option B (custom handlers), your SSE endpoint should emit these event
 
 The `packages/chat-component/` directory contains a reusable React chat component that handles the SSE protocol, tool approval UI, and message rendering. You can either:
 
-- Use it directly in your React app as an npm dependency
+- Use it directly in your React app as an npm dependency (see [Consuming the React component via npm](#consuming-the-react-component-via-npm))
 - Use the full embedded UI from `ui/` via `server.ServeUI()`
 - Build your own frontend using the SSE event protocol above
+
+### Consuming the React component via npm
+
+The chat component is published to public npm as **[`@edjbarron/netapp-chat-component`](https://www.npmjs.com/package/@edjbarron/netapp-chat-component)**.
+
+#### Install
+
+```bash
+npm install @edjbarron/netapp-chat-component
+```
+
+#### Peer dependencies
+
+You must install these in your host application:
+
+```bash
+npm install react@^18 || ^19 \
+            react-dom@^18 || ^19 \
+            @mantine/core@^8 \
+            @mantine/charts@^8 \
+            @mantine/hooks@^8 \
+            @tabler/icons-react@^3
+```
+
+| Peer | Required version |
+|---|---|
+| `react` | `^18.0.0 || ^19.0.0` |
+| `react-dom` | `^18.0.0 || ^19.0.0` |
+| `@mantine/core` | `^8.0.0` |
+| `@mantine/charts` | `^8.0.0` |
+| `@mantine/hooks` | `^8.0.0` |
+| `@tabler/icons-react` | `^3.0.0` |
+
+#### Minimum usage
+
+```tsx
+import { MantineProvider } from '@mantine/core';
+import {
+  ChatPanel,
+  ChatAPIProvider,
+  createChatAPI,
+} from '@edjbarron/netapp-chat-component';
+
+import '@mantine/core/styles.css';
+import '@mantine/charts/styles.css';
+import '@edjbarron/netapp-chat-component/styles.css';
+
+const api = createChatAPI({ baseUrl: 'https://your-chat-service.example.com' });
+
+export function App() {
+  return (
+    <MantineProvider>
+      <ChatAPIProvider value={api}>
+        <ChatPanel />
+      </ChatAPIProvider>
+    </MantineProvider>
+  );
+}
+```
+
+#### Backend requirement
+
+The component is purely a UI client — it talks to the `netapp-chat-service` Go backend over the SSE event protocol described in [SSE event protocol](#6-sse-event-protocol). To use the npm package you must also:
+
+- Run the Go server (see [Standalone Server](#standalone-server)), **or**
+- Embed the chat service in your own Go application (see [Go Library (Embedded)](#go-library-embedded)), **or**
+- Implement the [API endpoints](#api-endpoints) yourself in another language using the same SSE contract.
+
+The component does not bundle, vendor, or require the Go backend at install time.
+
+#### Versioning and releases
+
+The package follows [semver](https://semver.org/). Releases are tracked in [CHANGELOG.md](packages/chat-component/CHANGELOG.md) and tagged in git as `chat-component-vX.Y.Z`. See all releases at <https://github.com/ebarron/netapp-chat-service/releases>.
+
+Publishing to npm is automated via GitHub Actions ([`.github/workflows/publish-chat-component.yml`](.github/workflows/publish-chat-component.yml)) using **npm trusted publisher (OIDC)** — no long-lived tokens are stored in the repo. To cut a release, maintainers bump the version in `packages/chat-component/package.json`, push a `chat-component-vX.Y.Z` tag, and the workflow publishes automatically.
 
 ### Example: NAbox integration
 
