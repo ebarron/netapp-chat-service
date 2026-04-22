@@ -124,6 +124,22 @@ The local clone is not tracked by the consuming project's git — it's purely a 
 
 Run the chat service as its own process, configured entirely via `config.yaml`. This is the simplest option when your product doesn't need to inject custom tools or deeply control the agent lifecycle.
 
+#### Option A: Download a prebuilt binary
+
+Each tagged Go release publishes prebuilt binaries to the [GitHub Releases](https://github.com/ebarron/netapp-chat-service/releases) page (linux/macOS, amd64/arm64). No Go toolchain required on the consumer's machine.
+
+```bash
+# macOS arm64 example — adjust OS/arch and version as needed
+VERSION=v0.1.1
+ARCH=darwin_arm64
+curl -L https://github.com/ebarron/netapp-chat-service/releases/download/${VERSION}/chat-service_${VERSION#v}_${ARCH}.tar.gz | tar xz
+./chat-service -config config.yaml
+```
+
+Verify integrity using `checksums.txt` from the same release.
+
+#### Option B: Build from source
+
 ```bash
 go build -o chat-service ./cmd/chat-service
 ./chat-service -config config.yaml

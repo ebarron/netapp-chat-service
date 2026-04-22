@@ -1,0 +1,73 @@
+version: 2
+
+project_name: chat-service
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: chat-service
+    main: ./cmd/chat-service
+    binary: chat-service
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
+
+archives:
+  - id: default
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats: [tar.gz]
+    files:
+      - README.md
+      - LICENSE
+      - config.example.yaml
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"
+      - "Merge branch"
+
+release:
+  github:
+    owner: ebarron
+    name: netapp-chat-service
+  draft: false
+  prerelease: auto
+  name_template: "Chat Service {{ .Tag }}"
+  header: |
+    ## chat-service Go backend release
+
+    Prebuilt binaries for the standalone chat-service server.
+
+    ### Install
+    ```bash
+    # macOS arm64 example — adjust for your OS/arch
+    curl -L https://github.com/ebarron/netapp-chat-service/releases/download/{{ .Tag }}/chat-service_{{ .Version }}_darwin_arm64.tar.gz | tar xz
+    ./chat-service -config config.yaml
+    ```
+
+    Verify the download with `checksums.txt` in the release assets.
