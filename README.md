@@ -13,15 +13,45 @@ A standalone, product-agnostic chat service that provides an agentic tool-use lo
 
 ## Quick Start
 
-```bash
-# Build
-go build -o chat-service ./cmd/chat-service
+The fastest path depends on what you need:
 
-# Configure
+### Frontend only (React) — `npm install`
+
+```bash
+npm install @edjbarron/netapp-chat-component
+```
+
+Drop the `ChatPanel` component into a Mantine-based React app and point it at any chat-service backend. See [Consuming the React component via npm](#consuming-the-react-component-via-npm) for full usage.
+
+### Backend only (standalone server) — download a prebuilt binary
+
+No Go toolchain required. Each tagged release publishes binaries for linux/macOS × amd64/arm64 to [GitHub Releases](https://github.com/ebarron/netapp-chat-service/releases).
+
+```bash
+# macOS arm64 example — adjust OS/arch and version
+VERSION=v0.1.1
+ARCH=darwin_arm64
+curl -L https://github.com/ebarron/netapp-chat-service/releases/download/${VERSION}/chat-service_${VERSION#v}_${ARCH}.tar.gz | tar xz
+
 cp config.example.yaml config.yaml
 # Edit config.yaml with your LLM provider and MCP server details
+./chat-service -config config.yaml
+```
 
-# Run
+Verify integrity using `checksums.txt` from the same release.
+
+### Backend embedded in your Go service — `go get`
+
+```bash
+go get github.com/ebarron/netapp-chat-service@latest
+```
+
+Import the packages and wire them into your existing HTTP server. See [Go Library (Embedded)](#go-library-embedded) for the full pattern.
+
+### Build from source
+
+```bash
+go build -o chat-service ./cmd/chat-service
 ./chat-service -config config.yaml
 ```
 
