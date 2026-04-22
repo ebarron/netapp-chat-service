@@ -29,7 +29,7 @@ No Go toolchain required. Each tagged release publishes binaries for linux/macOS
 
 ```bash
 # macOS arm64 example — adjust OS/arch and version
-VERSION=v0.1.1
+VERSION=v0.1.2
 ARCH=darwin_arm64
 curl -L https://github.com/ebarron/netapp-chat-service/releases/download/${VERSION}/chat-service_${VERSION#v}_${ARCH}.tar.gz | tar xz
 
@@ -160,7 +160,7 @@ Each tagged Go release publishes prebuilt binaries to the [GitHub Releases](http
 
 ```bash
 # macOS arm64 example — adjust OS/arch and version as needed
-VERSION=v0.1.1
+VERSION=v0.1.2
 ARCH=darwin_arm64
 curl -L https://github.com/ebarron/netapp-chat-service/releases/download/${VERSION}/chat-service_${VERSION#v}_${ARCH}.tar.gz | tar xz
 ./chat-service -config config.yaml
