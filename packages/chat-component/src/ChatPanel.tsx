@@ -28,6 +28,8 @@ import remarkGfm from 'remark-gfm';
 import { useChatPanel, ChatMessage } from './useChatPanel';
 import { ModeToggle } from './ModeToggle';
 import { CapabilityControls } from './CapabilityControls';
+import { BookmarkPrompts } from './BookmarkPrompts';
+import type { BookmarkPrompt } from './BookmarkPrompts';
 import { ActionConfirmation } from './ActionConfirmation';
 import { ToolStatusCard } from './ToolStatusCard';
 import { CanvasPanel } from './CanvasPanel';
@@ -45,6 +47,8 @@ interface ChatPanelProps {
   subtitle?: string;
   /** Suggested prompts shown when the conversation is empty. */
   suggestedPrompts?: string[];
+  /** Bookmark prompts grouped by MCP, shown via a book icon in the header. */
+  bookmarkPrompts?: BookmarkPrompt[];
   /** When true, renders as a full-page layout instead of a Drawer. */
   fullPage?: boolean;
 }
@@ -65,6 +69,7 @@ export function ChatPanel({
   title = 'AI Assistant',
   subtitle,
   suggestedPrompts = DEFAULT_SUGGESTED_PROMPTS,
+  bookmarkPrompts,
   fullPage = false,
 }: ChatPanelProps) {
   const {
@@ -206,13 +211,23 @@ export function ChatPanel({
                 timeLeft={modeTimeLeft}
                 disabled={!configured}
               />
-              <CapabilityControls
-                capabilities={capabilities}
-                onUpdate={updateCapability}
-                disabled={!configured}
-                showTraces={showTraces}
-                onShowTracesChange={setShowTraces}
-              />
+              <Group gap={4}>
+                {bookmarkPrompts && bookmarkPrompts.length > 0 && (
+                  <BookmarkPrompts
+                    bookmarks={bookmarkPrompts}
+                    capabilities={capabilities}
+                    onSelect={sendMessage}
+                    disabled={!configured}
+                  />
+                )}
+                <CapabilityControls
+                  capabilities={capabilities}
+                  onUpdate={updateCapability}
+                  disabled={!configured}
+                  showTraces={showTraces}
+                  onShowTracesChange={setShowTraces}
+                />
+              </Group>
             </Group>
             <Divider />
           </>

@@ -8,6 +8,8 @@ export { ChatPanel } from './ChatPanel';
 export { CanvasPanel } from './CanvasPanel';
 export { ModeToggle } from './ModeToggle';
 export { CapabilityControls } from './CapabilityControls';
+export { BookmarkPrompts } from './BookmarkPrompts';
+export type { BookmarkPrompt } from './BookmarkPrompts';
 export { ActionConfirmation } from './ActionConfirmation';
 export { ToolStatusCard } from './ToolStatusCard';
 
