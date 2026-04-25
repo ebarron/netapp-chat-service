@@ -49,6 +49,16 @@ export function App() {
 }
 ```
 
+### Initial chat mode
+
+`<ChatPanel>` opens in **read-write mode** by default. To start in read-only mode (information-retrieval tools only), pass `defaultMode`:
+
+```tsx
+<ChatPanel defaultMode="read-only" />
+```
+
+The user can still toggle mode at runtime via the in-panel `ModeToggle`; `defaultMode` only sets the initial value. The backend filters tools by mode based on each MCP tool's `ToolAnnotations.ReadOnlyHint` — if your MCP servers don't yet emit annotations, leave `defaultMode` at its default so all their tools remain available.
+
 ### Auth headers and credentials
 
 `createChatAPI` accepts custom `headers` and a `credentials` mode that are applied to **every** request (including the streaming `POST /chat/message`):

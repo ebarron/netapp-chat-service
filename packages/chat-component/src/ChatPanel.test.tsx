@@ -63,4 +63,24 @@ describe('ChatPanel', () => {
     expect(document.querySelector('[class*="canvasRegion"]')).toBeNull();
     expect(screen.queryByRole('tablist')).toBeNull();
   });
+
+  describe('defaultMode prop wiring', () => {
+    it('starts in read-write mode by default (no prop)', async () => {
+      render(<ChatPanel opened={true} onClose={onClose} />);
+      const rw = await screen.findByDisplayValue('read-write');
+      expect((rw as HTMLInputElement).checked).toBe(true);
+    });
+
+    it('starts in read-only mode when defaultMode="read-only" is passed', async () => {
+      render(<ChatPanel opened={true} onClose={onClose} defaultMode="read-only" />);
+      const ro = await screen.findByDisplayValue('read-only');
+      expect((ro as HTMLInputElement).checked).toBe(true);
+    });
+
+    it('starts in read-write mode when defaultMode="read-write" is passed explicitly', async () => {
+      render(<ChatPanel opened={true} onClose={onClose} defaultMode="read-write" />);
+      const rw = await screen.findByDisplayValue('read-write');
+      expect((rw as HTMLInputElement).checked).toBe(true);
+    });
+  });
 }); 

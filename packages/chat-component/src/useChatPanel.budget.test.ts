@@ -19,7 +19,7 @@ describe('useChatPanel tool budget', () => {
       }),
     });
 
-    const { result } = renderHook(() => useChatPanel(), { api });
+    const { result } = renderHook(() => useChatPanel({ defaultMode: 'read-only' }), { api });
 
     await act(async () => {
       await result.current.fetchCapabilities();

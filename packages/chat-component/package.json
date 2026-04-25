@@ -1,6 +1,6 @@
 {
   "name": "@edjbarron/netapp-chat-component",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "React chat UI component for the netapp-chat-service agentic chat backend (LLM + MCP tool routing).",
   "type": "module",
   "main": "dist/index.cjs",

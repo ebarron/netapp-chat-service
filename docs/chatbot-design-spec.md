@@ -627,16 +627,18 @@ chat-service constructs a system prompt that includes:
 
 ### 6.4 Mode Toggle
 
-**Read-Only Mode (default):**
+**Read-Only Mode:**
 - Information retrieval only
-- Write tools filtered out of LLM context
+- Write tools (and tools without a `ToolAnnotations.ReadOnlyHint`) filtered out of LLM context
 - Toggle shown prominently at top of panel
 
-**Read/Write Mode (explicit enable):**
+**Read/Write Mode (default):**
 - All tools available
 - Write operations require confirmation dialog
 - **Auto-disable timer:** Reverts to read-only after 10 minutes of inactivity
 - Timer display visible when active
+
+> The frontend default is read-write so that MCP servers which don't yet emit `ToolAnnotations` still expose their tools to the LLM. Hosts that want safer defaults can pass `<ChatPanel defaultMode="read-only" />` once their MCP servers are fully annotated.
 
 ### 6.5 Action Confirmation Dialog
 

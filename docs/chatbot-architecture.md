@@ -956,13 +956,15 @@ This gives users fine-grained control: they can allow Harvest (read-only metrics
 
 ### 11.6 Read-Write Mode & Action Confirmation
 
-The chatbot operates in **read-only mode by default**. Write-capable operations require:
+The `<ChatPanel>` opens in **read-write mode by default** (configurable via the `defaultMode` prop — hosts can pass `defaultMode="read-only"` to start safer). Write-capable operations require:
 
-1. **Explicit mode activation**: User toggles to read-write mode in the UI
-2. **Auto-disable timer**: Read-write mode automatically reverts after 10 minutes
+1. **Mode is read-write**: User can toggle to read-only at any time in the UI; if started in read-only, they must explicitly switch to read-write
+2. **Auto-disable timer**: Read-write mode automatically reverts to read-only after 10 minutes
 3. **Action confirmation**: Even in read-write mode, `action-button` execute commands and interest management tools (`save_interest`, `delete_interest`) go through a confirmation flow — the LLM shows what it intends to do and waits for approval
 
 These layers stack: a destructive ONTAP operation requires (a) the ONTAP capability to be Ask or Allow, (b) read-write mode to be active, and (c) user approval of the specific action.
+
+> The default was changed from read-only to read-write in chat-component 0.1.7. The backend filters tools by mode based on each MCP tool's `ToolAnnotations.ReadOnlyHint`; servers that don't yet emit annotations have all their tools dropped in read-only mode, which made the previous default unusable for those deployments. Once your MCP servers are fully annotated, hosts that want stricter defaults can opt back in via `<ChatPanel defaultMode="read-only" />`.
 
 ### 11.7 LLM API Key Security
 

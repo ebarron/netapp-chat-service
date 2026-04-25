@@ -88,7 +88,17 @@ const MODE_TIMEOUT_MS = 10 * 60 * 1000;
  * mode toggle, capabilities, and approval flow.
  * Design ref: docs/chatbot-design-spec.md §5.1, §5.2, §6, §7
  */
-export function useChatPanel() {
+export interface UseChatPanelOptions {
+  /**
+   * Initial mode for the chat panel. Defaults to 'read-write' so that
+   * deployments backed by MCP servers without ToolAnnotations still
+   * expose their tools to the LLM. Users can toggle at runtime via the
+   * existing ModeToggle UI; this only sets the initial value.
+   */
+  defaultMode?: ChatMode;
+}
+
+export function useChatPanel(options?: UseChatPanelOptions) {
   const api = useChatAPI();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
@@ -97,7 +107,7 @@ export function useChatPanel() {
   const abortRef = useRef<AbortController | null>(null);
 
   // Phase 2: Mode toggle
-  const [mode, setModeState] = useState<ChatMode>('read-only');
+  const [mode, setModeState] = useState<ChatMode>(options?.defaultMode ?? 'read-write');
   const modeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [modeTimeLeft, setModeTimeLeft] = useState<number | null>(null);
   const modeStartRef = useRef<number | null>(null);

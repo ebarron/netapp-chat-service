@@ -25,7 +25,7 @@ import {
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { useChatPanel, ChatMessage } from './useChatPanel';
+import { useChatPanel, ChatMessage, type ChatMode } from './useChatPanel';
 import { ModeToggle } from './ModeToggle';
 import { CapabilityControls } from './CapabilityControls';
 import { BookmarkPrompts } from './BookmarkPrompts';
@@ -51,6 +51,12 @@ interface ChatPanelProps {
   bookmarkPrompts?: BookmarkPrompt[];
   /** When true, renders as a full-page layout instead of a Drawer. */
   fullPage?: boolean;
+  /**
+   * Initial chat mode ('read-only' or 'read-write'). Defaults to
+   * 'read-write'. The user can still toggle mode at runtime; this only
+   * sets the initial value.
+   */
+  defaultMode?: ChatMode;
 }
 
 const DEFAULT_SUGGESTED_PROMPTS = [
@@ -71,6 +77,7 @@ export function ChatPanel({
   suggestedPrompts = DEFAULT_SUGGESTED_PROMPTS,
   bookmarkPrompts,
   fullPage = false,
+  defaultMode,
 }: ChatPanelProps) {
   const {
     messages,
@@ -98,7 +105,7 @@ export function ChatPanel({
     activeCanvasTab,
     setActiveCanvasTab,
     closeCanvasTab,
-  } = useChatPanel();
+  } = useChatPanel({ defaultMode });
 
   const [input, setInput] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
