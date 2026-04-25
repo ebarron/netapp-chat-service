@@ -4,6 +4,14 @@ All notable changes to `@edjbarron/netapp-chat-component` are documented in this
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8] - 2026-04-25
+
+### Added
+- `<ChatPanel>` now surfaces `capabilityError` (e.g. tool-budget rejection from `setMode` or a `POST /chat/capabilities` 409) as a dismissible red `Alert` immediately below the mode toggle, in addition to passing it down to `CapabilityControls`. Previously the error was only visible inside the capabilities popover, so users hit by the `setMode` budget block had no visible feedback in the main panel.
+
+### Changed
+- Clarified the read-write budget-block error message: `"Cannot switch to read-write: N tools would be sent (max 128). Open Capabilities and disable an MCP to free up budget."` (was `"Switching to read-write would enable N tools (max 128). Disable an MCP capability before switching mode."`).
+
 ## [0.1.7] - 2026-04-25
 
 ### Added
@@ -47,7 +55,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - `ResourceTableBlock`: tolerate object-shaped column entries from LLM output (`{key, label}`, `{name}`, `{field}`, `{header}`, `{title}`, `{id}` are all normalized; previously a non-string column could crash React rendering).
 
 ## [0.1.0] - 2026-04-22
-
+8]: https://github.com/ebarron/netapp-chat-service/releases/tag/chat-component-v0.1.8
+[0.1.
 ### Added
 - Initial public release of the React chat UI component for the [`netapp-chat-service`](https://github.com/ebarron/netapp-chat-service) backend.
 - Components: `ChatPanel`, `CanvasPanel`, `ModeToggle`, `CapabilityControls`, `ActionConfirmation`, `ToolStatusCard`.

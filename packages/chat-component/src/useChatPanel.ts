@@ -152,8 +152,8 @@ export function useChatPanel(options?: UseChatPanelOptions) {
         const rw = toolBudgets.read_write;
         if (rw.used > rw.max) {
           setCapabilityError(
-            `Switching to read-write would enable ${rw.used} tools (max ${rw.max}). ` +
-              `Disable an MCP capability before switching mode.`,
+            `Cannot switch to read-write: ${rw.used} tools would be sent (max ${rw.max}). ` +
+              `Open Capabilities and disable an MCP to free up budget.`,
           );
           return;
         }

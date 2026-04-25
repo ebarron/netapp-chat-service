@@ -243,6 +243,18 @@ export function ChatPanel({
                 />
               </Group>
             </Group>
+            {capabilityError && (
+              <Alert
+                color="red"
+                variant="light"
+                mx="xs"
+                mt="xs"
+                withCloseButton
+                onClose={clearCapabilityError}
+              >
+                <Text size="xs">{capabilityError}</Text>
+              </Alert>
+            )}
             <Divider />
           </>
         )}
