@@ -36,7 +36,7 @@ import '@mantine/core/styles.css';
 import '@mantine/charts/styles.css';
 import '@edjbarron/netapp-chat-component/styles.css';
 
-const api = createChatAPI({ baseUrl: 'https://your-chat-service.example.com' });
+const api = createChatAPI('https://your-chat-service.example.com/api');
 
 export function App() {
   return (
@@ -48,6 +48,22 @@ export function App() {
   );
 }
 ```
+
+### Auth headers and credentials
+
+`createChatAPI` accepts custom `headers` and a `credentials` mode that are applied to **every** request (including the streaming `POST /chat/message`):
+
+```ts
+const api = createChatAPI('/api', {
+  headers: {
+    Authorization: `Bearer ${token}`,
+    'X-Tenant': 'acme',
+  },
+  credentials: 'same-origin', // defaults to 'include'
+});
+```
+
+If you implement `ChatAPI` yourself instead of using `createChatAPI`, you must implement `stream(path, body, signal?): Promise<Response>` in addition to `get`/`post`/`delete`. The component uses `stream()` for the SSE message endpoint so your transport layer can apply auth uniformly.
 
 ## Backend
 

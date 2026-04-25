@@ -4,6 +4,22 @@ All notable changes to `@edjbarron/netapp-chat-component` are documented in this
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6] - 2026-04-25
+
+### Fixed
+- **`sendMessage` now honors `headers` and `credentials` configured via `createChatAPI`.** Previously the streaming `POST /chat/message` request hand-rolled its own `fetch()` and silently dropped any custom headers (e.g. `Authorization: Bearer ...`, `X-Tenant`) and forced `credentials: 'include'`. Auth-gated and multi-tenant deployments could not use `<ChatPanel>` out of the box — `GET` requests authenticated, but every message send returned 401/403. Reported externally; see commit `c584782`.
+
+### Added
+- New `ChatAPI.stream(path, body, signal?): Promise<Response>` method. The default `createChatAPI` implementation routes the streaming POST through this method using the same configured `headers`/`credentials` as `get`/`post`/`delete`.
+
+### Breaking (type-only, pre-1.0)
+- Custom implementations of the `ChatAPI` interface must add a `stream()` method. Consumers using `createChatAPI` are unaffected.
+
+## [0.1.5] - 2026-04-24
+
+### Added
+- Bookmark prompts with MCP-aware filtering: capability-gated prompt suggestions surfaced in `ChatPanel` based on which MCP tools are currently allowed.
+
 ## [0.1.4] - 2026-04-22
 
 ### Changed
@@ -31,6 +47,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Hook: `useChatPanel`.
 - API: `createChatAPI`, `ChatAPIProvider`, `useChatAPI`.
 
+[0.1.6]: https://github.com/ebarron/netapp-chat-service/releases/tag/chat-component-v0.1.6
+[0.1.5]: https://github.com/ebarron/netapp-chat-service/releases/tag/chat-component-v0.1.5
 [0.1.4]: https://github.com/ebarron/netapp-chat-service/releases/tag/chat-component-v0.1.4
 [0.1.3]: https://github.com/ebarron/netapp-chat-service/releases/tag/chat-component-v0.1.3
 [0.1.2]: https://github.com/ebarron/netapp-chat-service/releases/tag/chat-component-v0.1.2

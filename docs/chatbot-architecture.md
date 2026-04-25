@@ -252,7 +252,7 @@ ChatPanel (Drawer)
 
 ### 3.3 SSE Streaming
 
-The frontend uses `fetch()` with a streaming body reader to consume SSE events from `POST /chat/message`. Events are parsed line-by-line and dispatched:
+The frontend issues the streaming POST through `ChatAPI.stream(path, body, signal)` (default implementation: `fetch()` with the configured `headers`/`credentials`), then reads `response.body` as an SSE stream. Events are parsed line-by-line and dispatched:
 
 | SSE Event | Frontend Action |
 |-----------|----------------|

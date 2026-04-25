@@ -217,6 +217,17 @@ The service is **auth-agnostic**. It expects the host product's auth layer to:
 2. Pass a token (Bearer, cookie, or header) that the chat service can forward to MCP servers
 3. Optionally pass user identity in a header (e.g., `X-Chat-User: ebarron`) for session scoping
 
+From the **frontend** side, host apps inject auth into every chat request (including the streaming `POST /chat/message`) by passing `headers` and/or `credentials` to `createChatAPI`:
+
+```ts
+const api = createChatAPI('/api', {
+  headers: { Authorization: `Bearer ${token}`, 'X-Tenant': 'acme' },
+  credentials: 'same-origin', // defaults to 'include'
+});
+```
+
+All transport — including the SSE stream — routes through `ChatAPI.stream()` so a single config covers both REST and streaming endpoints uniformly.
+
 ```
 User → [Host Auth Proxy] → netapp-chat-service
          (validates token,     (trusts the proxy,
