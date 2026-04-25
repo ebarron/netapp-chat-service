@@ -821,31 +821,31 @@ func TestCapabilityAskModeDenied(t *testing.T) {
 
 func TestFilteredToolsExcludesOff(t *testing.T) {
 	// Unit test filteredTools method directly.
-        tool1 := mcpclient.MockReadOnlyTool("harvest_query", "Harvest query")
-        tool2 := mcpclient.MockReadOnlyTool("ontap_volumes", "ONTAP volumes")
-        router := mcpclient.NewMockRouter([]llm.ToolDef{tool1, tool2})
+	tool1 := mcpclient.MockReadOnlyTool("harvest_query", "Harvest query")
+	tool2 := mcpclient.MockReadOnlyTool("ontap_volumes", "ONTAP volumes")
+	router := mcpclient.NewMockRouter([]llm.ToolDef{tool1, tool2})
 
-        agent := New(nil, router,
-                WithCapabilityFilter(capability.CapabilityMap{
-                        "harvest": capability.StateOff,
-                        "ontap":   capability.StateAllow,
-                }, "read-only"),
-                WithToolServerMap(map[string]string{
-                        "harvest_query": "harvest",
-                        "ontap_volumes": "ontap",
-                }),
-        )
+	agent := New(nil, router,
+		WithCapabilityFilter(capability.CapabilityMap{
+			"harvest": capability.StateOff,
+			"ontap":   capability.StateAllow,
+		}, "read-only"),
+		WithToolServerMap(map[string]string{
+			"harvest_query": "harvest",
+			"ontap_volumes": "ontap",
+		}),
+	)
 
-        filtered, err := agent.filteredTools()
-        if err != nil {
-                t.Fatalf("filteredTools() error = %v", err)
-        }
-        if len(filtered) != 1 {
-                t.Fatalf("filteredTools() = %d tools, want 1", len(filtered))
-        }
-        if filtered[0].Name != "ontap_volumes" {
-                t.Errorf("remaining tool = %q, want %q", filtered[0].Name, "ontap_volumes")
-        }
+	filtered, err := agent.filteredTools()
+	if err != nil {
+		t.Fatalf("filteredTools() error = %v", err)
+	}
+	if len(filtered) != 1 {
+		t.Fatalf("filteredTools() = %d tools, want 1", len(filtered))
+	}
+	if filtered[0].Name != "ontap_volumes" {
+		t.Errorf("remaining tool = %q, want %q", filtered[0].Name, "ontap_volumes")
+	}
 }
 
 func TestFilteredToolsNoFilter(t *testing.T) {
@@ -856,13 +856,13 @@ func TestFilteredToolsNoFilter(t *testing.T) {
 
 	agent := New(nil, router) // no capability filter
 
-        filtered, err := agent.filteredTools()
-        if err != nil {
-                t.Fatalf("filteredTools() error = %v", err)
-        }
-        if len(filtered) != 2 {
-                t.Errorf("filteredTools() = %d tools, want 2", len(filtered))
-        }
+	filtered, err := agent.filteredTools()
+	if err != nil {
+		t.Fatalf("filteredTools() error = %v", err)
+	}
+	if len(filtered) != 2 {
+		t.Errorf("filteredTools() = %d tools, want 2", len(filtered))
+	}
 }
 
 // --- Internal tools tests ---
@@ -1009,10 +1009,10 @@ func TestFilteredToolsIncludesInternalTools(t *testing.T) {
 	}
 
 	ag := New(nil, router, WithInternalTools(internalTools))
-        filtered, err := ag.filteredTools()
-        if err != nil {
-                t.Fatalf("filteredTools() error = %v", err)
-        }
+	filtered, err := ag.filteredTools()
+	if err != nil {
+		t.Fatalf("filteredTools() error = %v", err)
+	}
 	if len(filtered) != 2 {
 		t.Fatalf("filteredTools() = %d, want 2", len(filtered))
 	}
@@ -1127,7 +1127,9 @@ func TestReadWriteOnlyToolsExcludedInReadOnly(t *testing.T) {
 		WithInternalTools(internalTools),
 	)
 	filtered, err := ag.filteredTools()
-	if err != nil { t.Fatalf("filteredTools() error = %v", err) }
+	if err != nil {
+		t.Fatalf("filteredTools() error = %v", err)
+	}
 	names := make(map[string]bool)
 	for _, td := range filtered {
 		names[td.Name] = true
@@ -1165,7 +1167,9 @@ func TestReadWriteOnlyToolsIncludedInReadWrite(t *testing.T) {
 		WithInternalTools(internalTools),
 	)
 	filtered, err := ag.filteredTools()
-	if err != nil { t.Fatalf("filteredTools() error = %v", err) }
+	if err != nil {
+		t.Fatalf("filteredTools() error = %v", err)
+	}
 	names := make(map[string]bool)
 	for _, td := range filtered {
 		names[td.Name] = true

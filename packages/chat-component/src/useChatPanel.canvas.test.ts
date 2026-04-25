@@ -1,4 +1,4 @@
-import { renderHook, act } from '../test-utils';
+import { renderHook, act, createMockChatAPI } from '../test-utils';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import type { CanvasTab } from './useChatPanel';
 import { useChatPanel } from './useChatPanel';
@@ -10,6 +10,21 @@ const makeTab = (id: string, title?: string): CanvasTab => ({
   qualifier: '',
   content: { type: 'object-detail', kind: 'volume', name: title ?? id, sections: [] },
 });
+
+/** Build a minimal SSE-streaming Response for stream() mocks. */
+function makeSSEResponse(): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode('event: done\ndata: {"session_id":"s1"}\n\n'));
+      controller.close();
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream' },
+  });
+}
 
 describe('useChatPanel canvas state', () => {
   beforeEach(() => {
@@ -117,28 +132,15 @@ describe('useChatPanel narrow viewport canvas behavior', () => {
 
 describe('useChatPanel canvas tab summary extraction', () => {
   it('sendMessage includes canvas_tabs with correct shape', async () => {
-    // Mock fetch to capture the request body.
     let capturedBody: Record<string, unknown> | null = null;
-    const mockFetch = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
-      if (init?.body) {
-        capturedBody = JSON.parse(init.body as string);
-      }
-      // Return a minimal SSE response with done event.
-      const encoder = new TextEncoder();
-      const stream = new ReadableStream({
-        start(controller) {
-          controller.enqueue(encoder.encode('event: done\ndata: {"session_id":"s1"}\n\n'));
-          controller.close();
-        },
-      });
-      return new Response(stream, {
-        status: 200,
-        headers: { 'Content-Type': 'text/event-stream' },
-      });
+    const api = createMockChatAPI({
+      stream: vi.fn().mockImplementation(async (_path: string, body: unknown) => {
+        capturedBody = body as Record<string, unknown>;
+        return makeSSEResponse();
+      }),
     });
-    vi.stubGlobal('fetch', mockFetch);
 
-    const { result } = renderHook(() => useChatPanel());
+    const { result } = renderHook(() => useChatPanel(), { api });
 
     // Add a canvas tab with content that has a status field.
     const tab: CanvasTab = {
@@ -171,31 +173,18 @@ describe('useChatPanel canvas tab summary extraction', () => {
       qualifier: 'on SVM svm1',
       status: 'warning',
     });
-
-    vi.unstubAllGlobals();
   });
 
   it('sendMessage omits canvas_tabs when no tabs are open', async () => {
     let capturedBody: Record<string, unknown> | null = null;
-    const mockFetch = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
-      if (init?.body) {
-        capturedBody = JSON.parse(init.body as string);
-      }
-      const encoder = new TextEncoder();
-      const stream = new ReadableStream({
-        start(controller) {
-          controller.enqueue(encoder.encode('event: done\ndata: {"session_id":"s1"}\n\n'));
-          controller.close();
-        },
-      });
-      return new Response(stream, {
-        status: 200,
-        headers: { 'Content-Type': 'text/event-stream' },
-      });
+    const api = createMockChatAPI({
+      stream: vi.fn().mockImplementation(async (_path: string, body: unknown) => {
+        capturedBody = body as Record<string, unknown>;
+        return makeSSEResponse();
+      }),
     });
-    vi.stubGlobal('fetch', mockFetch);
 
-    const { result } = renderHook(() => useChatPanel());
+    const { result } = renderHook(() => useChatPanel(), { api });
 
     await act(async () => {
       await result.current.sendMessage('hello');
@@ -203,7 +192,5 @@ describe('useChatPanel canvas tab summary extraction', () => {
 
     expect(capturedBody).not.toBeNull();
     expect(capturedBody!.canvas_tabs).toBeUndefined();
-
-    vi.unstubAllGlobals();
   });
 });

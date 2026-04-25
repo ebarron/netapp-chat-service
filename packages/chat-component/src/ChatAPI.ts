@@ -16,6 +16,14 @@ export interface ChatAPI {
 
   /** DELETE request — returns parsed JSON. */
   delete(path: string, data?: any): Promise<any>;
+
+  /**
+   * Streaming POST — returns the raw Response so the caller can read
+   * `response.body` as an SSE stream. Uses the same headers/credentials
+   * configured on this ChatAPI. The caller is responsible for status
+   * checking; this method does NOT throw on non-2xx.
+   */
+  stream(path: string, body: any, signal?: AbortSignal): Promise<Response>;
 }
 
 /**
@@ -56,5 +64,16 @@ export function createChatAPI(baseURL: string, options?: {
     get: (path) => request('GET', path),
     post: (path, data) => request('POST', path, data),
     delete: (path, data) => request('DELETE', path, data),
+    stream: (path, body, signal) =>
+      fetch(`${baseURL}${path}`, {
+        method: 'POST',
+        credentials,
+        headers: {
+          'Content-Type': 'application/json',
+          ...headers,
+        },
+        body: JSON.stringify(body),
+        signal,
+      }),
   };
 }

@@ -11,6 +11,7 @@ export function createMockChatAPI(overrides?: Partial<ChatAPI>): ChatAPI {
     get: vi.fn().mockResolvedValue({ configured: true, capabilities: [] }),
     post: vi.fn().mockResolvedValue({}),
     delete: vi.fn().mockResolvedValue({}),
+    stream: vi.fn().mockResolvedValue(new Response('', { status: 200 })),
     ...overrides,
   };
 }

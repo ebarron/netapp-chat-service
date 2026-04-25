@@ -348,18 +348,12 @@ export function useChatPanel() {
           };
         });
 
-        const response = await fetch(`${api.baseURL}/chat/message`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({
-            message: text,
-            session_id: sessionId,
-            mode,
-            canvas_tabs: canvasTabSummaries.length > 0 ? canvasTabSummaries : undefined,
-          }),
-          signal: controller.signal,
-        });
+        const response = await api.stream('/chat/message', {
+          message: text,
+          session_id: sessionId,
+          mode,
+          canvas_tabs: canvasTabSummaries.length > 0 ? canvasTabSummaries : undefined,
+        }, controller.signal);
 
         if (!response.ok || !response.body) {
           const err = await response.text();
@@ -430,7 +424,7 @@ export function useChatPanel() {
         abortRef.current = null;
       }
     },
-    [sessionId, streaming, mode, setMode, canvasTabs]
+    [sessionId, streaming, mode, setMode, canvasTabs, api]
   );
 
   /** Handle a single parsed SSE event. */
