@@ -32,9 +32,12 @@ func (s *StaticDiscoverer) Discover(_ context.Context) ([]ServerConfig, error) {
 // Containers must have the label "mcp.discover=true" and the following
 // additional labels:
 //
-//   - mcp.name       — server name (e.g. "harvest-mcp")
-//   - mcp.endpoint   — HTTP endpoint URL (e.g. "http://harvest-mcp:8082")
-//   - mcp.capability — capability ID (optional, e.g. "harvest")
+//   - mcp.name            — server name (e.g. "harvest-mcp")
+//   - mcp.endpoint        — HTTP endpoint URL (e.g. "http://harvest-mcp:8082")
+//   - mcp.capability      — capability ID (optional, e.g. "harvest")
+//   - mcp.read_only_tools — comma-separated allowlist of tool names to treat
+//                          as read-only when an MCP server doesn't publish
+//                          ToolAnnotations.ReadOnlyHint (optional)
 //
 // Only running containers are considered.
 type DockerDiscoverer struct {
@@ -127,6 +130,7 @@ func (d *DockerDiscoverer) Discover(ctx context.Context) ([]ServerConfig, error)
 	var servers []ServerConfig
 	nameLabel := d.LabelPrefix + "name"
 	endpointLabel := d.LabelPrefix + "endpoint"
+	readOnlyToolsLabel := d.LabelPrefix + "read_only_tools"
 
 	for _, c := range containers {
 		name := c.Labels[nameLabel]
@@ -146,9 +150,19 @@ func (d *DockerDiscoverer) Discover(ctx context.Context) ([]ServerConfig, error)
 			continue
 		}
 
+		var readOnlyTools []string
+		if raw := strings.TrimSpace(c.Labels[readOnlyToolsLabel]); raw != "" {
+			for _, t := range strings.Split(raw, ",") {
+				if t = strings.TrimSpace(t); t != "" {
+					readOnlyTools = append(readOnlyTools, t)
+				}
+			}
+		}
+
 		servers = append(servers, ServerConfig{
-			Name:     name,
-			Endpoint: endpoint,
+			Name:          name,
+			Endpoint:      endpoint,
+			ReadOnlyTools: readOnlyTools,
 		})
 	}
 
@@ -200,7 +214,8 @@ func (r *Router) reconcile(ctx context.Context, discoverer Discoverer) {
 		}
 	}
 
-	// Connect newly discovered servers.
+	// Connect newly discovered servers and reconnect any whose config has
+	// drifted (e.g. ReadOnlyTools allowlist changed via a container label edit).
 	currentSet := make(map[string]bool, len(current))
 	for _, name := range current {
 		currentSet[name] = true
@@ -213,6 +228,50 @@ func (r *Router) reconcile(ctx context.Context, discoverer Discoverer) {
 				r.logger.Warn("mcp discovery: connect failed", "server", name, "error", err)
 			}
 			cancel()
+			continue
+		}
+		// Already connected — detect config drift and reconnect if needed.
+		existing, ok := r.ServerConfigOf(name)
+		if ok && !serverConfigsEqual(existing, cfg) {
+			r.logger.Info("mcp discovery: server config changed, reconnecting",
+				"server", name)
+			connectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			if err := r.Connect(connectCtx, cfg); err != nil {
+				r.logger.Warn("mcp discovery: reconnect failed", "server", name, "error", err)
+			}
+			cancel()
 		}
 	}
+}
+
+// serverConfigsEqual reports whether two ServerConfig values are equivalent
+// for the purpose of detecting whether a reconnect is required.
+func serverConfigsEqual(a, b ServerConfig) bool {
+	if a.Name != b.Name || a.Endpoint != b.Endpoint {
+		return false
+	}
+	if !stringSlicesEqual(a.ReadOnlyTools, b.ReadOnlyTools) {
+		return false
+	}
+	if len(a.Headers) != len(b.Headers) {
+		return false
+	}
+	for k, v := range a.Headers {
+		if b.Headers[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

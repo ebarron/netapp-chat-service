@@ -231,6 +231,19 @@ func (r *Router) ConnectedServers() []string {
 	return names
 }
 
+// ServerConfigOf returns the ServerConfig used to connect the named server,
+// and a bool indicating whether such a server is currently connected.
+// Used by reconcile() to detect config drift.
+func (r *Router) ServerConfigOf(name string) (ServerConfig, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	sc, ok := r.servers[name]
+	if !ok {
+		return ServerConfig{}, false
+	}
+	return sc.cfg, true
+}
+
 // Close disconnects all MCP servers.
 func (r *Router) Close() error {
 	r.mu.Lock()

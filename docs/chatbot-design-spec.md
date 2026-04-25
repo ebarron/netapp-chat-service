@@ -794,7 +794,20 @@ Extend the existing `scopeValues` in Security-Tokens with new scopes:
 When the chatbot is in read-only mode:
 1. chat-service filters the tool list sent to the LLM, excluding tools with write/destructive annotations
 2. If an MCP provides tool annotations (`readOnlyHint`, `destructiveHint`), chat-service uses those — the values are propagated through `mcpclient.convertTool` into `llm.ToolDef.ReadOnlyHint` / `DestructiveHint`
-3. If not annotated, chat-service maintains a per-server allowlist via `mcp_servers[].read_only_tools` in `config.yaml`. Tools listed there are treated as read-only even if the MCP doesn't publish annotations (e.g. Grafana, third-party MCPs)
+3. If not annotated, chat-service maintains a per-server allowlist via `mcp_servers[].read_only_tools` in `config.yaml`. Tools listed there are treated as read-only even if the MCP doesn't publish annotations (e.g. Grafana, third-party MCPs). When `MCP_DISCOVERY=docker`, the same allowlist can be supplied per container via the `mcp.read_only_tools` label (comma-separated, whitespace trimmed):
+
+   ```yaml
+   # compose.yaml
+   services:
+     harvest-mcp:
+       labels:
+         mcp.discover: "true"
+         mcp.name: "harvest-mcp"
+         mcp.endpoint: "http://harvest-mcp:8082/mcp"
+         mcp.read_only_tools: "infrastructure_health,metrics_query,list_metrics"
+   ```
+
+   The discoverer populates `ServerConfig.ReadOnlyTools` from this label; an absent or empty value leaves the allowlist `nil`. Editing the label and waiting one discovery cycle is sufficient to update the allowlist on a running deployment — `reconcile()` detects config drift on existing servers and reconnects them so the new annotations take effect.
 4. Tools that are neither annotated nor on the allowlist default to **write-capable** and are filtered out in read-only mode. Each unannotated tool produces a debug log entry so operators can extend the allowlist
 5. Internal tools registered via `agent.InternalTool` use the explicit `ReadWriteOnly` flag instead of annotations
 6. Grafana MCP has native `--disable-write` support — we run it in read-only mode by default
