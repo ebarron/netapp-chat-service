@@ -151,3 +151,10 @@ func MockTool(name, description string) llm.ToolDef {
 		Schema:      schema,
 	}
 }
+// MockReadOnlyTool returns a MockTool with ReadOnlyHint=true so it survives
+// read-only mode filtering.
+func MockReadOnlyTool(name, description string) llm.ToolDef {
+        t := MockTool(name, description)
+        t.ReadOnlyHint = true
+        return t
+}

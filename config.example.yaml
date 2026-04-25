@@ -15,6 +15,13 @@ mcp_servers:
   - name: ontap-mcp
     url: http://localhost:8083
     capability: ontap
+    # Optional allowlist of tool names to treat as read-only when the MCP
+    # server does not publish ToolAnnotations.ReadOnlyHint. Tools listed here
+    # survive read-only mode filtering; everything else from this server is
+    # treated as write-capable and excluded in read-only mode.
+    # read_only_tools:
+    #   - list_volumes
+    #   - get_volume_stats
 
 capabilities:
   defaults:

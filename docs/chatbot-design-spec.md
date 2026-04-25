@@ -787,13 +787,25 @@ Extend the existing `scopeValues` in Security-Tokens with new scopes:
 
 > **Note:** The chatbot itself is authenticated via the user's existing JWT session (same as all frontend API calls). The scoped tokens above are for external MCP client access (e.g., Claude Desktop connecting to `http://host application/mcp/ontap/`). The chatbot does not use scoped tokens — it connects to MCP containers on the internal Docker network.
 
-### 8.2 Read-Only Enforcement
+### 8.2 Read-Only Enforcement and Tool Budget
 
 When the chatbot is in read-only mode:
 1. chat-service filters the tool list sent to the LLM, excluding tools with write/destructive annotations
-2. If an MCP provides tool annotations (`readOnlyHint`, `destructiveHint`), chat-service uses those
-3. If not annotated, chat-service maintains a local allowlist/denylist per capability
-4. Grafana MCP has native `--disable-write` support — we run it in read-only mode by default
+2. If an MCP provides tool annotations (`readOnlyHint`, `destructiveHint`), chat-service uses those — the values are propagated through `mcpclient.convertTool` into `llm.ToolDef.ReadOnlyHint` / `DestructiveHint`
+3. If not annotated, chat-service maintains a per-server allowlist via `mcp_servers[].read_only_tools` in `config.yaml`. Tools listed there are treated as read-only even if the MCP doesn't publish annotations (e.g. Grafana, third-party MCPs)
+4. Tools that are neither annotated nor on the allowlist default to **write-capable** and are filtered out in read-only mode. Each unannotated tool produces a debug log entry so operators can extend the allowlist
+5. Internal tools registered via `agent.InternalTool` use the explicit `ReadWriteOnly` flag instead of annotations
+6. Grafana MCP has native `--disable-write` support — we run it in read-only mode by default
+
+#### Tool Budget (Hard Cap)
+
+Azure OpenAI rejects requests with more than 128 tools (HTTP 400), and OpenAI accuracy degrades sharply above ~20 tools per turn. To prevent runtime failures and improve LLM quality, chat-service enforces a hard cap of `agent.MaxToolsPerRequest` (= 128) tools per request:
+
+- **Pre-LLM gate:** `(*Agent).filteredTools()` returns `agent.ErrTooManyTools` when the assembled list exceeds the cap. The agent loop emits an `EventError` (mentioning the 128 limit and how to fix) followed by `EventDone` so the SSE stream closes cleanly. The LLM is never called.
+- **API gate:** `POST /chat/capabilities` validates the proposed capability set against the cap before mutating state. If the change would push usage over the budget, it returns **HTTP 409 Conflict** with the structured payload `{message, tool_budget: {used, max, mode, per_capability}}` and leaves state untouched.
+- **Mode gate:** the frontend pre-checks `tool_budgets.read_write` before allowing a mode switch into read-write. If the switch would exceed the cap, the UI displays a blocker error instead of issuing the change.
+- **API surface:** `GET /chat/capabilities` returns per-capability `tools_count` + `read_only_tools_count`, plus a top-level `tool_budget` (for the requested `mode`) and `tool_budgets` (a dual `{read_only, read_write}` preview) so the UI can render the budget bar and predict the impact of toggles without extra round-trips.
+- **UI:** `CapabilityControls` shows a tool-budget progress bar (blue → yellow at 80% → red over budget), per-capability badges (`N tools (M ro)`), and disables Ask/Allow on toggles whose tools alone would exceed the cap.
 
 ### 8.3 ONTAP Cluster Credentials
 

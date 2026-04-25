@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/ebarron/netapp-chat-service/llm"
 )
 
@@ -170,5 +172,38 @@ func TestRouterConnectAllEmpty(t *testing.T) {
 
 	if got := r.ConnectedServers(); len(got) != 0 {
 		t.Errorf("expected 0 connected servers, got %v", got)
+	}
+}
+
+func TestConvertToolPropagatesAnnotations(t *testing.T) {
+	r := NewRouter(nil)
+	destructive := true
+	tool := &mcp.Tool{
+		Name:        "list_volumes",
+		Description: "list",
+		Annotations: &mcp.ToolAnnotations{
+			ReadOnlyHint:    true,
+			DestructiveHint: &destructive,
+		},
+	}
+	def := r.convertTool(tool, "harvest", nil)
+	if !def.ReadOnlyHint {
+		t.Error("expected ReadOnlyHint=true from annotations")
+	}
+	if !def.DestructiveHint {
+		t.Error("expected DestructiveHint=true from annotations")
+	}
+
+	// No annotations + allowlist override.
+	bare := &mcp.Tool{Name: "metric_query", Description: ""}
+	def2 := r.convertTool(bare, "harvest", map[string]bool{"metric_query": true})
+	if !def2.ReadOnlyHint {
+		t.Error("expected allowlist to set ReadOnlyHint=true")
+	}
+
+	// No annotations and not on allowlist → defaults to write.
+	def3 := r.convertTool(bare, "harvest", nil)
+	if def3.ReadOnlyHint {
+		t.Error("expected unannotated tool to default to ReadOnlyHint=false")
 	}
 }

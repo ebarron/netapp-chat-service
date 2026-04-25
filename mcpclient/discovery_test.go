@@ -53,7 +53,7 @@ func TestDockerDiscoverer_Discover(t *testing.T) {
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1.40/containers/json" {
+		if r.URL.Path != "/v1.41/containers/json" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 			http.Error(w, "not found", http.StatusNotFound)
 			return

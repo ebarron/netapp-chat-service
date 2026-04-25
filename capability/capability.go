@@ -35,13 +35,14 @@ func (s State) String() string { return string(s) }
 
 // Capability describes a single MCP capability and its current state.
 type Capability struct {
-	ID          string `json:"id" yaml:"id"`
-	Name        string `json:"name" yaml:"name"`
-	Description string `json:"description" yaml:"description"`
-	State       State  `json:"state" yaml:"state"`
-	Available   bool   `json:"available" yaml:"-"`
-	ToolsCount  int    `json:"tools_count" yaml:"-"`
-	ServerName  string `json:"-" yaml:"server_name"`
+	ID                 string `json:"id" yaml:"id"`
+	Name               string `json:"name" yaml:"name"`
+	Description        string `json:"description" yaml:"description"`
+	State              State  `json:"state" yaml:"state"`
+	Available          bool   `json:"available" yaml:"-"`
+	ToolsCount         int    `json:"tools_count" yaml:"-"`
+	ReadOnlyToolsCount int    `json:"read_only_tools_count" yaml:"-"`
+	ServerName         string `json:"-" yaml:"server_name"`
 }
 
 // DefaultCapabilities returns an empty capability set.

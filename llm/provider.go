@@ -77,6 +77,13 @@ type ToolDef struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	Schema      json.RawMessage `json:"schema"`
+	// ReadOnlyHint indicates the tool does not modify its environment.
+	// Sourced from MCP ToolAnnotations.ReadOnlyHint or per-server allowlist.
+	// Default false — assume tools may write unless explicitly marked safe.
+	ReadOnlyHint bool `json:"read_only_hint,omitempty"`
+	// DestructiveHint indicates the tool may perform destructive updates.
+	// Sourced from MCP ToolAnnotations.DestructiveHint when present.
+	DestructiveHint bool `json:"destructive_hint,omitempty"`
 }
 
 // ToolCall represents the LLM requesting a tool invocation.

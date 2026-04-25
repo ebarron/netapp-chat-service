@@ -37,6 +37,11 @@ type ServerConfig struct {
 	Name     string            `yaml:"name" json:"name"`         // e.g. "harvest-mcp", "ontap-mcp"
 	Endpoint string            `yaml:"endpoint" json:"endpoint"` // e.g. "http://localhost:8082"
 	Headers  map[string]string `yaml:"headers" json:"headers"`   // extra HTTP headers (e.g. auth tokens)
+	// ReadOnlyTools is an allowlist of tool names that should be treated as
+	// read-only for filtering, overriding/supplementing MCP annotations. Use
+	// this for MCPs we don't control (e.g. Grafana, third-party) that don't
+	// publish ToolAnnotations.ReadOnlyHint.
+	ReadOnlyTools []string `yaml:"read_only_tools" json:"read_only_tools,omitempty"`
 }
 
 // Router manages connections to multiple MCP servers. It discovers tools from
@@ -251,6 +256,10 @@ func (r *Router) rebuildToolIndex() {
 	r.toolDefs = nil
 
 	for name, sc := range r.servers {
+		allowSet := make(map[string]bool, len(sc.cfg.ReadOnlyTools))
+		for _, t := range sc.cfg.ReadOnlyTools {
+			allowSet[t] = true
+		}
 		for _, tool := range sc.tools {
 			if prev, exists := r.toolMap[tool.Name]; exists {
 				r.logger.Warn("duplicate MCP tool name, skipping",
@@ -258,19 +267,39 @@ func (r *Router) rebuildToolIndex() {
 				continue
 			}
 			r.toolMap[tool.Name] = name
-			r.toolDefs = append(r.toolDefs, convertTool(tool))
+			r.toolDefs = append(r.toolDefs, r.convertTool(tool, name, allowSet))
 		}
 	}
 }
 
-// convertTool converts an MCP tool to an llm.ToolDef.
-func convertTool(t *mcp.Tool) llm.ToolDef {
+// convertTool converts an MCP tool to an llm.ToolDef. ReadOnlyHint is
+// populated from the MCP tool annotations when present, then overridden by
+// the per-server allowlist. Tools without annotations and not on the
+// allowlist default to ReadOnlyHint=false (i.e. assumed write) so they are
+// filtered out in read-only mode unless explicitly marked safe.
+func (r *Router) convertTool(t *mcp.Tool, serverName string, allowSet map[string]bool) llm.ToolDef {
 	schema, _ := json.Marshal(t.InputSchema)
-	return llm.ToolDef{
+	def := llm.ToolDef{
 		Name:        t.Name,
 		Description: t.Description,
 		Schema:      schema,
 	}
+	switch {
+	case t.Annotations != nil:
+		def.ReadOnlyHint = t.Annotations.ReadOnlyHint
+		if t.Annotations.DestructiveHint != nil {
+			def.DestructiveHint = *t.Annotations.DestructiveHint
+		}
+	case allowSet[t.Name]:
+		// Allowlist override for unannotated tools.
+	default:
+		r.logger.Debug("mcp tool has no annotations, treating as write-capable",
+			"server", serverName, "tool", t.Name)
+	}
+	if allowSet[t.Name] {
+		def.ReadOnlyHint = true
+	}
+	return def
 }
 
 // extractText concatenates all text content blocks from a tool result.

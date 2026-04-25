@@ -11,6 +11,7 @@ const makeCap = (id: string, available = true, state: Capability['state'] = 'all
   state,
   available,
   tools_count: 1,
+  read_only_tools_count: 1,
 });
 
 const bookmarks: BookmarkPrompt[] = [

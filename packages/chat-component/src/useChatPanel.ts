@@ -21,6 +21,21 @@ export interface Capability {
   state: 'off' | 'ask' | 'allow';
   available: boolean;
   tools_count: number;
+  /** Tools annotated as read-only (or in the per-server allowlist). */
+  read_only_tools_count: number;
+}
+
+/** Tool budget summary returned by /chat/capabilities. */
+export interface ToolBudget {
+  used: number;
+  max: number;
+  mode: ChatMode;
+}
+
+/** Per-mode tool budget previews returned by /chat/capabilities. */
+export interface ToolBudgets {
+  read_only: { used: number; max: number };
+  read_write: { used: number; max: number };
 }
 
 /** A pending tool approval event from the SSE stream. */
@@ -90,6 +105,9 @@ export function useChatPanel() {
 
   // Phase 2: Capabilities
   const [capabilities, setCapabilities] = useState<Capability[]>([]);
+  const [toolBudgets, setToolBudgets] = useState<ToolBudgets | null>(null);
+  /** Last error from a capability/mode change attempt (e.g. budget exceeded). */
+  const [capabilityError, setCapabilityError] = useState<string | null>(null);
 
   // Phase 2: Pending approval queue (multiple ask-mode tools can arrive in parallel).
   const [approvalQueue, setApprovalQueue] = useState<PendingApproval[]>([]);
@@ -116,6 +134,21 @@ export function useChatPanel() {
   /** Sets mode and manages auto-disable timer for read-write. */
   const setMode = useCallback(
     (newMode: ChatMode) => {
+      // Block mode switch when it would exceed the LLM tool budget. The
+      // server has authoritative budgets in `toolBudgets`; the UI uses
+      // them as a pre-check so the user gets a clear blocker dialog
+      // instead of a runtime error mid-message.
+      if (newMode === 'read-write' && toolBudgets) {
+        const rw = toolBudgets.read_write;
+        if (rw.used > rw.max) {
+          setCapabilityError(
+            `Switching to read-write would enable ${rw.used} tools (max ${rw.max}). ` +
+              `Disable an MCP capability before switching mode.`,
+          );
+          return;
+        }
+      }
+      setCapabilityError(null);
       setModeState(newMode);
       clearModeTimer();
 
@@ -139,7 +172,7 @@ export function useChatPanel() {
         }, 1000);
       }
     },
-    [clearModeTimer]
+    [clearModeTimer, toolBudgets]
   );
 
   // Cleanup timer on unmount.
@@ -166,29 +199,62 @@ export function useChatPanel() {
     try {
       const data = await api.get('/chat/capabilities');
       setCapabilities(data.capabilities ?? []);
+      setToolBudgets(data.tool_budgets ?? null);
     } catch {
       // Capabilities unavailable — leave empty.
     }
   }, []);
 
-  /** Update a capability state. */
-  const updateCapability = useCallback(async (id: string, state: string) => {
+  /**
+   * Update a capability state. Returns true on success. On failure (e.g. the
+   * change would exceed the LLM's tool budget), the previous state is left
+   * intact and `capabilityError` is populated with the server message so the
+   * UI can show it.
+   */
+  const updateCapability = useCallback(async (id: string, state: string): Promise<boolean> => {
+    setCapabilityError(null);
+    const previous = capabilities.find((c) => c.id === id)?.state;
     try {
-      await api.post('/chat/capabilities', { capabilities: { [id]: state } });
-      // Update local state optimistically.
+      const data = await api.post('/chat/capabilities', {
+        capabilities: { [id]: state },
+        mode,
+      });
       setCapabilities((prev) =>
         prev.map((c) => (c.id === id ? { ...c, state: state as Capability['state'] } : c))
       );
-    } catch {
-      // Revert by re-fetching.
+      // Refresh budgets so the UI reflects the new totals.
       try {
-        const data = await api.get('/chat/capabilities');
-        setCapabilities(data.capabilities ?? []);
+        const fresh = await api.get('/chat/capabilities');
+        setToolBudgets(fresh.tool_budgets ?? null);
       } catch {
         // best-effort
       }
+      void data;
+      return true;
+    } catch (e) {
+      // Try to surface the server's structured error message.
+      let msg = 'Failed to update capability.';
+      if (e instanceof Error && e.message) {
+        try {
+          const parsed = JSON.parse(e.message);
+          msg = parsed.message ?? msg;
+        } catch {
+          msg = e.message;
+        }
+      }
+      setCapabilityError(msg);
+      // Re-fetch to ensure local state matches server.
+      try {
+        const data = await api.get('/chat/capabilities');
+        setCapabilities(data.capabilities ?? []);
+        setToolBudgets(data.tool_budgets ?? null);
+      } catch {
+        // best-effort
+      }
+      void previous;
+      return false;
     }
-  }, []);
+  }, [capabilities, mode]);
 
   /** Approve a pending tool call. */
   const approveAction = useCallback(async () => {
@@ -548,6 +614,9 @@ export function useChatPanel() {
     setMode,
     modeTimeLeft,
     capabilities,
+    toolBudgets,
+    capabilityError,
+    clearCapabilityError: () => setCapabilityError(null),
     fetchCapabilities,
     updateCapability,
     pendingApproval,

@@ -80,6 +80,9 @@ export function ChatPanel({
     setMode,
     modeTimeLeft,
     capabilities,
+    toolBudgets,
+    capabilityError,
+    clearCapabilityError,
     fetchCapabilities,
     updateCapability,
     pendingApproval,
@@ -226,6 +229,10 @@ export function ChatPanel({
                   disabled={!configured}
                   showTraces={showTraces}
                   onShowTracesChange={setShowTraces}
+                  mode={mode}
+                  toolBudgets={toolBudgets}
+                  capabilityError={capabilityError}
+                  onClearCapabilityError={clearCapabilityError}
                 />
               </Group>
             </Group>

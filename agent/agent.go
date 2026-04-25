@@ -8,6 +8,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -24,6 +25,17 @@ import (
 // DefaultMaxIterations is the safety limit for tool-call rounds per user
 // message. After this many iterations the LLM is asked to summarize.
 const DefaultMaxIterations = 10
+
+// MaxToolsPerRequest is the hard cap on tools sent to the LLM per request.
+// Azure OpenAI rejects requests with > 128 tools (HTTP 400), and OpenAI
+// accuracy degrades sharply above ~20 tools per turn. Enforced in
+// (*Agent).filteredTools.
+const MaxToolsPerRequest = 128
+
+// ErrTooManyTools is returned by filteredTools when the assembled tool list
+// exceeds MaxToolsPerRequest. The chat handler should surface a clear
+// message to the user instead of letting the LLM call fail.
+var ErrTooManyTools = errors.New("too many tools enabled")
 
 // maxRateLimitRetries is the number of times to retry after a 429 rate-limit error.
 const maxRateLimitRetries = 2
@@ -234,7 +246,13 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 	// Defer a final flush in case the stream ends mid-buffer.
 	defer interceptor.Flush()
 
-	tools := a.filteredTools()
+	tools, err := a.filteredTools()
+	if err != nil {
+		a.Logger.Error("filteredTools failed", "error", err)
+		emit(Event{Type: EventError, Error: err.Error()})
+		emit(Event{Type: EventDone})
+		return
+	}
 
 	maxIter := a.MaxIterations
 	if maxIter <= 0 {
@@ -953,29 +971,54 @@ func marshalToolInput(input json.RawMessage) string {
 	return string(input)
 }
 
-// filteredTools returns tools from the router, filtered by capability states,
-// plus any internal tools registered on the agent.
-func (a *Agent) filteredTools() []llm.ToolDef {
+// filteredTools returns tools from the router, filtered by capability states
+// and the agent's read-only/read-write mode, plus any internal tools
+// registered on the agent. It returns ErrTooManyTools (wrapped with detail)
+// if the resulting list exceeds MaxToolsPerRequest.
+func (a *Agent) filteredTools() ([]llm.ToolDef, error) {
 	allTools := a.Router.Tools()
-	if a.CapStates == nil {
-		return a.appendInternalTools(allTools)
-	}
 
-	// Filter tools by checking if the tool's capability is off.
-	// We use ToolServerMap to determine which capability each tool belongs to.
-	if a.ToolServerMap == nil {
-		return a.appendInternalTools(allTools)
-	}
-
-	var filtered []llm.ToolDef
-	for _, t := range allTools {
-		capID := a.ToolServerMap[t.Name]
-		if state, ok := a.CapStates[capID]; ok && state == capability.StateOff {
-			continue
+	var mcpTools []llm.ToolDef
+	if a.CapStates == nil || a.ToolServerMap == nil {
+		// No capability filter configured — pass MCP tools through as-is.
+		// Mode filtering only applies when capability filtering is active,
+		// which is how the chat handler always wires the agent in
+		// production.
+		mcpTools = allTools
+	} else {
+		for _, t := range allTools {
+			capID := a.ToolServerMap[t.Name]
+			if state, ok := a.CapStates[capID]; ok && state == capability.StateOff {
+				continue
+			}
+			if a.Mode != "read-write" && !t.ReadOnlyHint {
+				continue
+			}
+			mcpTools = append(mcpTools, t)
 		}
-		filtered = append(filtered, t)
 	}
-	return a.appendInternalTools(filtered)
+
+	tools := a.appendInternalTools(mcpTools)
+
+	if len(tools) > MaxToolsPerRequest {
+		// Collect per-capability counts for diagnostics.
+		perCap := make(map[string]int)
+		if a.ToolServerMap != nil {
+			for _, t := range mcpTools {
+				perCap[a.ToolServerMap[t.Name]]++
+			}
+		}
+		a.Logger.Error("tool budget exceeded",
+			"total", len(tools),
+			"max", MaxToolsPerRequest,
+			"mode", a.Mode,
+			"per_capability", perCap,
+		)
+		return nil, fmt.Errorf("%w: %d enabled, max %d (mode=%s). Disable an MCP capability or switch to read-only mode in chat settings.",
+			ErrTooManyTools, len(tools), MaxToolsPerRequest, a.Mode)
+	}
+
+	return tools, nil
 }
 
 // appendInternalTools adds internal tool definitions to the tool list.

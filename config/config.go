@@ -31,6 +31,10 @@ type MCPServer struct {
 	URL        string            `yaml:"url"`
 	Capability string            `yaml:"capability"`
 	Headers    map[string]string `yaml:"headers"` // extra HTTP headers (e.g. auth tokens)
+	// ReadOnlyTools is an allowlist of tool names treated as read-only when
+	// the server's tools lack proper MCP annotations. Used for filtering in
+	// read-only mode.
+	ReadOnlyTools []string `yaml:"read_only_tools"`
 }
 
 // CapabilitiesConfig defines capability defaults.
@@ -127,9 +131,10 @@ func (c *Config) ServerConfigs() []mcpclient.ServerConfig {
 	configs := make([]mcpclient.ServerConfig, len(c.MCPServers))
 	for i, s := range c.MCPServers {
 		configs[i] = mcpclient.ServerConfig{
-			Name:     s.Name,
-			Endpoint: s.URL,
-			Headers:  s.Headers,
+			Name:          s.Name,
+			Endpoint:      s.URL,
+			Headers:       s.Headers,
+			ReadOnlyTools: s.ReadOnlyTools,
 		}
 	}
 	return configs

@@ -211,57 +211,185 @@ func (s *Server) DeleteChatSession(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetChatCapabilities returns the current capability states.
+//
+// Optional query param: ?mode=read-only|read-write (default read-only).
+// The response includes per-capability tools_count + read_only_tools_count
+// plus a tool_budget summary so the UI can show usage and prevent enables
+// that would exceed the LLM's hard 128-tool limit.
 func (s *Server) GetChatCapabilities(w http.ResponseWriter, r *http.Request) {
+	mode := r.URL.Query().Get("mode")
+	if mode != "read-write" {
+		mode = "read-only"
+	}
+
 	caps := s.deps.Capabilities
 	router := s.deps.Router
 
-	totalTools := 0
 	connectedServers := router.ConnectedServers()
 	serverConnected := make(map[string]bool, len(connectedServers))
 	for _, name := range connectedServers {
 		serverConnected[name] = true
 	}
 
+	// Group all router tools by server name so we can compute totals and
+	// read-only counts per capability without scanning N×M times.
+	allTools := router.Tools()
 	toolMap := router.ToolMap()
+	type counts struct{ total, readOnly int }
+	perServer := make(map[string]*counts)
+	for _, t := range allTools {
+		srv, ok := toolMap[t.Name]
+		if !ok {
+			continue
+		}
+		c := perServer[srv]
+		if c == nil {
+			c = &counts{}
+			perServer[srv] = c
+		}
+		c.total++
+		if t.ReadOnlyHint {
+			c.readOnly++
+		}
+	}
+
+	usedReadOnly := 0
+	usedReadWrite := 0
 	for i := range caps {
 		caps[i].Available = serverConnected[caps[i].ServerName]
-		count := 0
-		for _, serverName := range toolMap {
-			if serverName == caps[i].ServerName {
-				count++
-			}
+		c := perServer[caps[i].ServerName]
+		if c != nil {
+			caps[i].ToolsCount = c.total
+			caps[i].ReadOnlyToolsCount = c.readOnly
+		} else {
+			caps[i].ToolsCount = 0
+			caps[i].ReadOnlyToolsCount = 0
 		}
-		caps[i].ToolsCount = count
-		totalTools += count
+		if caps[i].State == capability.StateOff {
+			continue
+		}
+		usedReadOnly += caps[i].ReadOnlyToolsCount
+		usedReadWrite += caps[i].ToolsCount
+	}
+
+	used := usedReadOnly
+	if mode == "read-write" {
+		used = usedReadWrite
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"capabilities": caps,
-		"total_tools":  totalTools,
+		"total_tools":  used,
+		"tool_budget": map[string]any{
+			"used": used,
+			"max":  agent.MaxToolsPerRequest,
+			"mode": mode,
+		},
+		// Both-mode budgets so the UI can preview the impact of a mode
+		// switch without an extra round-trip.
+		"tool_budgets": map[string]any{
+			"read_only":  map[string]int{"used": usedReadOnly, "max": agent.MaxToolsPerRequest},
+			"read_write": map[string]int{"used": usedReadWrite, "max": agent.MaxToolsPerRequest},
+		},
 	})
 }
 
 // PostChatCapabilities updates capability states.
+//
+// Validates that the resulting tool count does not exceed
+// agent.MaxToolsPerRequest in the requested mode (defaults to read-only).
+// Returns 409 with a helpful message when the change would blow the budget,
+// without mutating server state.
 func (s *Server) PostChatCapabilities(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Capabilities map[string]string `json:"capabilities"`
+		Mode         string            `json:"mode,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "invalid request body"})
 		return
 	}
 
-	for i := range s.deps.Capabilities {
-		cap := &s.deps.Capabilities[i]
-		if newState, ok := body.Capabilities[cap.ID]; ok {
+	mode := body.Mode
+	if mode != "read-write" {
+		mode = "read-only"
+	}
+
+	// Build the proposed capability set without mutating shared state.
+	proposed := make([]capability.Capability, len(s.deps.Capabilities))
+	copy(proposed, s.deps.Capabilities)
+	for i := range proposed {
+		if newState, ok := body.Capabilities[proposed[i].ID]; ok {
 			st := capability.State(newState)
 			if st.Valid() {
-				cap.State = st
+				proposed[i].State = st
 			}
 		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"message": "capabilities updated"})
+	// Compute the resulting tool count.
+	used, perCap := computeToolBudget(proposed, mode, s.deps.Router)
+	if used > agent.MaxToolsPerRequest {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"message": fmt.Sprintf(
+				"Enabling these capabilities would use %d tools (max %d) in %s mode. Disable a capability or switch mode to fit within the budget.",
+				used, agent.MaxToolsPerRequest, mode,
+			),
+			"tool_budget": map[string]any{
+				"used":           used,
+				"max":            agent.MaxToolsPerRequest,
+				"mode":           mode,
+				"per_capability": perCap,
+			},
+		})
+		return
+	}
+
+	// Commit the change.
+	for i := range s.deps.Capabilities {
+		s.deps.Capabilities[i].State = proposed[i].State
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message": "capabilities updated",
+		"tool_budget": map[string]any{
+			"used": used,
+			"max":  agent.MaxToolsPerRequest,
+			"mode": mode,
+		},
+	})
+}
+
+// computeToolBudget returns the total number of tools that would be sent to
+// the LLM given the supplied capability states and mode, plus a per-capability
+// breakdown for diagnostics. Internal tools are not counted here — they
+// account for a small fixed overhead (typically 3-7).
+func computeToolBudget(caps []capability.Capability, mode string, router mcpclient.ToolRouter) (int, map[string]int) {
+	srvToCap := make(map[string]string, len(caps))
+	off := make(map[string]bool, len(caps))
+	for _, c := range caps {
+		srvToCap[c.ServerName] = c.ID
+		if c.State == capability.StateOff {
+			off[c.ID] = true
+		}
+	}
+
+	perCap := make(map[string]int)
+	total := 0
+	toolMap := router.ToolMap()
+	for _, t := range router.Tools() {
+		srv := toolMap[t.Name]
+		capID, ok := srvToCap[srv]
+		if !ok || off[capID] {
+			continue
+		}
+		if mode != "read-write" && !t.ReadOnlyHint {
+			continue
+		}
+		perCap[capID]++
+		total++
+	}
+	return total, perCap
 }
 
 // PostChatApprove approves a pending tool call.
