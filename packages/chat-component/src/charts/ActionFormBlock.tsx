@@ -41,9 +41,10 @@ export function ActionFormBlock({ data, onAction, readOnly }: ActionFormBlockPro
   const setField = (key: string, val: string) =>
     setValues((prev) => ({ ...prev, [key]: val }));
 
-  // Render every field in the same responsive grid; checkboxes flow inline
-  // with selects/text inputs so the form stays compact.
-  const allFields = data.fields;
+  // Split inputs from the monitoring switch so the switch can sit alone on the
+  // last row and never get visually paired with an unrelated select.
+  const inputFields = data.fields.filter((f) => f.type !== 'checkbox');
+  const switchFields = data.fields.filter((f) => f.type === 'checkbox');
 
   const renderField = (field: typeof data.fields[number]) =>
     field.type === 'select' ? (
@@ -80,18 +81,21 @@ export function ActionFormBlock({ data, onAction, readOnly }: ActionFormBlockPro
 
   return (
     <Stack gap="sm" role="group" aria-label="Provisioning form" maw={560}>
-      {allFields.length > 0 && (
+      {inputFields.length > 0 && (
         <SimpleGrid
           cols={{
             base: 1,
-            xs: Math.min(allFields.length, 2),
-            sm: Math.min(allFields.length, 3),
+            xs: Math.min(inputFields.length, 2),
+            sm: Math.min(inputFields.length, 3),
           }}
           spacing="xs"
           verticalSpacing="xs"
         >
-          {allFields.map(renderField)}
+          {inputFields.map(renderField)}
         </SimpleGrid>
+      )}
+      {switchFields.length > 0 && (
+        <Stack gap="xs">{switchFields.map(renderField)}</Stack>
       )}
       <Divider />
       <Group justify="space-between" align="center" wrap="nowrap">
