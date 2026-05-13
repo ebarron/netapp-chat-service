@@ -238,11 +238,6 @@ export const volumeProvision = {
         params: { svm: 'svm_prod', aggregate: 'aggr_ssd_east01', size: '2TB' },
       },
       secondary: { label: 'Show other options', action: 'message' as const, message: 'Show me provisioning options on other clusters.' },
-      recheck: {
-        label: 'Re-check Placement',
-        fields: ['qos_policy'],
-        message: 'Re-check provisioning for a {size} volume named {volume_name} with QoS policy {qos_policy} on my fastest storage',
-      },
     },
   ],
 };

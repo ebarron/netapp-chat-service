@@ -26,11 +26,6 @@ const baseData: ActionFormData = {
     params: { svm: 'svm_prod', aggregate: 'aggr1', size: '2TB' },
   },
   secondary: { label: 'Show other options', action: 'message', message: 'Show me provisioning options on other clusters.' },
-  recheck: {
-    label: 'Re-check Placement',
-    fields: ['qos_policy'],
-    message: 'Re-check provisioning for a {size} volume named {volume_name} with QoS policy {qos_policy}',
-  },
 };
 
 describe('ActionFormBlock', () => {
@@ -88,7 +83,7 @@ describe('ActionFormBlock', () => {
   });
 
   it('renders without secondary button', () => {
-    const { secondary: _, recheck: _r, ...rest } = baseData;
+    const { secondary: _, ...rest } = baseData;
     const data: ActionFormData = rest as ActionFormData;
     render(<ActionFormBlock data={data} />);
     expect(screen.getByText('Provision on cluster-east')).toBeDefined();
@@ -101,30 +96,6 @@ describe('ActionFormBlock', () => {
     render(<ActionFormBlock data={baseData} onAction={onAction} />);
     await user.click(screen.getByText('Provision on cluster-east'));
     expect(onAction).not.toHaveBeenCalled();
-  });
-
-  it('does not show recheck button initially', () => {
-    render(<ActionFormBlock data={baseData} />);
-    expect(screen.queryByText('Re-check Placement')).toBeNull();
-  });
-
-  it('shows recheck button when triggered select field changes', async () => {
-    const user = userEvent.setup();
-    render(<ActionFormBlock data={baseData} />);
-    await pickSelectOption(user, 'Performance Policy', 'gold');
-    expect(screen.getByText('Re-check Placement')).toBeDefined();
-  });
-
-  it('recheck button sends interpolated message', async () => {
-    const user = userEvent.setup();
-    const onAction = vi.fn();
-    render(<ActionFormBlock data={baseData} onAction={onAction} />);
-    await user.type(screen.getByLabelText('Volume Name'), 'my_vol');
-    await pickSelectOption(user, 'Performance Policy', 'gold');
-    await user.click(screen.getByText('Re-check Placement'));
-    expect(onAction).toHaveBeenCalledWith(
-      'Re-check provisioning for a 2TB volume named my_vol with QoS policy gold'
-    );
   });
 
   it('includes select values in submit params when selected', async () => {

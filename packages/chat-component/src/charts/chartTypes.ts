@@ -167,11 +167,6 @@ export interface ActionFormData {
     action: 'message';
     message: string;
   };
-  recheck?: {
-    label: string;
-    fields: string[];
-    message: string;
-  };
 }
 
 // --- Object Detail Types (§3.2–3.3 of chatbot-object-detail-design.md) ---
