@@ -207,3 +207,64 @@ func TestConvertToolPropagatesAnnotations(t *testing.T) {
 		t.Error("expected unannotated tool to default to ReadOnlyHint=false")
 	}
 }
+
+func TestIsStaleSessionErr(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		// nil errors must never be treated as stale.
+		{"nil", nil, false},
+
+		// Real error strings observed from the upstream MCP SDK / SSE
+		// transport when an MCP server is restarted out from under us.
+		// These are the messages the retry path must catch.
+		{"k8s session not found",
+			errors.New(`tool call "list_registered_clusters" failed: connection closed: calling "tools/call": client is closing: standalone SSE stream: failed to connect (session ID: MZBRFXDAFPKYBEWV2DDSKD6GWO): session not found`),
+			true},
+		{"client is closing alone",
+			errors.New("client is closing"), true},
+		{"session terminated", errors.New("Session Terminated"), true},
+		{"unknown session", errors.New("rpc error: unknown session ABC"), true},
+		{"invalid session", errors.New("invalid session id"), true},
+		{"session is closing", errors.New("session is closing"), true},
+
+		// Errors that must NOT trigger a retry. Surfacing transport-down
+		// or auth errors as "stale session" would mask real problems.
+		{"connection refused",
+			errors.New("dial tcp 127.0.0.1:8085: connect: connection refused"), false},
+		{"unauthorized", errors.New("401 Unauthorized"), false},
+		{"timeout",
+			errors.New("context deadline exceeded"), false},
+		{"empty", errors.New(""), false},
+		{"unrelated 500", errors.New("internal server error"), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isStaleSessionErr(tt.err); got != tt.want {
+				t.Errorf("isStaleSessionErr(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestContainsFold(t *testing.T) {
+	tests := []struct {
+		s, sub string
+		want   bool
+	}{
+		{"Session Not Found", "session not found", true},
+		{"SESSION NOT FOUND", "session not found", true},
+		{"abc session not found xyz", "session not found", true},
+		{"sess", "session", false},
+		{"hello", "", true},
+		{"", "x", false},
+	}
+	for _, tt := range tests {
+		if got := containsFold(tt.s, tt.sub); got != tt.want {
+			t.Errorf("containsFold(%q, %q) = %v, want %v", tt.s, tt.sub, got, tt.want)
+		}
+	}
+}

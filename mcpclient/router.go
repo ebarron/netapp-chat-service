@@ -175,6 +175,14 @@ func (r *Router) Tools() []llm.ToolDef {
 
 // CallTool routes a tool call to the correct MCP server and returns the result
 // as a string (text content concatenated).
+//
+// If the underlying MCP session has gone stale (the server was restarted out
+// from under us, or its session bookkeeping was lost — common signature is a
+// "session not found" / "session terminated" error from the SSE transport),
+// CallTool transparently reconnects the server and retries the call once.
+// This keeps tool calls working across MCP server pod rolls / container
+// restarts without requiring the caller (or the deployment topology) to know
+// anything about the underlying transport.
 func (r *Router) CallTool(ctx context.Context, tc llm.ToolCall) (string, error) {
 	r.mu.RLock()
 	serverName, ok := r.toolMap[tc.Name]
@@ -193,10 +201,30 @@ func (r *Router) CallTool(ctx context.Context, tc llm.ToolCall) (string, error) 
 		}
 	}
 
-	result, err := sc.session.CallTool(ctx, &mcp.CallToolParams{
-		Name:      tc.Name,
-		Arguments: args,
-	})
+	params := &mcp.CallToolParams{Name: tc.Name, Arguments: args}
+
+	result, err := sc.session.CallTool(ctx, params)
+	if err != nil && isStaleSessionErr(err) {
+		// The MCP server was restarted under us. Re-establish the session
+		// using the same ServerConfig and retry the call exactly once.
+		r.logger.Warn("mcp session stale, reconnecting and retrying",
+			"server", serverName, "tool", tc.Name, "error", err)
+		if rcErr := r.Connect(ctx, sc.cfg); rcErr != nil {
+			// Reconnect failed — surface the original stale-session error
+			// (it's more diagnostic than the reconnect error).
+			return "", fmt.Errorf("tool call %q failed and reconnect failed (%v): %w",
+				tc.Name, rcErr, err)
+		}
+		// Re-fetch sc — Connect replaced the underlying session.
+		r.mu.RLock()
+		sc = r.servers[serverName]
+		r.mu.RUnlock()
+		if sc == nil {
+			return "", fmt.Errorf("tool call %q failed: server %q vanished after reconnect: %w",
+				tc.Name, serverName, err)
+		}
+		result, err = sc.session.CallTool(ctx, params)
+	}
 	if err != nil {
 		return "", fmt.Errorf("tool call %q failed: %w", tc.Name, err)
 	}
@@ -206,6 +234,70 @@ func (r *Router) CallTool(ctx context.Context, tc llm.ToolCall) (string, error) 
 	}
 
 	return extractText(result), nil
+}
+
+// isStaleSessionErr reports whether an error from the MCP transport indicates
+// that our cached session ID is no longer recognised by the server (typically
+// because the server was restarted). The check is deliberately substring-based
+// because the upstream SDK wraps these errors with transport-layer context
+// (HTTP status, session ID) that varies between transports.
+//
+// Matching is conservative — we only retry on phrases that unambiguously mean
+// "your session is gone, but a fresh one would work". Network-down and
+// permission errors are intentionally NOT matched: those should propagate to
+// the caller without a retry.
+func isStaleSessionErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, marker := range staleSessionMarkers {
+		if containsFold(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+var staleSessionMarkers = []string{
+	"session not found",
+	"session terminated",
+	"session is closing",
+	"client is closing",
+	"unknown session",
+	"invalid session",
+}
+
+// containsFold is a tiny case-insensitive Contains. Keeps the dependency
+// surface zero (no strings import added just for this).
+func containsFold(s, substr string) bool {
+	if len(substr) == 0 {
+		return true
+	}
+	if len(s) < len(substr) {
+		return false
+	}
+	// Cheap ASCII fold.
+	for i := 0; i+len(substr) <= len(s); i++ {
+		match := true
+		for j := 0; j < len(substr); j++ {
+			a, b := s[i+j], substr[j]
+			if a >= 'A' && a <= 'Z' {
+				a += 'a' - 'A'
+			}
+			if b >= 'A' && b <= 'Z' {
+				b += 'a' - 'A'
+			}
+			if a != b {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }
 
 // ToolMap returns a copy of the tool-name-to-server-name mapping.
