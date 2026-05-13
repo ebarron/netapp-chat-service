@@ -4,6 +4,11 @@ All notable changes to `@edjbarron/netapp-chat-component` are documented in this
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.12] - 2026-05-13
+
+### Changed
+- `ActionFormBlock` now lays out input fields in up to 3 columns on `sm`+ viewports (was capped at 2). Reclaims vertical space in dense provisioning forms while still collapsing to 2/1 columns at `xs`/`base`.
+
 ## [0.1.8] - 2026-04-25
 
 ### Added

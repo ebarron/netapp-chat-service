@@ -82,7 +82,15 @@ export function ActionFormBlock({ data, onAction, readOnly }: ActionFormBlockPro
   return (
     <Stack gap="sm" role="group" aria-label="Provisioning form" maw={560}>
       {inputFields.length > 0 && (
-        <SimpleGrid cols={{ base: 1, xs: inputFields.length > 1 ? 2 : 1 }} spacing="xs" verticalSpacing="xs">
+        <SimpleGrid
+          cols={{
+            base: 1,
+            xs: Math.min(inputFields.length, 2),
+            sm: Math.min(inputFields.length, 3),
+          }}
+          spacing="xs"
+          verticalSpacing="xs"
+        >
           {inputFields.map(renderField)}
         </SimpleGrid>
       )}
