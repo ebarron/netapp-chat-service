@@ -476,8 +476,14 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 				}
 
 				// Check ask mode: if the capability is in Ask state, request approval.
+				// In StateAskOnWrite, only require approval for write tools (a tool is
+				// considered read-only when its ReadOnlyHint annotation is true; tools
+				// without the hint are treated as writes).
 				if a.CapStates != nil && capID != "" {
-					if state, ok := a.CapStates[capID]; ok && state == capability.StateAsk {
+					state, ok := a.CapStates[capID]
+					needsApproval := ok && (state == capability.StateAsk ||
+						(state == capability.StateAskOnWrite && !a.isReadOnlyTool(tc.Name)))
+					if needsApproval {
 						if a.ApprovalFunc != nil {
 							approved := a.ApprovalFunc(capID, tc.Name, tc)
 							if !approved {
@@ -688,6 +694,14 @@ func BuildSystemPrompt(cfg SystemPromptConfig, router mcpclient.ToolRouter, inte
 		prompt += ", " + cfg.ProductDescription
 	}
 	prompt += "\n\n"
+
+	// Authoritative wall-clock time. The LLM's training-data cutoff makes it
+	// unreliable at guessing "now" — supplying both RFC3339 and Unix epoch
+	// seconds prevents stale timestamps in metrics_range_query calls (which
+	// silently return empty result sets when `end` is in the past).
+	now := time.Now().UTC()
+	prompt += fmt.Sprintf("Current time: %s (Unix epoch seconds: %d). Use this as \"now\" for any time-windowed query (e.g. metrics_range_query `end` parameter). Do NOT use a date from your training data.\n\n",
+		now.Format(time.RFC3339), now.Unix())
 
 	prompt += `Your role:
 - Help administrators understand their storage infrastructure health
@@ -971,13 +985,25 @@ func marshalToolInput(input json.RawMessage) string {
 	return string(input)
 }
 
+// isReadOnlyTool reports whether the tool with the given name is annotated
+// as read-only by the connected MCP server. Tools that are not present
+// (e.g. internal tools) are reported as not read-only so that ask-on-write
+// errs on the side of prompting.
+func (a *Agent) isReadOnlyTool(name string) bool {
+	for _, t := range a.Router.Tools() {
+		if t.Name == name {
+			return t.ReadOnlyHint
+		}
+	}
+	return false
+}
+
 // filteredTools returns tools from the router, filtered by capability states
 // and the agent's read-only/read-write mode, plus any internal tools
 // registered on the agent. It returns ErrTooManyTools (wrapped with detail)
 // if the resulting list exceeds MaxToolsPerRequest.
 func (a *Agent) filteredTools() ([]llm.ToolDef, error) {
 	allTools := a.Router.Tools()
-
 	var mcpTools []llm.ToolDef
 	if a.CapStates == nil || a.ToolServerMap == nil {
 		// No capability filter configured — pass MCP tools through as-is.
@@ -988,10 +1014,15 @@ func (a *Agent) filteredTools() ([]llm.ToolDef, error) {
 	} else {
 		for _, t := range allTools {
 			capID := a.ToolServerMap[t.Name]
-			if state, ok := a.CapStates[capID]; ok && state == capability.StateOff {
+			state, hasState := a.CapStates[capID]
+			if hasState && state == capability.StateOff {
 				continue
 			}
-			if a.Mode != "read-write" && !t.ReadOnlyHint {
+			// Write tools are sent to the LLM only when the global mode is
+			// read-write OR this capability is in ask-on-write state (which
+			// promises an interactive approval before any write executes).
+			allowWrites := a.Mode == "read-write" || (hasState && state == capability.StateAskOnWrite)
+			if !allowWrites && !t.ReadOnlyHint {
 				continue
 			}
 			mcpTools = append(mcpTools, t)

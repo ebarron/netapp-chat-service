@@ -18,7 +18,7 @@ export interface Capability {
   id: string;
   name: string;
   description: string;
-  state: 'off' | 'ask' | 'allow';
+  state: 'off' | 'ask' | 'ask-on-write' | 'allow';
   available: boolean;
   tools_count: number;
   /** Tools annotated as read-only (or in the per-server allowlist). */

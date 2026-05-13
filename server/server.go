@@ -270,6 +270,11 @@ func (s *Server) GetChatCapabilities(w http.ResponseWriter, r *http.Request) {
 		}
 		usedReadOnly += caps[i].ReadOnlyToolsCount
 		usedReadWrite += caps[i].ToolsCount
+		// Ask-on-write capabilities surface writes to the LLM regardless of
+		// the global mode, so charge them against the read-only budget too.
+		if caps[i].State == capability.StateAskOnWrite {
+			usedReadOnly += caps[i].ToolsCount - caps[i].ReadOnlyToolsCount
+		}
 	}
 
 	used := usedReadOnly
@@ -367,10 +372,14 @@ func (s *Server) PostChatCapabilities(w http.ResponseWriter, r *http.Request) {
 func computeToolBudget(caps []capability.Capability, mode string, router mcpclient.ToolRouter) (int, map[string]int) {
 	srvToCap := make(map[string]string, len(caps))
 	off := make(map[string]bool, len(caps))
+	askOnWrite := make(map[string]bool, len(caps))
 	for _, c := range caps {
 		srvToCap[c.ServerName] = c.ID
-		if c.State == capability.StateOff {
+		switch c.State {
+		case capability.StateOff:
 			off[c.ID] = true
+		case capability.StateAskOnWrite:
+			askOnWrite[c.ID] = true
 		}
 	}
 
@@ -383,7 +392,11 @@ func computeToolBudget(caps []capability.Capability, mode string, router mcpclie
 		if !ok || off[capID] {
 			continue
 		}
-		if mode != "read-write" && !t.ReadOnlyHint {
+		// Write tools count toward the budget when the global mode is
+		// read-write OR this capability is ask-on-write (writes are sent
+		// to the LLM in both cases).
+		allowWrites := mode == "read-write" || askOnWrite[capID]
+		if !allowWrites && !t.ReadOnlyHint {
 			continue
 		}
 		perCap[capID]++

@@ -819,6 +819,74 @@ func TestCapabilityAskModeDenied(t *testing.T) {
 	}
 }
 
+func TestCapabilityAskOnWrite(t *testing.T) {
+	// In StateAskOnWrite, read-only tools execute autonomously and write
+	// tools require approval. Both should appear in the LLM's tool list
+	// even when the global mode is read-only.
+	readTool := mcpclient.MockReadOnlyTool("metrics_query", "Read metrics")
+	writeTool := mcpclient.MockTool("create_volume", "Provision a volume")
+	router := mcpclient.NewMockRouter([]llm.ToolDef{readTool, writeTool})
+	router.SetResult("metrics_query", "read result")
+	router.SetResult("create_volume", "write result")
+	router.SetServers([]string{"ontap-mcp"})
+
+	provider := &llm.MockProvider{
+		ProviderName: "mock",
+		Responses: [][]llm.StreamEvent{
+			llm.MockToolCallResponse("call-r", "metrics_query", map[string]any{"q": "test"}),
+			llm.MockToolCallResponse("call-w", "create_volume", map[string]any{"size": "1g"}),
+			llm.MockTextResponse("Done."),
+		},
+	}
+
+	capStates := capability.CapabilityMap{"ontap": capability.StateAskOnWrite}
+	toolServerMap := map[string]string{
+		"metrics_query": "ontap",
+		"create_volume": "ontap",
+	}
+
+	approvals := []string{}
+	agent := New(provider, router,
+		WithCapabilityFilter(capStates, "read-only"),
+		WithToolServerMap(toolServerMap),
+		WithApprovalFunc(func(capID, toolName string, tc llm.ToolCall) bool {
+			approvals = append(approvals, toolName)
+			return true
+		}),
+	)
+
+	// Confirm both tools were exposed to the LLM despite read-only global mode.
+	if len(provider.Calls) > 0 {
+		// Calls populated after Run; check after.
+	}
+
+	messages := []llm.Message{{Role: llm.RoleUser, Content: "Read then write"}}
+	_ = collectEvents(t, agent, messages)
+
+	if len(provider.Calls) == 0 {
+		t.Fatal("provider was not called")
+	}
+	gotNames := map[string]bool{}
+	for _, td := range provider.Calls[0].Tools {
+		gotNames[td.Name] = true
+	}
+	if !gotNames["metrics_query"] || !gotNames["create_volume"] {
+		t.Errorf("LLM tools = %v, want both metrics_query and create_volume", gotNames)
+	}
+
+	// Only the write tool should have triggered approval.
+	if len(approvals) != 1 || approvals[0] != "create_volume" {
+		t.Errorf("approvals = %v, want [create_volume]", approvals)
+	}
+
+	// Both tools should have actually executed (read auto-allowed,
+	// write approved).
+	calls := router.Calls()
+	if len(calls) != 2 {
+		t.Errorf("router calls = %d, want 2", len(calls))
+	}
+}
+
 func TestFilteredToolsExcludesOff(t *testing.T) {
 	// Unit test filteredTools method directly.
 	tool1 := mcpclient.MockReadOnlyTool("harvest_query", "Harvest query")

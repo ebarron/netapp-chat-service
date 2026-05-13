@@ -21,6 +21,7 @@ interface CapabilityControlsProps {
 const STATE_OPTIONS = [
   { label: 'Off', value: 'off' },
   { label: 'Ask', value: 'ask' },
+  { label: 'Ask on write', value: 'ask-on-write' },
   { label: 'Allow', value: 'allow' },
 ];
 
@@ -61,7 +62,10 @@ export function CapabilityControls({
   const wouldExceed = (cap: Capability): boolean => {
     if (!budget) return false;
     if (cap.state !== 'off') return false; // already counted
-    const add = mode === 'read-write' ? cap.tools_count : cap.read_only_tools_count;
+    // The server enforces the real budget per state+mode. We approximate
+    // here using the larger possible count so we never under-warn — the
+    // user can still attempt and the server will reject with a message.
+    const add = mode === 'read-write' ? cap.tools_count : Math.max(cap.read_only_tools_count, cap.tools_count);
     return budget.used + add > budget.max;
   };
 

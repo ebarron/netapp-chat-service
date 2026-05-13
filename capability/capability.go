@@ -17,6 +17,12 @@ const (
 	StateOff State = "off"
 	// StateAsk requires user approval for every tool invocation.
 	StateAsk State = "ask"
+	// StateAskOnWrite permits read-only tools to execute autonomously and
+	// requires user approval for write tools. A tool is considered
+	// read-only when its MCP ToolAnnotations.ReadOnlyHint is true or it
+	// appears in the server's read_only_tools allowlist; tools without
+	// either marker are treated as writes.
+	StateAskOnWrite State = "ask-on-write"
 	// StateAllow permits autonomous tool execution.
 	StateAllow State = "allow"
 )
@@ -24,7 +30,7 @@ const (
 // Valid returns true if s is a recognized state.
 func (s State) Valid() bool {
 	switch s {
-	case StateOff, StateAsk, StateAllow:
+	case StateOff, StateAsk, StateAskOnWrite, StateAllow:
 		return true
 	}
 	return false
