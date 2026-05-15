@@ -152,8 +152,7 @@ func TestParse_OutputTarget(t *testing.T) {
 func TestBuiltinInterests_CanvasTarget(t *testing.T) {
 	// Verify built-in interests with output_target: canvas parse correctly.
 	cat := NewCatalog(nil)
-	enabled := map[string]bool{"metrics": true, "storage": true}
-	if err := cat.Load([]string{testBuiltinDir(t)}, enabled); err != nil {
+	if err := cat.Load([]string{testBuiltinDir(t)}); err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
 	interest := cat.Get("object-detail")

@@ -484,10 +484,25 @@ func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit C
 	// Determine which capabilities are active and build tool filter.
 	capStates := capability.ToMap(deps.Capabilities)
 
+	// Compute the currently-enabled capability set (MCP server connected
+	// AND not turned off by the user). This is recomputed per request so
+	// interest matching tracks runtime state — newly-connected MCP servers
+	// become available immediately without a catalog reload.
+	enabledCaps := make(map[string]bool, len(deps.Capabilities))
+	connectedServers := make(map[string]bool)
+	for _, name := range deps.Router.ConnectedServers() {
+		connectedServers[name] = true
+	}
+	for _, cap := range deps.Capabilities {
+		if connectedServers[cap.ServerName] && capStates[cap.ID] != capability.StateOff {
+			enabledCaps[cap.ID] = true
+		}
+	}
+
 	// Pre-match: if the user message matches an interest trigger, narrow
 	// tools to only the capabilities the interest requires.
 	if deps.Catalog != nil {
-		if matched := deps.Catalog.Match(req.Message); matched != nil {
+		if matched := deps.Catalog.Match(req.Message, enabledCaps); matched != nil {
 			required := make(map[string]bool, len(matched.Meta.Requires))
 			for _, r := range matched.Meta.Requires {
 				required[r] = true
@@ -519,7 +534,7 @@ func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit C
 	var interestIndex string
 	var internalTools map[string]agent.InternalTool
 	if deps.Catalog != nil {
-		interestIndex = deps.Catalog.BuildIndex()
+		interestIndex = deps.Catalog.BuildIndex(enabledCaps)
 		deps.Logger.Debug("interest index built", "index", interestIndex, "interests", len(deps.Catalog.All()))
 		if interestIndex != "" {
 			// Build valid capability ID set for save validation.

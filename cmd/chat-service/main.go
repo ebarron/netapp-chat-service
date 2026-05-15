@@ -7,7 +7,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/ebarron/netapp-chat-service/capability"
 	"github.com/ebarron/netapp-chat-service/config"
 	"github.com/ebarron/netapp-chat-service/interest"
 	"github.com/ebarron/netapp-chat-service/llm"
@@ -50,19 +49,13 @@ func main() {
 	// Build capabilities from config.
 	caps := cfg.BuildCapabilities()
 
-	// Build enabled-capability set for interest filtering.
-	enabled := make(map[string]bool, len(caps))
-	for _, c := range caps {
-		if c.State != capability.StateOff {
-			enabled[c.ID] = true
-		}
-	}
-
-	// Load interest catalog.
+	// Load interest catalog. Capability filtering happens at query time
+	// inside Catalog.Match / Catalog.BuildIndex (see server.go), so the
+	// catalog itself just mirrors what is on disk.
 	var catalog *interest.Catalog
 	if len(cfg.Interests.Dirs) > 0 {
 		catalog = interest.NewCatalog(logger)
-		if err := catalog.Load(cfg.Interests.Dirs, enabled); err != nil {
+		if err := catalog.Load(cfg.Interests.Dirs); err != nil {
 			logger.Warn("failed to load interests", "error", err)
 		}
 	}

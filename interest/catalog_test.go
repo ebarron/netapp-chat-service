@@ -21,8 +21,7 @@ func testBuiltinDir(t *testing.T) string {
 
 func TestCatalog_LoadEmbedded(t *testing.T) {
 	c := NewCatalog(nil)
-	enabled := map[string]bool{"metrics": true, "storage": true}
-	if err := c.Load([]string{testBuiltinDir(t)}, enabled); err != nil {
+	if err := c.Load([]string{testBuiltinDir(t)}); err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
 	all := c.All()
@@ -42,22 +41,30 @@ func TestCatalog_LoadEmbedded(t *testing.T) {
 
 func TestCatalog_FilterByCapabilities(t *testing.T) {
 	c := NewCatalog(nil)
-	// Only enable metrics — resource-status requires [metrics, storage] so it should be excluded.
-	enabled := map[string]bool{"metrics": true}
-	if err := c.Load([]string{testBuiltinDir(t)}, enabled); err != nil {
+	if err := c.Load([]string{testBuiltinDir(t)}); err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if got := c.Get("resource-status"); got != nil {
-		t.Error("resource-status should be filtered out when storage is missing")
+	// Only enable metrics — resource-status requires [metrics, storage] so
+	// Match/BuildIndex must hide it; Get still returns it because the
+	// catalog itself is not pruned.
+	enabled := map[string]bool{"metrics": true}
+	if got := c.Match("show resources", enabled); got != nil {
+		t.Errorf("resource-status should be filtered out when storage is missing, got %q", got.Meta.ID)
 	}
-	if got := c.Get("health-check"); got == nil {
-		t.Error("health-check should be present (only requires metrics)")
+	if got := c.Match("health check", enabled); got == nil || got.Meta.ID != "health-check" {
+		t.Errorf("health-check should match (only requires metrics), got %v", got)
+	}
+	if idx := c.BuildIndex(enabled); strings.Contains(idx, "resource-status") {
+		t.Errorf("BuildIndex should omit resource-status:\n%s", idx)
+	}
+	if idx := c.BuildIndex(enabled); !strings.Contains(idx, "health-check") {
+		t.Errorf("BuildIndex should include health-check:\n%s", idx)
 	}
 }
 
 func TestCatalog_NilEnabled_NoFiltering(t *testing.T) {
 	c := NewCatalog(nil)
-	if err := c.Load([]string{testBuiltinDir(t)}, nil); err != nil {
+	if err := c.Load([]string{testBuiltinDir(t)}); err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
 	if len(c.All()) != 3 {
@@ -72,8 +79,7 @@ func TestCatalog_UserInterests(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := NewCatalog(nil)
-	enabled := map[string]bool{"metrics": true, "storage": true}
-	if err := c.Load([]string{testBuiltinDir(t), dir}, enabled); err != nil {
+	if err := c.Load([]string{testBuiltinDir(t), dir}); err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
 	if got := c.Get("backup-status"); got == nil {
@@ -93,8 +99,7 @@ func TestCatalog_UserCannotShadowBuiltin(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := NewCatalog(nil)
-	enabled := map[string]bool{"metrics": true, "storage": true}
-	if err := c.Load([]string{testBuiltinDir(t), dir}, enabled); err != nil {
+	if err := c.Load([]string{testBuiltinDir(t), dir}); err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
 	got := c.Get("health-check")
@@ -108,11 +113,11 @@ func TestCatalog_UserCannotShadowBuiltin(t *testing.T) {
 
 func TestCatalog_BuildIndex(t *testing.T) {
 	c := NewCatalog(nil)
-	enabled := map[string]bool{"metrics": true, "storage": true}
-	if err := c.Load([]string{testBuiltinDir(t)}, enabled); err != nil {
+	if err := c.Load([]string{testBuiltinDir(t)}); err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	index := c.BuildIndex()
+	enabled := map[string]bool{"metrics": true, "storage": true}
+	index := c.BuildIndex(enabled)
 	if !strings.Contains(index, "health-check") {
 		t.Error("index missing health-check")
 	}
@@ -135,18 +140,19 @@ func TestCatalog_BuildIndex(t *testing.T) {
 
 func TestCatalog_BuildIndex_Empty(t *testing.T) {
 	c := NewCatalog(nil)
-	enabled := map[string]bool{}
-	if err := c.Load([]string{testBuiltinDir(t)}, enabled); err != nil {
+	if err := c.Load([]string{testBuiltinDir(t)}); err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if index := c.BuildIndex(); index != "" {
-		t.Errorf("expected empty index, got %q", index)
+	// With every required capability missing, BuildIndex must return "".
+	enabled := map[string]bool{}
+	if index := c.BuildIndex(enabled); index != "" {
+		t.Errorf("expected empty index when no capabilities enabled, got %q", index)
 	}
 }
 
 func TestCatalog_Get_NonExistent(t *testing.T) {
 	c := NewCatalog(nil)
-	if err := c.Load([]string{testBuiltinDir(t)}, map[string]bool{"metrics": true}); err != nil {
+	if err := c.Load([]string{testBuiltinDir(t)}); err != nil {
 		t.Fatal(err)
 	}
 	if got := c.Get("nonexistent"); got != nil {
@@ -159,7 +165,7 @@ func TestCatalog_LoadFS_MalformedSkipped(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "bad.md"), []byte("no frontmatter here"), 0644)
 	os.WriteFile(filepath.Join(dir, "good.md"), []byte("---\nid: good\nname: Good\nsource: user\nrequires:\n  - metrics\n---\nbody\n"), 0644)
 	c := NewCatalog(nil)
-	if err := c.Load([]string{dir}, nil); err != nil {
+	if err := c.Load([]string{dir}); err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
 	if got := c.Get("good"); got == nil {
@@ -169,7 +175,7 @@ func TestCatalog_LoadFS_MalformedSkipped(t *testing.T) {
 
 func TestCatalog_BuiltinIDs(t *testing.T) {
 	c := NewCatalog(nil)
-	if err := c.Load([]string{testBuiltinDir(t)}, nil); err != nil {
+	if err := c.Load([]string{testBuiltinDir(t)}); err != nil {
 		t.Fatal(err)
 	}
 	ids := c.BuiltinIDs()
@@ -248,7 +254,7 @@ func TestCatalog_Save_RejectsNonUser(t *testing.T) {
 
 func TestCatalog_Save_RejectsBuiltinShadow(t *testing.T) {
 	c := NewCatalog(nil)
-	if err := c.Load([]string{testBuiltinDir(t)}, nil); err != nil {
+	if err := c.Load([]string{testBuiltinDir(t)}); err != nil {
 		t.Fatal(err)
 	}
 	i := &Interest{
@@ -324,7 +330,7 @@ func TestCatalog_Delete_Valid(t *testing.T) {
 
 func TestCatalog_Delete_RejectsBuiltin(t *testing.T) {
 	c := NewCatalog(nil)
-	if err := c.Load([]string{testBuiltinDir(t)}, nil); err != nil {
+	if err := c.Load([]string{testBuiltinDir(t)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.Delete(t.TempDir(), "health-check"); err == nil {
@@ -341,7 +347,7 @@ func TestCatalog_Delete_NotFound(t *testing.T) {
 
 func TestCatalog_UserCount(t *testing.T) {
 	c := NewCatalog(nil)
-	if err := c.Load([]string{testBuiltinDir(t)}, nil); err != nil {
+	if err := c.Load([]string{testBuiltinDir(t)}); err != nil {
 		t.Fatal(err)
 	}
 	if got := c.UserCount(); got != 0 {
@@ -362,10 +368,10 @@ func TestCatalog_BuildIndex_TargetColumn(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "canvas-interest.md"), []byte("---\nid: canvas-one\nname: Canvas Interest\nsource: builtin\ntriggers:\n  - show detail\nrequires:\n  - metrics\noutput_target: canvas\n---\nbody\n"), 0644)
 	os.WriteFile(filepath.Join(dir, "default-interest.md"), []byte("---\nid: default-one\nname: Default Interest\nsource: builtin\ntriggers:\n  - test\nrequires:\n  - metrics\n---\nbody\n"), 0644)
 	c := NewCatalog(nil)
-	if err := c.Load([]string{dir}, nil); err != nil {
+	if err := c.Load([]string{dir}); err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	index := c.BuildIndex()
+	index := c.BuildIndex(nil)
 	if !strings.Contains(index, "| Target |") {
 		t.Error("index header missing Target column")
 	}
@@ -382,10 +388,10 @@ func TestCatalog_BuildIndex_TargetColumn(t *testing.T) {
 
 func TestCatalog_Match(t *testing.T) {
 	c := NewCatalog(nil)
-	enabled := map[string]bool{"metrics": true, "storage": true}
-	if err := c.Load([]string{testBuiltinDir(t)}, enabled); err != nil {
+	if err := c.Load([]string{testBuiltinDir(t)}); err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
+	enabled := map[string]bool{"metrics": true, "storage": true}
 	tests := []struct {
 		name    string
 		message string
@@ -400,7 +406,7 @@ func TestCatalog_Match(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := c.Match(tt.message)
+			got := c.Match(tt.message, enabled)
 			if tt.wantID == "" {
 				if got != nil {
 					t.Errorf("Match(%q) = %q, want nil", tt.message, got.Meta.ID)
@@ -419,7 +425,7 @@ func TestCatalog_Match(t *testing.T) {
 
 func TestCatalog_Match_Empty(t *testing.T) {
 	c := NewCatalog(nil)
-	if got := c.Match("hello"); got != nil {
+	if got := c.Match("hello", nil); got != nil {
 		t.Errorf("Match on empty catalog = %v, want nil", got.Meta.ID)
 	}
 }

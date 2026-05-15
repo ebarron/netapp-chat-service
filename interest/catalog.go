@@ -37,10 +37,12 @@ func NewCatalog(logger *slog.Logger) *Catalog {
 // Load populates the catalog from one or more directories on disk.
 // The first directory should contain built-in interests (source: builtin);
 // subsequent directories contain user-defined interests (source: user).
-// Either list may be empty. The enabled map keys are capability IDs that are
-// currently connected; interests whose requires are not all satisfied are
-// excluded from the catalog (but not from disk).
-func (c *Catalog) Load(dirs []string, enabled map[string]bool) error {
+// Either list may be empty.
+//
+// Capability filtering is applied at query time (see Match and BuildIndex),
+// not at load time, so that the catalog stays correct when MCP servers
+// connect/disconnect or capabilities are toggled after startup.
+func (c *Catalog) Load(dirs []string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.interests = make(map[string]*Interest)
@@ -59,9 +61,6 @@ func (c *Catalog) Load(dirs []string, enabled map[string]bool) error {
 			return fmt.Errorf("interest: load dir %s: %w", dir, err)
 		}
 	}
-
-	// Filter by enabled capabilities.
-	c.filterByCapabilities(enabled)
 
 	return nil
 }
@@ -106,7 +105,9 @@ func (c *Catalog) BuiltinIDs() map[string]bool {
 }
 
 // BuildIndex produces the compact markdown table for the system prompt.
-func (c *Catalog) BuildIndex() string {
+// Interests whose Requires are not all present in enabled are omitted.
+// If enabled is nil, no filtering is performed.
+func (c *Catalog) BuildIndex(enabled map[string]bool) string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	all := c.allLocked()
@@ -117,9 +118,17 @@ func (c *Catalog) BuildIndex() string {
 	var b strings.Builder
 	b.WriteString("| ID | Name | Triggers | Target |\n")
 	b.WriteString("|----|------|----------|--------|\n")
+	wrote := false
 	for _, i := range all {
+		if !requirementsMet(i.Meta.Requires, enabled) {
+			continue
+		}
 		triggers := strings.Join(i.Meta.Triggers, ", ")
 		fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", i.Meta.ID, i.Meta.Name, triggers, i.Meta.EffectiveOutputTarget())
+		wrote = true
+	}
+	if !wrote {
+		return ""
 	}
 	return b.String()
 }
@@ -167,29 +176,29 @@ func (c *Catalog) loadFS(fsys fs.FS, builtin bool) error {
 	})
 }
 
-// filterByCapabilities removes interests whose requires are not all
-// present in the enabled set. If enabled is nil, no filtering is done.
-func (c *Catalog) filterByCapabilities(enabled map[string]bool) {
+// requirementsMet reports whether every requirement in reqs is present in
+// the enabled set. A nil enabled map disables filtering and always returns
+// true (preserves the legacy "no caller knowledge" behaviour).
+func requirementsMet(reqs []string, enabled map[string]bool) bool {
 	if enabled == nil {
-		return
+		return true
 	}
-	for id, i := range c.interests {
-		for _, req := range i.Meta.Requires {
-			if !enabled[req] {
-				c.logger.Debug("interest: filtered out (missing capability)",
-					"id", id, "missing", req)
-				delete(c.interests, id)
-				break
-			}
+	for _, r := range reqs {
+		if !enabled[r] {
+			return false
 		}
 	}
+	return true
 }
 
 // Match returns the interest whose trigger best matches the user message,
 // or nil if no trigger matches. It performs case-insensitive substring
 // matching on trigger phrases and picks the longest match to prefer
 // specific triggers over short ones.
-func (c *Catalog) Match(message string) *Interest {
+//
+// Interests whose Requires are not all present in enabled are skipped. If
+// enabled is nil, no capability filtering is performed.
+func (c *Catalog) Match(message string, enabled map[string]bool) *Interest {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -198,6 +207,9 @@ func (c *Catalog) Match(message string) *Interest {
 	var bestLen int
 
 	for _, i := range c.interests {
+		if !requirementsMet(i.Meta.Requires, enabled) {
+			continue
+		}
 		for _, trigger := range i.Meta.Triggers {
 			t := strings.ToLower(trigger)
 			if len(t) > bestLen && strings.Contains(lower, t) {
