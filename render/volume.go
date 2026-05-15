@@ -98,15 +98,16 @@ func fetchChartData(f MetricsFetcher, req *VolumeInput) {
 	now := time.Now()
 	vol := req.Volume
 	svm := req.SVM
+	cluster := req.Cluster
 
 	// Performance data (24h) — read/write IOPS and latency
 	if len(req.PerformanceData) == 0 {
 		start := now.Add(-24 * time.Hour)
 		step := "5m"
 
-		readOps, _ := f.QueryRange(fmt.Sprintf(`volume_read_ops{volume="%s", svm="%s"}`, vol, svm), start, now, step)
-		writeOps, _ := f.QueryRange(fmt.Sprintf(`volume_write_ops{volume="%s", svm="%s"}`, vol, svm), start, now, step)
-		latency, _ := f.QueryRange(fmt.Sprintf(`volume_avg_latency{volume="%s", svm="%s"}`, vol, svm), start, now, step)
+		readOps, _ := f.QueryRange(fmt.Sprintf(`volume_read_ops{volume="%s", svm="%s", cluster="%s"}`, vol, svm, cluster), start, now, step)
+		writeOps, _ := f.QueryRange(fmt.Sprintf(`volume_write_ops{volume="%s", svm="%s", cluster="%s"}`, vol, svm, cluster), start, now, step)
+		latency, _ := f.QueryRange(fmt.Sprintf(`volume_avg_latency{volume="%s", svm="%s", cluster="%s"}`, vol, svm, cluster), start, now, step)
 
 		// Merge into performance_data array keyed by time.
 		if len(readOps) > 0 || len(writeOps) > 0 || len(latency) > 0 {
@@ -117,7 +118,7 @@ func fetchChartData(f MetricsFetcher, req *VolumeInput) {
 	// Capacity data (30d)
 	if len(req.CapacityData) == 0 {
 		start := now.Add(-30 * 24 * time.Hour)
-		capData, err := f.QueryRange(fmt.Sprintf(`volume_size_used_percent{volume="%s", svm="%s"}`, vol, svm), start, now, "1d")
+		capData, err := f.QueryRange(fmt.Sprintf(`volume_size_used_percent{volume="%s", svm="%s", cluster="%s"}`, vol, svm, cluster), start, now, "1d")
 		if err != nil {
 			slog.Warn("render: capacity query failed", "error", err)
 		} else {
