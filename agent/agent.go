@@ -677,6 +677,13 @@ type SystemPromptConfig struct {
 	// Guidelines are appended after the role section. Include any product-
 	// specific guidelines such as URL rewriting rules.
 	Guidelines []string
+	// Vocabulary is a free-form markdown block appended after the generic
+	// Guidelines and before the connected-data-sources list. Products use
+	// this to inject domain-specific guidance (entity kinds, link patterns,
+	// CLI proposal formats, etc.) without modifying the agent package. The
+	// chat service ships no vocabulary by default — empty string means no
+	// block is appended.
+	Vocabulary string
 }
 
 // BuildSystemPrompt constructs the system prompt from the current state.
@@ -721,6 +728,14 @@ Guidelines:
 	}
 	prompt += "\n"
 
+	if cfg.Vocabulary != "" {
+		prompt += cfg.Vocabulary
+		if !strings.HasSuffix(cfg.Vocabulary, "\n") {
+			prompt += "\n"
+		}
+		prompt += "\n"
+	}
+
 	if len(servers) > 0 {
 		prompt += "\nConnected data sources: "
 		for i, s := range servers {
@@ -761,10 +776,11 @@ Guidelines:
 		prompt += "   Read the interest body carefully: each numbered section that mentions a tool call\n"
 		prompt += "   is a separate query you must execute.\n"
 		prompt += "3. Only after receiving ALL tool results, produce the dashboard with that real data\n"
-		prompt += "4. If the interest tells you to call a **render tool** (e.g. `render_volume_detail`),\n"
-		prompt += "   you MUST call it — that is the ONLY way to produce the view. The frontend cannot\n"
-		prompt += "   display volume details from your text. NEVER skip a render tool call, even if you\n"
-		prompt += "   already have the data from a previous turn. Always call the render tool.\n"
+		prompt += "4. If the interest tells you to call a **render tool** (a product-supplied tool whose name\n"
+		prompt += "   typically starts with `render_`), you MUST call it — that is the ONLY way to produce\n"
+		prompt += "   the view. The frontend cannot reconstruct the rendered output from your text. NEVER\n"
+		prompt += "   skip a render tool call, even if you already have the data from a previous turn.\n"
+		prompt += "   Always call the render tool.\n"
 		prompt += "5. Check the **Target** column. If it says `canvas`, emit the final output block\n"
 		prompt += "   using `canvas-object-detail` or `canvas-dashboard` fences (see Canvas fences above).\n"
 		prompt += "   If target is `chat` (or omitted), use the regular fence.\n\n"
@@ -856,7 +872,7 @@ For time-series data, the xKey value MUST be the raw unix timestamp (number, in 
 {"type":"callout","icon":"string (opt)","title":"string","body":"string"}
 
 **proposal** — Proposed command to execute (works standalone or in dashboards)
-{"type":"proposal","title":"string","command":"string","format":"ontap-cli"}
+{"type":"proposal","title":"string","command":"string","format":"string (product-specific, e.g. shell, sql)"}
 
 ### Dashboard-only panel types
 
@@ -866,20 +882,19 @@ For time-series data, the xKey value MUST be the raw unix timestamp (number, in 
 **resource-table** — Clickable resource list
 {"type":"resource-table","title":"string","columns":["Col1","Col2",...],"rows":[{"name":"string (always required — used for click target)","Col1":"value","Col2":"value",...}]}
 Row objects MUST include a key for every entry in "columns" whose name matches the column exactly. The "name" field is always required (used for the click action) and should also appear under the first column key.
-For ONTAP resources, always include hidden "cluster" and "svm" fields in each row (not in columns) so the click action can uniquely identify the resource. Example: {"name":"vol1","Volume":"vol1","Used %":33,"cluster":"cls1","svm":"svm1"}
+Rows may also carry hidden identity fields (keys not listed in "columns") that the click action needs to disambiguate the resource. Product-specific guidance below may list those keys.
 
 **action-button** — Clickable action triggers
 {"type":"action-button","buttons":[{"label":"string","action":"execute|message","tool":"string (for execute)","params":{} (for execute),"message":"string (for message)","icon":"string (opt)","variant":"primary|outline"}]}
 
 ### Object detail — use language "object-detail"
 
-For questions about a single entity (volume, cluster, alert, SVM, aggregate),
-produce a rich detail view instead of a dashboard:
+For questions about a single entity, produce a rich detail view instead of a dashboard:
 
 ` + "```" + `object-detail
 {
   "type": "object-detail",
-  "kind": "volume | cluster | alert | aggregate | svm | string",
+  "kind": "string (product-defined entity kind, e.g. 'volume', 'cluster', 'alert')",
   "name": "Display name or title",
   "status": "critical | warning | ok | info",
   "subtitle": "Brief context line",
@@ -890,21 +905,13 @@ produce a rich detail view instead of a dashboard:
 }
 ` + "```" + `
 
-The **qualifier** field carries the identity keys needed to uniquely look up this object in follow-up requests. The UI automatically appends it to every action message from this detail view. Examples by kind:
-- volume: "on SVM vdbench on cluster cls1"
-- svm: "on cluster cls1"
-- aggregate: "on cluster cls1"
-- alert: "(alert-id abc123)" or similar unique identifier
-- cluster: omit or leave empty (cluster name alone is unique)
-Always set qualifier so action buttons and property links work without losing context.
+The **qualifier** field carries the identity keys needed to uniquely look up this object in follow-up requests. The UI automatically appends it to every action message from this detail view. Always set qualifier so action buttons and property links work without losing context. Product-specific guidance below describes which keys to include for each entity kind.
 
 **Per-item qualifier override:** Property items and action buttons support an optional per-item "qualifier" field that overrides the card-level qualifier for that specific link. This is essential when a link targets a *different kind* of object whose identity keys differ from the current object.
-- Set "qualifier": "" (empty string) to suppress the qualifier entirely — use this for links to clusters (cluster name alone is unique).
-- Set "qualifier": "on cluster cls1" for links to SVMs or aggregates from a volume detail (the target needs cluster context but not SVM context).
-- Omit the per-item qualifier to inherit the card-level qualifier — use this for same-kind follow-ups (e.g. "Show snapshots" on a volume detail).
-Example property item linking to a cluster: {"label":"Cluster","value":"cls1","link":"Show cluster cls1","qualifier":""}
-Example property item linking to an SVM from a volume: {"label":"SVM","value":"svm1","link":"Tell me about SVM svm1","qualifier":"on cluster cls1"}
-Example action button with no override (inherits card qualifier): {"label":"Show Snapshots","action":"message","message":"Show snapshots for vol1"}
+- Set "qualifier": "" (empty string) to suppress the qualifier entirely when the target's name alone is unique.
+- Set "qualifier": "<override>" to supply a different identity context when the target needs less or different context than the current object.
+- Omit the per-item qualifier to inherit the card-level qualifier — use this for same-kind follow-ups.
+Example action button with no override (inherits card qualifier): {"label":"Open Item","action":"message","message":"Show detail for item1"}
 
 Section layouts:
 - **properties**: {"columns": 2, "items": [{"label":"string","value":"string","color":"string (opt)","link":"string (opt, injects chat message)","qualifier":"string (opt, overrides card qualifier for this link)"}]}
@@ -957,7 +964,7 @@ save_interest and delete_interest tools. Follow this workflow:
 
 **Creating a new interest:**
 1. Ask clarifying questions if the user's request is vague (what data sources, what layout)
-2. Infer the metadata: pick a short lowercase-hyphen id, a human name, relevant triggers, and the required capabilities (harvest, ontap, grafana)
+2. Infer the metadata: pick a short lowercase-hyphen id, a human name, relevant triggers, and the required capability IDs (product-specific — match the IDs surfaced by the connected MCP servers)
 3. Draft the interest body — a markdown description of the dashboard layout, panels, and analysis steps
 4. Show the user the complete interest (id, name, triggers, requires, body) and ask for confirmation
 5. Only call save_interest after the user explicitly approves

@@ -91,7 +91,7 @@ func (r *Router) Connect(ctx context.Context, cfg ServerConfig) error {
 	}
 
 	client := mcp.NewClient(&mcp.Implementation{
-		Name:    "nabox-chatbot",
+		Name:    "netapp-chat-service",
 		Version: "1.0.0",
 	}, nil)
 
