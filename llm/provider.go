@@ -113,7 +113,8 @@ type StreamEvent struct {
 }
 
 // ProviderConfig holds the configuration for a single LLM provider.
-// Stored in /etc/nabox/ai.yaml.
+// Typically persisted by the host product (e.g. NABox stores it in
+// /etc/nabox/ai.yaml).
 type ProviderConfig struct {
 	Provider     string `yaml:"provider" json:"provider"`                             // "openai", "anthropic", "bedrock", "custom", "llm-proxy"
 	Endpoint     string `yaml:"endpoint" json:"endpoint"`                             // API endpoint URL

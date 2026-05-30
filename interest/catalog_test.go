@@ -8,13 +8,13 @@ import (
 	"testing"
 )
 
-// testBuiltinDir returns the path to the testdata/interests directory
+// testBuiltinDir returns the path to the examples directory
 // containing sample interest files for testing.
 func testBuiltinDir(t *testing.T) string {
 	t.Helper()
-	dir := filepath.Join("testdata", "interests")
+	dir := "examples"
 	if _, err := os.Stat(dir); err != nil {
-		t.Fatalf("testdata/interests not found: %v", err)
+		t.Fatalf("examples directory not found: %v", err)
 	}
 	return dir
 }
