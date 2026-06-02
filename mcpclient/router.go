@@ -20,14 +20,32 @@ import (
 )
 
 // headerRoundTripper wraps an http.RoundTripper to inject extra headers.
+//
+// Static headers (from ServerConfig.Headers) are applied to every request.
+// In addition, when forward is non-empty, any header named in forward that is
+// present on the current request's context (placed there via
+// WithForwardedHeaders at the HTTP boundary) is relayed onto the outbound
+// request. Forwarded values are resolved per-request, so a single shared MCP
+// session safely carries different values on consecutive tool calls. Values
+// are opaque and never logged.
 type headerRoundTripper struct {
 	base    http.RoundTripper
-	headers map[string]string
+	headers map[string]string // static, from cfg.Headers
+	forward []string          // allowlist of inbound header names to relay
 }
 
 func (h *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	for k, v := range h.headers {
 		req.Header.Set(k, v)
+	}
+	if len(h.forward) > 0 {
+		if fwd := forwardedHeadersFrom(req.Context()); len(fwd) > 0 {
+			for _, name := range h.forward {
+				if v, ok := fwd[http.CanonicalHeaderKey(name)]; ok {
+					req.Header.Set(name, v) // per-request value wins
+				}
+			}
+		}
 	}
 	return h.base.RoundTrip(req)
 }
@@ -42,6 +60,11 @@ type ServerConfig struct {
 	// this for MCPs we don't control (e.g. Grafana, third-party) that don't
 	// publish ToolAnnotations.ReadOnlyHint.
 	ReadOnlyTools []string `yaml:"read_only_tools" json:"read_only_tools,omitempty"`
+	// ForwardHeaders is an allowlist of inbound HTTP header names to relay from
+	// the current chat request onto outbound requests to this server. Values
+	// are opaque to this service; the host application defines and interprets
+	// them. Empty means no per-request forwarding (default).
+	ForwardHeaders []string `yaml:"forward_headers" json:"forward_headers,omitempty"`
 }
 
 // Router manages connections to multiple MCP servers. It discovers tools from
@@ -95,13 +118,15 @@ func (r *Router) Connect(ctx context.Context, cfg ServerConfig) error {
 		Version: "1.0.0",
 	}, nil)
 
-	// Build a custom http.Client that injects auth headers if configured.
+	// Build a custom http.Client that injects static auth headers and/or relays
+	// per-request forwarded headers if either is configured.
 	var httpClient *http.Client
-	if len(cfg.Headers) > 0 {
+	if len(cfg.Headers) > 0 || len(cfg.ForwardHeaders) > 0 {
 		httpClient = &http.Client{
 			Transport: &headerRoundTripper{
 				base:    http.DefaultTransport,
 				headers: cfg.Headers,
+				forward: cfg.ForwardHeaders,
 			},
 		}
 	}
@@ -321,6 +346,27 @@ func (r *Router) ConnectedServers() []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// CollectForwardableHeaders returns the subset of src whose names are in the
+// union of every connected server's ForwardHeaders allowlist, keyed by
+// canonical header name. The result is intended to be placed on the request
+// context via WithForwardedHeaders so that RoundTrip can relay each value only
+// to the servers that allowlist it. Returns nil when nothing matches, keeping
+// behavior identical to today when no server configures forward_headers.
+func (r *Router) CollectForwardableHeaders(src http.Header) map[string]string {
+	r.mu.RLock()
+	var allow map[string]struct{}
+	for _, sc := range r.servers {
+		for _, name := range sc.cfg.ForwardHeaders {
+			if allow == nil {
+				allow = make(map[string]struct{})
+			}
+			allow[name] = struct{}{}
+		}
+	}
+	r.mu.RUnlock()
+	return collectForwardable(src, allow)
 }
 
 // ServerConfigOf returns the ServerConfig used to connect the named server,

@@ -22,6 +22,13 @@ mcp_servers:
     # read_only_tools:
     #   - list_volumes
     #   - get_volume_stats
+    # Optional allowlist of inbound HTTP header names to relay from the current
+    # chat request onto outbound requests to this server. Values are opaque to
+    # the chat-service; the host application (and the server/proxy it talks to)
+    # define and interpret them. Use this for per-request authorization, e.g. a
+    # host-minted identity token forwarded through a trusted reverse proxy.
+    # forward_headers:
+    #   - X-User-Token
 
 capabilities:
   defaults:

@@ -35,6 +35,10 @@ type MCPServer struct {
 	// the server's tools lack proper MCP annotations. Used for filtering in
 	// read-only mode.
 	ReadOnlyTools []string `yaml:"read_only_tools"`
+	// ForwardHeaders is an allowlist of inbound HTTP header names to relay from
+	// the current chat request onto outbound requests to this server. Values
+	// are opaque; the host application defines and interprets them.
+	ForwardHeaders []string `yaml:"forward_headers"`
 }
 
 // CapabilitiesConfig defines capability defaults.
@@ -135,6 +139,7 @@ func (c *Config) ServerConfigs() []mcpclient.ServerConfig {
 			Endpoint:      s.URL,
 			Headers:       s.Headers,
 			ReadOnlyTools: s.ReadOnlyTools,
+			ForwardHeaders: s.ForwardHeaders,
 		}
 	}
 	return configs

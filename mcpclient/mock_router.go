@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"sync"
 
 	"github.com/ebarron/netapp-chat-service/llm"
@@ -21,6 +22,7 @@ type MockRouter struct {
 	calls       []llm.ToolCall    // recorded calls
 	servers     []string          // simulated connected server names
 	toolServers map[string]string // tool name -> server name
+	forward     []string          // simulated union of forward_headers allowlists
 }
 
 // NewMockRouter creates a MockRouter with the given tools pre-registered.
@@ -126,6 +128,33 @@ func (m *MockRouter) Calls() []llm.ToolCall {
 	return calls
 }
 
+// SetForwardHeaders configures the simulated union of servers' forward_headers
+// allowlists used by CollectForwardableHeaders.
+func (m *MockRouter) SetForwardHeaders(names ...string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.forward = names
+}
+
+// CollectForwardableHeaders returns the subset of src whose names are in the
+// configured allowlist (see SetForwardHeaders), keyed by canonical name.
+func (m *MockRouter) CollectForwardableHeaders(src http.Header) map[string]string {
+	m.mu.RLock()
+	var allow map[string]struct{}
+	for _, name := range m.forward {
+		if allow == nil {
+			allow = make(map[string]struct{})
+		}
+		allow[name] = struct{}{}
+	}
+	m.mu.RUnlock()
+	return collectForwardable(src, allow)
+}
+
+// Compile-time interface checks.
+var _ ToolRouter = (*Router)(nil)
+var _ ToolRouter = (*MockRouter)(nil)
+
 // ToolRouter is the interface that both Router and MockRouter satisfy.
 // Used by the agent loop to decouple from the real MCP implementation.
 type ToolRouter interface {
@@ -133,11 +162,8 @@ type ToolRouter interface {
 	CallTool(ctx context.Context, tc llm.ToolCall) (string, error)
 	ConnectedServers() []string
 	ToolMap() map[string]string
+	CollectForwardableHeaders(src http.Header) map[string]string
 }
-
-// Compile-time interface checks.
-var _ ToolRouter = (*Router)(nil)
-var _ ToolRouter = (*MockRouter)(nil)
 
 // MockTool is a helper to create a simple tool definition for tests.
 func MockTool(name, description string) llm.ToolDef {

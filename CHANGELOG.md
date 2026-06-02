@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.1.15
+
+### Added
+
+- Per-request MCP header forwarding. Each MCP server config gains an optional
+  `forward_headers` allowlist of inbound HTTP header names. When a `/chat/*`
+  request carries a listed header, its value is relayed onto the outbound MCP
+  requests made while serving that request (per-server opt-in; per-request
+  value; opaque to this service). Absent any `forward_headers`, behavior is
+  byte-for-byte identical to before. Enables a host application to authorize
+  the end user behind each chat turn without per-user MCP sessions. See
+  `docs/mcp-request-header-forwarding.md`.
+  - `config.MCPServer.ForwardHeaders` / `mcpclient.ServerConfig.ForwardHeaders`
+    (yaml `forward_headers`).
+  - `mcpclient.WithForwardedHeaders` + `Router.CollectForwardableHeaders`.
+
 ## v0.1.14
 
 ### Breaking changes

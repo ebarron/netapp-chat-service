@@ -144,6 +144,13 @@ func (s *Server) PostChatMessage(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
+	// Relay any configured per-request headers (e.g. a host-minted identity
+	// token) from this chat request onto outbound MCP calls made while serving
+	// it. Header names are an operator-configured allowlist; values are opaque.
+	if fwd := s.deps.Router.CollectForwardableHeaders(r.Header); len(fwd) > 0 {
+		ctx = mcpclient.WithForwardedHeaders(ctx, fwd)
+	}
+
 	var emitMu sync.Mutex
 	emit := func(event string, data any) {
 		jsonData, err := json.Marshal(data)
