@@ -2,8 +2,11 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,6 +15,7 @@ import (
 	"github.com/ebarron/netapp-chat-service/capability"
 	"github.com/ebarron/netapp-chat-service/llm"
 	"github.com/ebarron/netapp-chat-service/mcpclient"
+	"github.com/ebarron/netapp-chat-service/session"
 )
 
 // newTestServer wires a Server with a mock router pre-loaded with the given
@@ -159,6 +163,124 @@ func TestPostCapabilitiesAcceptsWithinBudget(t *testing.T) {
 	if srv.deps.Capabilities[0].State != capability.StateAllow {
 		t.Errorf("state = %s, want allow", srv.deps.Capabilities[0].State)
 	}
+}
+
+// twoServerDeps builds ChatDeps with a jira and bitbucket capability, each
+// with one read-only tool, and a mock provider replaying the given responses.
+func twoServerDeps(provider llm.Provider, mode string) (*ChatDeps, *mcpclient.MockRouter) {
+	router := mcpclient.NewMockRouter([]llm.ToolDef{
+		mcpclient.MockReadOnlyTool("create_issue", "Create a Jira issue"),
+		mcpclient.MockReadOnlyTool("search_repo", "Search Bitbucket"),
+	})
+	router.SetServers([]string{"jira-mcp", "bitbucket-mcp"})
+	router.SetToolServer("create_issue", "jira-mcp")
+	router.SetToolServer("search_repo", "bitbucket-mcp")
+	router.SetResult("create_issue", "ok")
+	deps := &ChatDeps{
+		Sessions: session.NewManager(10),
+		Provider: provider,
+		Router:   router,
+		Logger:   slogDiscard(),
+		Capabilities: []capability.Capability{
+			{ID: "jira", Name: "Jira", State: capability.StateAllow, ServerName: "jira-mcp"},
+			{ID: "bitbucket", Name: "Bitbucket", State: capability.StateAllow, ServerName: "bitbucket-mcp"},
+		},
+		ToolRoutingMode:      mode,
+		ToolRoutingForceLoad: mode == agent.ToolRoutingInBand,
+	}
+	return deps, router
+}
+
+// TestRunChatInBandWiring verifies that with mode in-band the system prompt
+// carries the group menu and the offered tools include the internal
+// load_tools tool, while the MCP tools are withheld until a group is loaded.
+func TestRunChatInBandWiring(t *testing.T) {
+	provider := &llm.MockProvider{
+		ProviderName: "mock",
+		Responses: [][]llm.StreamEvent{
+			llm.MockToolCallResponse("tc-1", "load_tools", map[string]any{"groups": []string{"jira"}}),
+			llm.MockTextResponse("done"),
+		},
+	}
+	deps, _ := twoServerDeps(provider, agent.ToolRoutingInBand)
+
+	req := ChatMessageRequest{Message: "create a jira issue", Mode: "read-only"}
+	RunChat(context.Background(), deps, req, func(string, any) {}, nil)
+
+	if len(provider.Calls) == 0 {
+		t.Fatal("provider was never called")
+	}
+	sys := provider.Calls[0].System
+	for _, want := range []string{"Tool Groups", "load_tools", "| jira |", "| bitbucket |"} {
+		if !contains(sys, want) {
+			t.Errorf("system prompt missing %q", want)
+		}
+	}
+
+	// First turn: only the internal load_tools tool is offered (MCP tools
+	// withheld until a group loads).
+	first := provider.Calls[0].Tools
+	if !hasTool(first, "load_tools") {
+		t.Error("first turn should offer load_tools")
+	}
+	if hasTool(first, "create_issue") || hasTool(first, "search_repo") {
+		t.Error("MCP tools must be withheld before any group is loaded")
+	}
+	// Second turn (after load_tools([jira])): jira's tool becomes available,
+	// bitbucket's does not.
+	if len(provider.Calls) < 2 {
+		t.Fatalf("expected at least 2 LLM calls, got %d", len(provider.Calls))
+	}
+	second := provider.Calls[1].Tools
+	if !hasTool(second, "create_issue") {
+		t.Error("create_issue should be offered after loading jira")
+	}
+	if hasTool(second, "search_repo") {
+		t.Error("search_repo should remain withheld (bitbucket not loaded)")
+	}
+}
+
+// TestRunChatModeOffWiring verifies that with routing off the system prompt
+// has no group menu, no load_tools tool is offered, and all enabled tools are
+// available immediately (today's behavior).
+func TestRunChatModeOffWiring(t *testing.T) {
+	provider := &llm.MockProvider{
+		ProviderName: "mock",
+		Responses:    [][]llm.StreamEvent{llm.MockTextResponse("hi")},
+	}
+	deps, _ := twoServerDeps(provider, agent.ToolRoutingOff)
+
+	req := ChatMessageRequest{Message: "hello", Mode: "read-only"}
+	RunChat(context.Background(), deps, req, func(string, any) {}, nil)
+
+	if len(provider.Calls) == 0 {
+		t.Fatal("provider was never called")
+	}
+	if contains(provider.Calls[0].System, "Tool Groups") {
+		t.Error("mode off must not emit a Tool Groups section")
+	}
+	tools := provider.Calls[0].Tools
+	if hasTool(tools, "load_tools") {
+		t.Error("mode off must not offer load_tools")
+	}
+	if !hasTool(tools, "create_issue") || !hasTool(tools, "search_repo") {
+		t.Error("mode off should offer all enabled tools immediately")
+	}
+}
+
+func hasTool(tools []llm.ToolDef, name string) bool {
+	for _, t := range tools {
+		if t.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func contains(s, sub string) bool { return bytes.Contains([]byte(s), []byte(sub)) }
+
+func slogDiscard() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 func TestGetCapabilitiesIncludesDualBudgets(t *testing.T) {

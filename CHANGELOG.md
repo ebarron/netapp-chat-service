@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.1.16
+
+### Added
+
+- High-tool-count scaling: the **S7a in-band tool-routing supervisor**. As the
+  number of connected MCP servers grows, the per-turn tool list (and the hard
+  128-tool provider cap) becomes a problem. When enabled, the main model
+  self-selects which capability groups it needs via an internal `load_tools`
+  tool before those groups' tools are loaded — no dedicated routing LLM call.
+  Disabled by default; absent configuration, behavior is byte-for-byte
+  identical to before. Server-side only — the chat UI component
+  (`@edjbarron/netapp-chat-component`) is unchanged. See
+  `docs/high-tool-count-scaling.md`.
+  - `tool_routing` config block (`mode: off | in-band | router`, `max_tools`,
+    `always_on`). `off` is the default; `router` (S7b) is parsed but rejected
+    at startup until implemented.
+  - Optional per-server `capability_name` / `capability_description` to label
+    and describe a capability/group in the routing menu (auto-derived from the
+    server's tool names when absent).
+  - `capability.BuildGroups` / `capability.RenderGroupIndex` — a pure,
+    host-agnostic group registry derived 1:1 from connected capabilities.
+  - `agent.WithToolRouting`, the internal `load_tools` tool, group-aware
+    `agent.BuildSystemPromptWithRouting`, per-message routed-tool filtering with
+    a budget guard, an optional forced-first-step nudge (on by default for
+    in-band), and `agent.RoutingStats` / `(*Agent).LastRoutingStats` telemetry
+    (groups offered/loaded, load calls, reloads, skip/compliant).
+
 ## v0.1.15
 
 ### Added

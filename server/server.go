@@ -32,6 +32,14 @@ type ChatDeps struct {
 	InterestsDir string
 	ExtraTools   map[string]agent.InternalTool
 	PromptConfig agent.SystemPromptConfig
+
+	// Tool routing (S7a). When ToolRoutingMode is agent.ToolRoutingInBand the
+	// in-band supervisor is enabled: the model self-selects capability groups
+	// via load_tools. Empty/agent.ToolRoutingOff reproduces today's behavior.
+	ToolRoutingMode      string
+	ToolRoutingMaxTools  int
+	ToolRoutingAlwaysOn  []string
+	ToolRoutingForceLoad bool
 }
 
 // PendingApproval represents a tool call waiting for user approval.
@@ -577,17 +585,45 @@ func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit C
 		internalTools[name] = tool
 	}
 
+	// In-band tool routing (S7a): derive the capability group menu from the
+	// currently-enabled capabilities (connected AND not turned off — this
+	// reflects any interest pre-match narrowing above, so the two compose) and
+	// render its index for the system prompt. When routing is off, groupIndex
+	// stays empty and BuildSystemPromptWithRouting is byte-identical to today.
+	var groupIndex string
+	var groups []capability.Group
+	if deps.ToolRoutingMode == agent.ToolRoutingInBand {
+		groupEnabled := make(map[string]bool, len(deps.Capabilities))
+		for _, cap := range deps.Capabilities {
+			if connectedServers[cap.ServerName] && capStates[cap.ID] != capability.StateOff {
+				groupEnabled[cap.ID] = true
+			}
+		}
+		toolsByCap := make(map[string][]capability.ToolInfo)
+		for _, t := range deps.Router.Tools() {
+			if capID, ok := toolServerMap[t.Name]; ok {
+				toolsByCap[capID] = append(toolsByCap[capID], capability.ToolInfo{Name: t.Name, Description: t.Description})
+			}
+		}
+		groups = capability.BuildGroups(deps.Capabilities, groupEnabled, toolsByCap)
+		groupIndex = capability.RenderGroupIndex(groups)
+	}
+
 	// Build the agent with capability + mode filtering.
-	ag := agent.New(
-		deps.Provider,
-		deps.Router,
-		agent.WithSystemPrompt(agent.BuildSystemPrompt(deps.PromptConfig, deps.Router, interestIndex, req.CanvasTabs...)),
+	opts := []agent.Option{
+		agent.WithSystemPrompt(agent.BuildSystemPromptWithRouting(deps.PromptConfig, deps.Router, interestIndex, groupIndex, req.CanvasTabs...)),
 		agent.WithModel(deps.Model),
 		agent.WithLogger(deps.Logger),
 		agent.WithCapabilityFilter(capStates, mode),
 		agent.WithToolServerMap(toolServerMap),
 		agent.WithInternalTools(internalTools),
-	)
+	}
+	if deps.ToolRoutingMode == agent.ToolRoutingInBand {
+		opts = append(opts, agent.WithToolRouting(
+			deps.ToolRoutingMode, groups, deps.ToolRoutingAlwaysOn,
+			deps.ToolRoutingMaxTools, deps.ToolRoutingForceLoad))
+	}
+	ag := agent.New(deps.Provider, deps.Router, opts...)
 
 	if approvalFunc != nil {
 		ag.ApprovalFunc = approvalFunc

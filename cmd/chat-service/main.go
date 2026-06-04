@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/ebarron/netapp-chat-service/agent"
 	"github.com/ebarron/netapp-chat-service/config"
 	"github.com/ebarron/netapp-chat-service/interest"
 	"github.com/ebarron/netapp-chat-service/llm"
@@ -31,6 +32,13 @@ func main() {
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		logger.Error("failed to load config", "error", err)
+		os.Exit(1)
+	}
+
+	// The dedicated router model (S7b) is a valid config mode but not yet
+	// implemented; fail fast rather than silently behaving like "off".
+	if cfg.ToolRouting.Mode == agent.ToolRoutingRouter {
+		logger.Error("tool_routing.mode 'router' (S7b) is not implemented yet; use 'in-band' or 'off'")
 		os.Exit(1)
 	}
 
@@ -71,6 +79,12 @@ func main() {
 		Catalog:      catalog,
 		InterestsDir: firstDir(cfg.Interests.Dirs),
 		PromptConfig: cfg.PromptConfig(),
+
+		ToolRoutingMode:     cfg.ToolRouting.Mode,
+		ToolRoutingMaxTools: cfg.ToolRouting.MaxTools,
+		ToolRoutingAlwaysOn: cfg.ToolRouting.AlwaysOn,
+		// Forced-first-step enforcement defaults on for in-band routing.
+		ToolRoutingForceLoad: cfg.ToolRouting.Mode == agent.ToolRoutingInBand,
 	}
 
 	srv := server.New(deps)

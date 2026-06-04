@@ -15,6 +15,13 @@ mcp_servers:
   - name: ontap-mcp
     url: http://localhost:8083
     capability: ontap
+    # Optional human-readable label and one-line description for this server's
+    # capability/group, shown in the tool-routing group menu when
+    # tool_routing.mode is "in-band" (see below). When omitted the capability
+    # ID is used as the label and the description is auto-derived from the
+    # server's tool names. Operator config only — never product/view semantics.
+    # capability_name: ONTAP
+    # capability_description: ONTAP cluster/volume management and stats
     # Optional allowlist of tool names to treat as read-only when the MCP
     # server does not publish ToolAnnotations.ReadOnlyHint. Tools listed here
     # survive read-only mode filtering; everything else from this server is
@@ -48,3 +55,24 @@ product:
 
 server:
   addr: ":8090"
+
+# Tool routing (S7a in-band supervisor) — strategies for keeping the per-turn
+# tool list small as the number of connected MCP servers grows. See
+# docs/high-tool-count-scaling.md. Omitting this block (or mode: off) is
+# byte-for-byte identical to the legacy behavior: every enabled capability's
+# tools are sent on every turn.
+#
+# tool_routing:
+#   # off (default) | in-band | router
+#   #   off:     no routing; all enabled tools sent every turn.
+#   #   in-band: the model self-selects capability groups via an internal
+#   #            load_tools tool before its tools are loaded (no extra LLM call).
+#   #   router:  dedicated router model (S7b) — parsed but not yet implemented;
+#   #            startup fails fast if selected.
+#   mode: in-band
+#   # Optional cap on the post-routing tool list (0 = no cap beyond the hard
+#   # 128-tool provider limit).
+#   max_tools: 0
+#   # Capability/group IDs loaded from turn 1 without the model calling
+#   # load_tools (a baseline that is always available).
+#   always_on: []

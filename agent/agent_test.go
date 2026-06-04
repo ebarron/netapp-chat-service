@@ -537,6 +537,70 @@ func TestBuildSystemPrompt(t *testing.T) {
 	})
 }
 
+// TestBuildSystemPromptWithRouting covers the Layer 2 group-index section of
+// the in-band supervisor (S7a).
+func TestBuildSystemPromptWithRouting(t *testing.T) {
+	cfg := SystemPromptConfig{ProductName: "Test Assistant"}
+
+	t.Run("mode off is byte-identical to BuildSystemPrompt", func(t *testing.T) {
+		router := mcpclient.NewMockRouter([]llm.ToolDef{mcpclient.MockTool("t1", "Tool 1")})
+		router.SetServers([]string{"jira-mcp"})
+
+		base := BuildSystemPrompt(cfg, router, "")
+		routed := BuildSystemPromptWithRouting(cfg, router, "", "")
+		if base != routed {
+			t.Errorf("empty group index must be byte-identical to BuildSystemPrompt\nbase=%q\nrouted=%q", base, routed)
+		}
+		if strings.Contains(routed, "Tool Groups") {
+			t.Error("mode off must not emit a Tool Groups section")
+		}
+	})
+
+	t.Run("in-band lists groups in order with forced-first-step contract", func(t *testing.T) {
+		router := mcpclient.NewMockRouter(nil)
+		groupIndex := "| Group ID | Name | Covers |\n|----------|------|--------|\n| jira | Jira | Issue tracking |\n| zoom | Zoom | Meetings |\n"
+		prompt := BuildSystemPromptWithRouting(cfg, router, "", groupIndex)
+
+		if !strings.Contains(prompt, "## Tool Groups") {
+			t.Error("prompt should contain the Tool Groups header")
+		}
+		if !strings.Contains(prompt, "load_tools") {
+			t.Error("prompt should mention the load_tools tool")
+		}
+		// Forced-first-step contract reuses the proven interest phrasing.
+		if !strings.Contains(prompt, "CRITICAL") || !strings.Contains(prompt, "very first") || !strings.Contains(prompt, "Do NOT skip") {
+			t.Error("prompt should contain the forced-first-step contract phrasing")
+		}
+		if !strings.Contains(prompt, "| jira |") || !strings.Contains(prompt, "| zoom |") {
+			t.Error("prompt should list the supplied groups")
+		}
+		if strings.Index(prompt, "| jira |") > strings.Index(prompt, "| zoom |") {
+			t.Error("groups should appear in the order supplied")
+		}
+	})
+
+	t.Run("empty registry emits no section or dangling header", func(t *testing.T) {
+		router := mcpclient.NewMockRouter(nil)
+		prompt := BuildSystemPromptWithRouting(cfg, router, "", "")
+		if strings.Contains(prompt, "Tool Groups") {
+			t.Error("empty group index must not emit a Tool Groups header")
+		}
+	})
+
+	t.Run("coexists with interest index", func(t *testing.T) {
+		router := mcpclient.NewMockRouter(nil)
+		interestIndex := "| ID | Name | Triggers |\n|----|------|----------|\n| morning-coffee | Fleet | hi |\n"
+		groupIndex := "| Group ID | Name | Covers |\n|----------|------|--------|\n| jira | Jira | Issue tracking |\n"
+		prompt := BuildSystemPromptWithRouting(cfg, router, interestIndex, groupIndex)
+		if !strings.Contains(prompt, "Response Interests") {
+			t.Error("interest section should still be present")
+		}
+		if !strings.Contains(prompt, "## Tool Groups") {
+			t.Error("group section should be present")
+		}
+	})
+}
+
 func TestAgentOptions(t *testing.T) {
 	provider := &llm.MockProvider{ProviderName: "mock"}
 	router := mcpclient.NewMockRouter(nil)

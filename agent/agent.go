@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +32,34 @@ const DefaultMaxIterations = 10
 // accuracy degrades sharply above ~20 tools per turn. Enforced in
 // (*Agent).filteredTools.
 const MaxToolsPerRequest = 128
+
+// Tool-routing modes (S7 supervisor). These are the canonical values for the
+// tool_routing.mode config key; config validation and the agent loop both
+// reference them so there is a single source of truth.
+const (
+	// ToolRoutingOff disables the supervisor. Tool selection is byte-for-byte
+	// identical to the pre-S7 behavior: every enabled capability's tools are
+	// sent on every turn. This is the default.
+	ToolRoutingOff = "off"
+	// ToolRoutingInBand enables the in-band supervisor (S7a): the main model
+	// self-selects capability groups via the load_tools internal tool before
+	// the worker loop loads those groups' tools. No dedicated routing call.
+	ToolRoutingInBand = "in-band"
+	// ToolRoutingRouter selects the dedicated router model (S7b). Parsed and
+	// validated as a legal mode but not yet implemented; startup wiring
+	// rejects it until the S7b path is built.
+	ToolRoutingRouter = "router"
+)
+
+// ValidToolRoutingMode reports whether mode is a recognized tool_routing mode.
+// An empty string is treated as ToolRoutingOff and is considered valid.
+func ValidToolRoutingMode(mode string) bool {
+	switch mode {
+	case "", ToolRoutingOff, ToolRoutingInBand, ToolRoutingRouter:
+		return true
+	}
+	return false
+}
 
 // ErrTooManyTools is returned by filteredTools when the assembled tool list
 // exceeds MaxToolsPerRequest. The chat handler should surface a clear
@@ -152,6 +181,49 @@ type Agent struct {
 	// InternalTools are handled locally by the agent, not routed through MCP.
 	// Keyed by tool name.
 	InternalTools map[string]InternalTool
+
+	// --- In-band tool routing (S7a). Active only when ToolRoutingMode is
+	// ToolRoutingInBand; otherwise these are inert and behavior is identical
+	// to today. ---
+
+	// ToolRoutingMode is one of ToolRoutingOff (default), ToolRoutingInBand,
+	// or ToolRoutingRouter. Set via WithToolRouting.
+	ToolRoutingMode string
+	// AlwaysOnGroups are capability/group IDs loaded from the first turn
+	// without the model calling load_tools.
+	AlwaysOnGroups []string
+	// MaxRoutedTools optionally caps the post-routing tool list (0 = no cap
+	// beyond MaxToolsPerRequest).
+	MaxRoutedTools int
+	// ForceGroupLoad, when true, makes the agent inject one corrective nudge
+	// if the model tries to answer (tool-lessly) before loading any group
+	// while groups are available. Defaults on for in-band via WithToolRouting.
+	ForceGroupLoad bool
+
+	// groups is the auto-derived group menu offered this turn (capability
+	// registry filtered by enabled). Used to validate load_tools IDs and for
+	// telemetry. Immutable after construction.
+	groups []capability.Group
+	// routingMu guards loadedGroups and stats (load_tools handlers run in
+	// parallel with other tool calls).
+	routingMu sync.Mutex
+	// loadedGroups is the set of group IDs the model has loaded this turn.
+	loadedGroups map[string]bool
+	// stats accumulates per-run routing telemetry (Layer 5).
+	stats RoutingStats
+}
+
+// RoutingStats captures per-run in-band routing telemetry. It is the empirical
+// basis for the S7a→S7b graduation decision (skip / misroute rates). Read it
+// via (*Agent).LastRoutingStats after a Run.
+type RoutingStats struct {
+	Mode          string   // routing mode for the run
+	GroupsOffered int      // number of groups in the menu this turn
+	GroupsLoaded  []string // final set of loaded group IDs (sorted)
+	LoadCalls     int      // number of load_tools invocations
+	Reloads       int      // load_tools invocations after the first (mid-task re-loads)
+	Skipped       bool     // a final answer was produced without ever loading a group while groups were available
+	Compliant     bool     // at least one group was loaded before finishing
 }
 
 // New creates an Agent with the given dependencies.
@@ -164,6 +236,22 @@ func New(provider llm.Provider, router mcpclient.ToolRouter, opts ...Option) *Ag
 	}
 	for _, o := range opts {
 		o(a)
+	}
+	// When in-band routing is enabled, register the internal load_tools tool
+	// here (after all options are applied) so it can't be clobbered by the
+	// order of WithInternalTools vs WithToolRouting, and initialize per-run
+	// routing state.
+	if a.ToolRoutingMode == ToolRoutingInBand {
+		if a.loadedGroups == nil {
+			a.loadedGroups = make(map[string]bool)
+		}
+		if a.InternalTools == nil {
+			a.InternalTools = make(map[string]InternalTool)
+		}
+		a.InternalTools["load_tools"] = InternalTool{
+			Def:     loadToolsDef(),
+			Handler: a.handleLoadTools,
+		}
 	}
 	return a
 }
@@ -217,6 +305,25 @@ func WithInternalTools(tools map[string]InternalTool) Option {
 	return func(a *Agent) { a.InternalTools = tools }
 }
 
+// WithToolRouting configures the in-band supervisor (S7a). mode selects the
+// routing strategy (ToolRoutingOff disables it). groups is the auto-derived
+// group menu for this turn (from capability.BuildGroups). alwaysOn lists
+// groups loaded from turn 1. maxTools optionally caps the post-routing list
+// (0 = no extra cap). forceGroupLoad enables the one-shot corrective nudge
+// when the model answers before loading a group.
+//
+// When mode is not ToolRoutingInBand this is inert; the agent behaves exactly
+// as it does today.
+func WithToolRouting(mode string, groups []capability.Group, alwaysOn []string, maxTools int, forceGroupLoad bool) Option {
+	return func(a *Agent) {
+		a.ToolRoutingMode = mode
+		a.groups = groups
+		a.AlwaysOnGroups = alwaysOn
+		a.MaxRoutedTools = maxTools
+		a.ForceGroupLoad = forceGroupLoad
+	}
+}
+
 // Run executes the agentic tool-use loop for a user message. It calls the
 // provided emit function for each event. The conversation history is carried
 // in messages; the caller manages session state.
@@ -246,6 +353,17 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 	// Defer a final flush in case the stream ends mid-buffer.
 	defer interceptor.Flush()
 
+	// Reset per-run in-band routing state (the agent is normally built fresh
+	// per message, but resetting keeps reuse deterministic) and arrange to
+	// emit routing telemetry when the run ends.
+	if a.ToolRoutingMode == ToolRoutingInBand {
+		a.routingMu.Lock()
+		a.loadedGroups = make(map[string]bool)
+		a.stats = RoutingStats{Mode: a.ToolRoutingMode, GroupsOffered: len(a.groups)}
+		a.routingMu.Unlock()
+		defer a.logRoutingStats()
+	}
+
 	tools, err := a.filteredTools()
 	if err != nil {
 		a.Logger.Error("filteredTools failed", "error", err)
@@ -266,6 +384,10 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 	// after the corresponding interest is loaded via get_interest.
 	loadedInterests := map[string]bool{}
 	calledTools := map[string]bool{}
+
+	// groupLoadNudged tracks whether we've already issued the one-shot
+	// forced-first-step correction for in-band routing this run.
+	groupLoadNudged := false
 
 	// Pre-scan message history for interests loaded in previous turns
 	// so RequiredAfterInterest enforcement works on follow-up messages
@@ -364,6 +486,22 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 
 		// If no tool calls, the LLM produced a final text response.
 		if len(pendingToolCalls) == 0 {
+			// In-band routing forced-first-step (optional): if the model is
+			// answering without having activated any group while groups are
+			// available, nudge it once to load the relevant group(s) before
+			// allowing a tool-less answer. After one nudge we let the answer
+			// stand (graceful fallback) — a genuine no-tool answer is valid.
+			if a.shouldForceGroupLoad() && !groupLoadNudged {
+				groupLoadNudged = true
+				a.Logger.Warn("in-band routing: answer attempted before loading a tool group, nudging",
+					"iteration", iteration+1)
+				emit(Event{Type: EventTextClear})
+				messages = append(messages, llm.Message{
+					Role:    llm.RoleSystem,
+					Content: "You attempted to answer without loading any tool group. If the user's request needs tools, call load_tools with the relevant Group ID(s) now, then answer. If it genuinely needs no tools, you may answer directly.",
+				})
+				continue
+			}
 			// Check if any required tools were skipped.
 			if missing := a.missingRequiredTool(loadedInterests, calledTools); missing != "" {
 				a.Logger.Warn("LLM skipped required tool, forcing retry",
@@ -581,6 +719,21 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 
 		_ = hadError // used for future capability filtering
 
+		// In-band routing: a load_tools call this round may have changed the
+		// active group set, so recompute the tool list for the next
+		// iteration. For mode:off this is never reached and `tools` stays
+		// exactly as computed once before the loop (byte-identical behavior).
+		if a.ToolRoutingMode == ToolRoutingInBand {
+			newTools, ferr := a.filteredTools()
+			if ferr != nil {
+				a.Logger.Error("filteredTools failed after routing update", "error", ferr)
+				emit(Event{Type: EventError, Error: ferr.Error()})
+				emit(Event{Type: EventDone})
+				return
+			}
+			tools = newTools
+		}
+
 		a.Logger.Info("tool round complete",
 			"iteration", iteration+1,
 			"tools_called", len(pendingToolCalls),
@@ -692,7 +845,20 @@ type SystemPromptConfig struct {
 // are appended so the LLM knows how to produce dashboard panels.
 // If canvasTabs is non-empty, a canvas context section is appended so the
 // LLM knows what items the user has pinned in the canvas.
+//
+// This is the no-tool-routing form, byte-for-byte identical to today. For the
+// in-band supervisor (S7a), use BuildSystemPromptWithRouting.
 func BuildSystemPrompt(cfg SystemPromptConfig, router mcpclient.ToolRouter, interestIndex string, canvasTabs ...CanvasTabSummary) string {
+	return BuildSystemPromptWithRouting(cfg, router, interestIndex, "", canvasTabs...)
+}
+
+// BuildSystemPromptWithRouting is BuildSystemPrompt plus an optional in-band
+// tool-routing group index (S7a). When groupIndex is empty the output is
+// byte-for-byte identical to BuildSystemPrompt — this is the mode:off
+// guarantee. When groupIndex is non-empty, a "Tool Groups" section is appended
+// instructing the model to call load_tools(group) before answering, reusing
+// the forced-first-step contract proven by the interest path.
+func BuildSystemPromptWithRouting(cfg SystemPromptConfig, router mcpclient.ToolRouter, interestIndex, groupIndex string, canvasTabs ...CanvasTabSummary) string {
 	servers := router.ConnectedServers()
 	tools := router.Tools()
 
@@ -751,6 +917,23 @@ Guidelines:
 		prompt += fmt.Sprintf("\nYou have access to %d tools from the connected data sources. Use them to answer questions about the storage infrastructure.\n", len(tools))
 	} else {
 		prompt += "\nNo tools are currently available. You can still answer general questions about NetApp storage.\n"
+	}
+
+	// Append the in-band tool-routing group index (S7a) when present. This is
+	// the forced-first-step contract: the model must load the relevant
+	// group(s) before answering. Phrasing mirrors the proven interest nag.
+	if groupIndex != "" {
+		prompt += "\n## Tool Groups\n\n"
+		prompt += "The available tools are organized into groups. Their schemas are NOT all loaded up front.\n"
+		prompt += "**CRITICAL**: Before answering a request that needs tools, look at the table below and decide\n"
+		prompt += "which group(s) are relevant, then call `load_tools` with those group IDs as your very first\n"
+		prompt += "tool call to make their tools available. Do NOT skip this step — you cannot call a group's\n"
+		prompt += "tools until you have loaded that group. You may call `load_tools` again at any time if you\n"
+		prompt += "discover mid-task that you need another group; calls are additive.\n\n"
+		prompt += "If the user's request does not require any tools (e.g. a greeting or a general question you\n"
+		prompt += "can answer directly), you do not need to call `load_tools`.\n\n"
+		prompt += groupIndex
+		prompt += "\nCall `load_tools` with one or more of the Group IDs above, e.g. `load_tools({\"groups\": [\"<id>\"]})`.\n"
 	}
 
 	// Append chart format spec and interest index when interests are available.
@@ -1036,6 +1219,32 @@ func (a *Agent) filteredTools() ([]llm.ToolDef, error) {
 		}
 	}
 
+	// In-band tool routing (S7a): further restrict the (already
+	// capability/mode-filtered) MCP tools to the active group set —
+	// always-on groups unioned with whatever the model has loaded this turn.
+	// Internal tools (load_tools, get_interest, …) are unaffected; they are
+	// appended below regardless. When nothing is active, only internal tools
+	// remain, which is the intended "load before you act" starting state.
+	if a.ToolRoutingMode == ToolRoutingInBand && a.ToolServerMap != nil {
+		active := a.activeGroups()
+		routed := make([]llm.ToolDef, 0, len(mcpTools))
+		perGroup := make(map[string]int)
+		for _, t := range mcpTools {
+			capID := a.ToolServerMap[t.Name]
+			if !active[capID] {
+				continue
+			}
+			routed = append(routed, t)
+			perGroup[capID]++
+		}
+		if err := a.checkRoutedBudget(perGroup); err != nil {
+			a.Logger.Error("routed tool budget exceeded",
+				"per_group", perGroup, "max", MaxToolsPerRequest, "max_routed", a.MaxRoutedTools)
+			return nil, err
+		}
+		mcpTools = routed
+	}
+
 	tools := a.appendInternalTools(mcpTools)
 
 	if len(tools) > MaxToolsPerRequest {
@@ -1057,6 +1266,206 @@ func (a *Agent) filteredTools() ([]llm.ToolDef, error) {
 	}
 
 	return tools, nil
+}
+
+// loadToolsDef returns the LLM tool definition for the internal load_tools
+// tool (S7a). The model calls it to make a capability group's tools available.
+func loadToolsDef() llm.ToolDef {
+	schema, _ := json.Marshal(map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"groups": map[string]any{
+				"type":        "array",
+				"items":       map[string]any{"type": "string"},
+				"description": "Group IDs to load, taken from the Tool Groups table in the system prompt (e.g. [\"jira\"]). Loading is additive — call again to add more groups mid-task.",
+			},
+		},
+		"required": []string{"groups"},
+	})
+	return llm.ToolDef{
+		Name:         "load_tools",
+		Description:  "Make the tools of one or more capability groups available to call. You MUST call this before using a group's tools. Calls are additive and idempotent.",
+		Schema:       schema,
+		ReadOnlyHint: true,
+	}
+}
+
+// handleLoadTools is the internal handler for the load_tools tool. It marks the
+// requested groups active for the remainder of the turn so subsequent
+// filteredTools() calls include their tools. Unknown groups produce a
+// structured, recoverable result (not a hard error) so the model can retry
+// with a valid ID. Idempotent: repeated calls union into the active set.
+func (a *Agent) handleLoadTools(_ context.Context, input json.RawMessage) (string, error) {
+	var req struct {
+		Groups []string `json:"groups"`
+	}
+	if err := json.Unmarshal(input, &req); err != nil {
+		return "", fmt.Errorf("load_tools: invalid input: %w", err)
+	}
+	if len(req.Groups) == 0 {
+		return "", fmt.Errorf("load_tools: 'groups' is required and must be a non-empty array of group IDs")
+	}
+
+	var known, unknown []string
+	a.routingMu.Lock()
+	for _, g := range req.Groups {
+		if a.groupExistsLocked(g) {
+			a.loadedGroups[g] = true
+			known = append(known, g)
+		} else {
+			unknown = append(unknown, g)
+		}
+	}
+	// Telemetry: count this invocation; any invocation after the first is a
+	// mid-task reload.
+	a.stats.LoadCalls++
+	if a.stats.LoadCalls > 1 {
+		a.stats.Reloads++
+	}
+	loaded := make([]string, 0, len(a.loadedGroups))
+	for g := range a.loadedGroups {
+		loaded = append(loaded, g)
+	}
+	a.routingMu.Unlock()
+
+	sort.Strings(loaded)
+	loadedStr := "none"
+	if len(loaded) > 0 {
+		loadedStr = strings.Join(loaded, ", ")
+	}
+
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		return fmt.Sprintf(
+			"Unknown group(s): %s. No such group exists. Available groups: %s. Currently loaded: %s.",
+			strings.Join(unknown, ", "), strings.Join(a.groupIDs(), ", "), loadedStr), nil
+	}
+	sort.Strings(known)
+	return fmt.Sprintf(
+		"Loaded tool group(s): %s. Their tools are now available to call. Currently loaded: %s.",
+		strings.Join(known, ", "), loadedStr), nil
+}
+
+// groupExistsLocked reports whether id names a known group. Caller holds
+// routingMu (the group menu is immutable, but this keeps the access pattern
+// consistent).
+func (a *Agent) groupExistsLocked(id string) bool {
+	for _, g := range a.groups {
+		if g.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// groupIDs returns the sorted list of offered group IDs (for diagnostics).
+func (a *Agent) groupIDs() []string {
+	ids := make([]string, 0, len(a.groups))
+	for _, g := range a.groups {
+		ids = append(ids, g.ID)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// activeGroups returns the set of currently active group IDs: always-on groups
+// unioned with everything the model has loaded this turn.
+func (a *Agent) activeGroups() map[string]bool {
+	active := make(map[string]bool, len(a.AlwaysOnGroups))
+	for _, g := range a.AlwaysOnGroups {
+		active[g] = true
+	}
+	a.routingMu.Lock()
+	for g := range a.loadedGroups {
+		active[g] = true
+	}
+	a.routingMu.Unlock()
+	return active
+}
+
+// shouldForceGroupLoad reports whether the agent should inject a corrective
+// nudge because the model is about to answer tool-lessly without having
+// activated any group while groups are available. Always-on groups count as
+// active, so deployments that preload a baseline never trigger this.
+func (a *Agent) shouldForceGroupLoad() bool {
+	if a.ToolRoutingMode != ToolRoutingInBand || !a.ForceGroupLoad {
+		return false
+	}
+	if len(a.groups) == 0 {
+		return false
+	}
+	return len(a.activeGroups()) == 0
+}
+
+// checkRoutedBudget asserts the post-routing per-group tool counts fit within
+// the effective budget. When a single group alone exceeds the budget, the
+// error names it — the signal that one server's fan-out is irreducible and
+// needs an operator-side fix.
+func (a *Agent) checkRoutedBudget(perGroup map[string]int) error {
+	budget := MaxToolsPerRequest
+	if a.MaxRoutedTools > 0 && a.MaxRoutedTools < budget {
+		budget = a.MaxRoutedTools
+	}
+	total := 0
+	for _, n := range perGroup {
+		total += n
+	}
+	if total <= budget {
+		return nil
+	}
+	var offenders []string
+	for g, n := range perGroup {
+		if n > budget {
+			offenders = append(offenders, fmt.Sprintf("%q (%d tools)", g, n))
+		}
+	}
+	if len(offenders) > 0 {
+		sort.Strings(offenders)
+		return fmt.Errorf("%w: loaded group %s alone exceeds the %d-tool budget; this server's tool fan-out is irreducible and needs an operator-side fix",
+			ErrTooManyTools, strings.Join(offenders, ", "), budget)
+	}
+	return fmt.Errorf("%w: %d tools across the loaded groups exceed the %d-tool budget; load fewer groups per turn",
+		ErrTooManyTools, total, budget)
+}
+
+// LastRoutingStats returns a copy of the telemetry from the most recent Run.
+// Meaningful only when in-band routing is enabled.
+func (a *Agent) LastRoutingStats() RoutingStats {
+	a.routingMu.Lock()
+	defer a.routingMu.Unlock()
+	s := a.stats
+	loaded := make([]string, 0, len(a.loadedGroups))
+	for g := range a.loadedGroups {
+		loaded = append(loaded, g)
+	}
+	sort.Strings(loaded)
+	s.GroupsLoaded = loaded
+	return s
+}
+
+// logRoutingStats finalizes and emits the per-run routing telemetry (Layer 5).
+func (a *Agent) logRoutingStats() {
+	a.routingMu.Lock()
+	loaded := make([]string, 0, len(a.loadedGroups))
+	for g := range a.loadedGroups {
+		loaded = append(loaded, g)
+	}
+	a.stats.GroupsLoaded = loaded
+	a.stats.Skipped = a.stats.GroupsOffered > 0 && a.stats.LoadCalls == 0 && len(a.AlwaysOnGroups) == 0
+	a.stats.Compliant = a.stats.LoadCalls > 0
+	stats := a.stats
+	a.routingMu.Unlock()
+	sort.Strings(loaded)
+
+	a.Logger.Info("tool routing summary",
+		"mode", stats.Mode,
+		"groups_offered", stats.GroupsOffered,
+		"groups_loaded", loaded,
+		"load_calls", stats.LoadCalls,
+		"reloads", stats.Reloads,
+		"skipped", stats.Skipped,
+		"compliant", stats.Compliant,
+	)
 }
 
 // appendInternalTools adds internal tool definitions to the tool list.
