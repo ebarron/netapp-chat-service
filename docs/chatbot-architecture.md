@@ -201,6 +201,31 @@ There is no persistence — sessions are lost on chat-service restart. This is i
 
 The chart format spec is a string constant (`chartFormatSpec`) that documents all 12 panel types with their JSON schemas. The interest catalog is a dynamic markdown table built from loaded interests. Together they give the LLM the vocabulary and instructions to produce structured visual responses.
 
+When **tool routing** is enabled (§2.7), `BuildSystemPromptWithRouting()` injects a sixth block — the capability **group index** — and instructs the model to call `load_tools` before using any grouped tools. When tool routing is off (the default), this block is absent and the prompt is byte-for-byte identical to the legacy `BuildSystemPrompt()` output.
+
+### 2.7 Tool Routing (High Tool-Count Scaling)
+
+As more MCP servers connect, the flattened per-turn tool list grows toward the provider's hard cap (`MaxToolsPerRequest = 128`) and selection accuracy degrades well before that. **Tool routing** (strategy S7a, the "in-band supervisor") keeps the per-turn tool list small without a dedicated routing-model round trip. It is **opt-in and off by default**; absent configuration, behavior is byte-for-byte identical to before.
+
+How it works (in-band mode):
+
+1. **Group registry** — `capability.BuildGroups()` derives a capability/group menu 1:1 from the connected capabilities (no hardcoded product/view map). Each group's label/description come from optional per-server `capability_name`/`capability_description` config, falling back to the server's tool names. `capability.RenderGroupIndex()` renders this as a compact menu.
+2. **Group index in the system prompt** — the menu is injected (§2.6) instead of the full flattened tool schema. The model sees group names + descriptions, not every tool.
+3. **`load_tools` internal tool** — the model self-selects the groups it needs by calling `load_tools(groups)`. Only then are those groups' tools loaded into the tool list for subsequent iterations. This is the same in-band "search-then-load" shape the interest system already uses (`get_interest`), not a separate supervisor request. Groups named in the `always_on` config list are preloaded from the first turn without requiring a `load_tools` call.
+4. **Per-message filtering + budget guard** — `filteredTools()` restricts the offered tools to loaded groups (plus internal tools), recomputed each iteration, and enforces the `max_tools` budget so the request stays under the cap.
+5. **Forced-first-step nudge** — in `in-band` mode (on by default) the agent ensures `load_tools` is called before grouped tools are used; if the model skips it, the agent nudges and retries.
+6. **Telemetry** — `agent.RoutingStats` (via `(*Agent).LastRoutingStats`) records groups offered/loaded, `load_tools` call count, reloads, and skip/compliant outcomes.
+
+Configuration is via the `tool_routing` block (§10.4):
+
+| Mode | Behavior |
+|------|----------|
+| `off` | Default. No routing; full filtered tool list as before. |
+| `in-band` | S7a supervisor — group index + `load_tools` self-selection. |
+| `router` | S7b dedicated routing model. Parsed but **rejected at startup** until implemented. |
+
+This feature is **server-side only** — the chat UI component (`@edjbarron/netapp-chat-component`) is unchanged; `load_tools` appears in the UI like any other internal tool under the existing trace toggle. See `docs/high-tool-count-scaling.md` for the full design, decisions, and deferred work.
+
 ---
 
 ## 3. Frontend Architecture
@@ -648,7 +673,7 @@ Capabilities gate LLM access to MCP tool servers. Each MCP server maps to one ca
 
 ### 6.2 How Filtering Works
 
-Tool filtering happens in two stages: **pre-filtering** (before agent creation) and **capability filtering** (inside the agent loop).
+Tool filtering happens in two stages: **pre-filtering** (before agent creation) and **capability filtering** (inside the agent loop). When tool routing is enabled, a third stage — **group routing** (§2.7) — further narrows the capability-filtered list to the groups the model loads via `load_tools`.
 
 #### Pre-filtering by Interest
 
@@ -664,8 +689,9 @@ When the agent prepares to call the LLM, `filteredTools()` builds the tool list:
 2. Maps each tool to its server, then to the corresponding capability
 3. Excludes tools whose capability is Off (including any set Off by pre-filtering)
 4. For Ask-state tools, the agent's `ApprovalFunc` gates execution at call time
-5. Internal tools (get_interest, save_interest, delete_interest) are appended after filtering
+5. Internal tools (get_interest, save_interest, delete_interest, and — when routing is enabled — load_tools) are appended after filtering
 6. Tools marked `ReadWriteOnly` (save_interest, delete_interest) are excluded unless mode is read-write
+7. When **tool routing** is enabled (§2.7), the capability-filtered list is further restricted to the groups the model has loaded via `load_tools`, recomputed each iteration and capped by the `max_tools` budget
 
 ### 6.3 Ask-Mode Approval Flow
 
@@ -852,6 +878,24 @@ capabilities:
 - Vite dev proxy: `/api` → `localhost:8080` (chat-service), harvest-proxy routes → `localhost:8083`
 - Dev-mode auth: `FakeAuthMiddleware` accepts `admin/Netapp01`
 
+### 10.4 Tool Routing
+
+Tool routing (§2.7) is configured via the `tool_routing` block (off by default). Per-server `capability_name`/`capability_description` label and describe each capability in the routing menu (auto-derived from tool names when omitted):
+
+```yaml
+tool_routing:
+  mode: in-band        # off (default) | in-band | router (rejected until implemented)
+  max_tools: 64        # optional cap on the post-routing tool list (0 = no extra cap)
+  always_on:           # group IDs loaded from turn 1 without the model calling load_tools
+    - jira
+
+mcp_servers:
+  - name: jira
+    url: http://jira-mcp:8090
+    capability_name: "Jira"
+    capability_description: "Issue tracking: search, create, transition issues"
+```
+
 ---
 
 ## 11. Security Model
@@ -1015,7 +1059,7 @@ Declarative rendering     Frontend code execution       Type-dispatched JSON, no
 | `cmd/chat-service/main.go` | ~250 | Startup, MCP connections, capability init |
 | `server/server.go` | ~400 | SSE streaming, session management, ask-mode |
 | `config/config.go` | ~300 | LLM config CRUD, model discovery, validation |
-| `agent/agent.go` | ~750 | Agentic tool-use loop, system prompt, tool filtering |
+| `agent/agent.go` | ~900 | Agentic tool-use loop, system prompt, tool filtering, tool routing (load_tools, group filtering, RoutingStats) |
 | `llm/provider.go` | ~150 | Provider interface, config types |
 | `llm/openai.go` | ~250 | OpenAI/custom provider |
 | `llm/anthropic.go` | ~250 | Anthropic provider |
@@ -1023,6 +1067,7 @@ Declarative rendering     Frontend code execution       Type-dispatched JSON, no
 | `mcpclient/router.go` | ~350 | Multi-server MCP routing |
 | `session/session.go` | ~150 | In-memory sessions, sliding window |
 | `capability/capability.go` | ~120 | Off/Ask/Allow state model |
+| `capability/group.go` | ~120 | Tool-routing group registry (`BuildGroups`, `RenderGroupIndex`) |
 | `interest/interest.go` | ~80 | Interest types, frontmatter parser |
 | `interest/catalog.go` | ~280 | Catalog loading, filtering, indexing |
 | `interest/tool.go` | ~280 | get/save/delete tool handlers |
@@ -1066,3 +1111,4 @@ Declarative rendering     Frontend code execution       Type-dispatched JSON, no
 - **Design Spec**: `docs/chatbot-design-spec.md` — original design covering MCP deployment, BYO LLM, backend API, frontend UI, capability controls, security, and phasing
 - **Graphical UI Enhancements**: `docs/chatbot-graphical-ui-enhancements.md` — interest system design, chart type catalog, rendering architecture, implementation plan with milestones
 - **Object-Detail Design**: `docs/chatbot-object-detail-design.md` — interest/type layering, the `object-detail` code fence type, navigation paradigm (dashboard → drill-down → detail), and the alerts lighthouse use case
+- **High Tool-Count Scaling**: `docs/high-tool-count-scaling.md` — strategies for keeping the per-request tool list under the provider cap as MCP servers grow; the implemented S7a in-band tool-routing supervisor (§2.7), and deferred strategies (S3, S7b)

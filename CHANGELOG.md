@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.17
+
+### Docs
+
+- Document the S7a in-band tool-routing supervisor in
+  `docs/chatbot-architecture.md`: new §2.7 (tool routing), the group-index
+  block in the system prompt (§2.6), group routing as a third tool-filtering
+  stage (§6.2), the `tool_routing` config block (§10.4), and file-index /
+  related-docs entries. No code changes.
+
 ## v0.1.16
 
 ### Added
