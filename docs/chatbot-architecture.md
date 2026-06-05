@@ -211,7 +211,7 @@ How it works (in-band mode):
 
 1. **Group registry** — `capability.BuildGroups()` derives a capability/group menu 1:1 from the connected capabilities (no hardcoded product/view map). Each group's label/description come from optional per-server `capability_name`/`capability_description` config, falling back to the server's tool names. `capability.RenderGroupIndex()` renders this as a compact menu.
 2. **Group index in the system prompt** — the menu is injected (§2.6) instead of the full flattened tool schema. The model sees group names + descriptions, not every tool.
-3. **`load_tools` internal tool** — the model self-selects the groups it needs by calling `load_tools(groups)`. Only then are those groups' tools loaded into the tool list for subsequent iterations. This is the same in-band "search-then-load" shape the interest system already uses (`get_interest`), not a separate supervisor request. Groups named in the `always_on` config list are preloaded from the first turn without requiring a `load_tools` call.
+3. **`load_tools` internal tool** — the model self-selects the groups it needs by calling `load_tools(groups)`. Only then are those groups' tools loaded into the tool list for subsequent iterations. This is the same in-band "search-then-load" shape the interest system already uses (`get_interest`), not a separate supervisor request. Groups named in the `always_on` config list are preloaded from the first turn without requiring a `load_tools` call. When `group_expand_threshold` is set (S8), a group larger than the threshold is offered tool-by-tool and the model can load just the tools it needs via `load_tools(tools)` instead of the whole server — useful when a single MCP (e.g. an ~80-tool storage server) is too large to pair with others under the cap.
 4. **Per-message filtering + budget guard** — `filteredTools()` restricts the offered tools to loaded groups (plus internal tools), recomputed each iteration, and enforces the `max_tools` budget so the request stays under the cap.
 5. **Forced-first-step nudge** — in `in-band` mode (on by default) the agent ensures `load_tools` is called before grouped tools are used; if the model skips it, the agent nudges and retries.
 6. **Telemetry** — `agent.RoutingStats` (via `(*Agent).LastRoutingStats`) records groups offered/loaded, `load_tools` call count, reloads, and skip/compliant outcomes.
@@ -884,9 +884,11 @@ Tool routing (§2.7) is configured via the `tool_routing` block (off by default)
 
 ```yaml
 tool_routing:
-  mode: in-band        # off (default) | in-band | router (rejected until implemented)
-  max_tools: 64        # optional cap on the post-routing tool list (0 = no extra cap)
-  always_on:           # group IDs loaded from turn 1 without the model calling load_tools
+  mode: in-band             # off (default) | in-band | router (rejected until implemented)
+  max_tools: 64             # optional cap on the post-routing tool list (0 = no extra cap)
+  group_expand_threshold: 25 # S8: groups larger than this are offered tool-by-tool so the model
+                             # can load individual tools from a big server (0 = whole-group only)
+  always_on:                # group IDs loaded from turn 1 without the model calling load_tools
     - jira
 
 mcp_servers:

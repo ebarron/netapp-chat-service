@@ -163,6 +163,78 @@ func TestBuildGroupsNoHostSemantics(t *testing.T) {
 	}
 }
 
+// TestBuildGroupsExpandingThreshold verifies S8: a group whose tool count
+// exceeds the threshold is marked Expandable and carries per-tool metadata,
+// while small groups (and a zero threshold) stay whole.
+func TestBuildGroupsExpandingThreshold(t *testing.T) {
+	caps := []Capability{
+		{ID: "ontap", Name: "ONTAP", State: StateAllow, ServerName: "ontap-mcp"},
+		{ID: "jira", Name: "Jira", State: StateAllow, ServerName: "jira-mcp"},
+	}
+	tools := map[string][]ToolInfo{
+		"ontap": {{Name: "c"}, {Name: "a"}, {Name: "b"}, {Name: "d"}},
+		"jira":  {{Name: "search_issues"}},
+	}
+
+	// Threshold 3: ontap (4 tools) expands; jira (1 tool) does not.
+	groups := BuildGroupsExpanding(caps, nil, tools, 3)
+	byID := map[string]Group{}
+	for _, g := range groups {
+		byID[g.ID] = g
+	}
+	if !byID["ontap"].Expandable {
+		t.Errorf("ontap (4 tools > 3) should be Expandable")
+	}
+	if byID["jira"].Expandable {
+		t.Errorf("jira (1 tool) should not be Expandable")
+	}
+	// Per-tool metadata is carried and sorted.
+	wantTools := []string{"a", "b", "c", "d"}
+	gotTools := make([]string, 0)
+	for _, ti := range byID["ontap"].Tools {
+		gotTools = append(gotTools, ti.Name)
+	}
+	if !reflect.DeepEqual(gotTools, wantTools) {
+		t.Errorf("ontap.Tools = %v, want sorted %v", gotTools, wantTools)
+	}
+
+	// Threshold 0 disables expansion entirely (BuildGroups equivalence).
+	for _, g := range BuildGroupsExpanding(caps, nil, tools, 0) {
+		if g.Expandable {
+			t.Errorf("group %q should not expand at threshold 0", g.ID)
+		}
+	}
+	for _, g := range BuildGroups(caps, nil, tools) {
+		if g.Expandable {
+			t.Errorf("BuildGroups should never mark %q expandable", g.ID)
+		}
+	}
+}
+
+// TestRenderGroupIndexExpandable verifies the rendered menu emits a per-tool
+// sub-index for an expandable group and flags it as a large server.
+func TestRenderGroupIndexExpandable(t *testing.T) {
+	caps := []Capability{{ID: "ontap", Name: "ONTAP", State: StateAllow, ServerName: "ontap-mcp"}}
+	tools := map[string][]ToolInfo{"ontap": {
+		{Name: "ontap_get_volume", Description: "Get a volume"},
+		{Name: "ontap_list_volumes", Description: "List volumes"},
+		{Name: "ontap_get_cluster", Description: "Cluster health"},
+	}}
+	idx := RenderGroupIndex(BuildGroupsExpanding(caps, nil, tools, 2))
+
+	if !strings.Contains(idx, "Large server") {
+		t.Errorf("expandable group should be flagged as a large server:\n%s", idx)
+	}
+	if !strings.Contains(idx, "Tools in group \"ontap\"") {
+		t.Errorf("missing per-tool sub-index heading:\n%s", idx)
+	}
+	for _, name := range []string{"ontap_get_volume", "ontap_list_volumes", "ontap_get_cluster"} {
+		if !strings.Contains(idx, name) {
+			t.Errorf("sub-index missing tool %q:\n%s", name, idx)
+		}
+	}
+}
+
 // TestBuildGroupsToolNamesSorted verifies ToolNames are sorted for stable
 // output regardless of input order.
 func TestBuildGroupsToolNamesSorted(t *testing.T) {

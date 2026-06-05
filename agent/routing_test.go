@@ -166,6 +166,157 @@ func TestLoadToolsHonorsReadOnlyMode(t *testing.T) {
 	}
 }
 
+// --- S8: intra-group (tool-level) selection ---
+
+// oversizedGroupAgent builds an in-band agent with an expandable "ontap" group
+// (3 read-only tools) and a small "jira" group (1 tool). It mirrors the menu a
+// server would emit with group_expand_threshold set below ontap's tool count.
+func oversizedGroupAgent(mode string) *Agent {
+	tools := []llm.ToolDef{
+		mcpclient.MockReadOnlyTool("ontap_get_volume", "Get a volume"),
+		mcpclient.MockReadOnlyTool("ontap_list_volumes", "List volumes"),
+		mcpclient.MockReadOnlyTool("ontap_get_cluster", "Cluster health"),
+		mcpclient.MockReadOnlyTool("jira_search", "Search Jira"),
+	}
+	router := mcpclient.NewMockRouter(tools)
+	toolServer := map[string]string{
+		"ontap_get_volume":   "ontap",
+		"ontap_list_volumes": "ontap",
+		"ontap_get_cluster":  "ontap",
+		"jira_search":        "jira",
+	}
+	groups := []capability.Group{
+		{ID: "jira", Label: "Jira", ToolNames: []string{"jira_search"}},
+		{ID: "ontap", Label: "ONTAP", Expandable: true, ToolNames: []string{"ontap_get_cluster", "ontap_get_volume", "ontap_list_volumes"}},
+	}
+	return New(nil, router,
+		WithCapabilityFilter(capability.CapabilityMap{
+			"ontap": capability.StateAllow,
+			"jira":  capability.StateAllow,
+		}, mode),
+		WithToolServerMap(toolServer),
+		WithToolRouting(ToolRoutingInBand, groups, nil, 0, true),
+	)
+}
+
+func loadIndividualTools(t *testing.T, a *Agent, tools ...string) string {
+	t.Helper()
+	in, _ := json.Marshal(map[string]any{"tools": tools})
+	res, err := a.handleLoadTools(context.Background(), in)
+	if err != nil {
+		t.Fatalf("handleLoadTools(tools=%v) error = %v", tools, err)
+	}
+	return res
+}
+
+// TestLoadToolsIndividualActivatesOnlyThatTool verifies S8: loading a single
+// tool from an oversized group activates exactly that tool, not the whole
+// group — the entire point of tool-level selection.
+func TestLoadToolsIndividualActivatesOnlyThatTool(t *testing.T) {
+	ag := oversizedGroupAgent("read-only")
+	loadIndividualTools(t, ag, "ontap_get_volume")
+
+	ft, err := ag.filteredTools()
+	if err != nil {
+		t.Fatalf("filteredTools() error = %v", err)
+	}
+	got := toolNameSet(ft)
+	if !got["ontap_get_volume"] {
+		t.Error("ontap_get_volume should be active after loading it individually")
+	}
+	if got["ontap_list_volumes"] || got["ontap_get_cluster"] {
+		t.Errorf("loading one tool must NOT activate the rest of the group; got %v", got)
+	}
+	if got["jira_search"] {
+		t.Error("jira_search should not be active — neither its group nor the tool was loaded")
+	}
+}
+
+// TestLoadToolsMixedGroupAndTool verifies a single call can load a whole small
+// group and an individual tool from an oversized one.
+func TestLoadToolsMixedGroupAndTool(t *testing.T) {
+	ag := oversizedGroupAgent("read-only")
+	in, _ := json.Marshal(map[string]any{
+		"groups": []string{"jira"},
+		"tools":  []string{"ontap_get_cluster"},
+	})
+	if _, err := ag.handleLoadTools(context.Background(), in); err != nil {
+		t.Fatalf("handleLoadTools error = %v", err)
+	}
+	got := toolNameSet(mustFilter(t, ag))
+	if !got["jira_search"] {
+		t.Error("jira_search should be active (whole jira group loaded)")
+	}
+	if !got["ontap_get_cluster"] {
+		t.Error("ontap_get_cluster should be active (loaded individually)")
+	}
+	if got["ontap_get_volume"] || got["ontap_list_volumes"] {
+		t.Errorf("other ontap tools must stay inactive; got %v", got)
+	}
+}
+
+// TestLoadToolsUnknownTool verifies an unknown tool name is recoverable (not a
+// hard error) and activates nothing.
+func TestLoadToolsUnknownTool(t *testing.T) {
+	ag := oversizedGroupAgent("read-only")
+	in, _ := json.Marshal(map[string]any{"tools": []string{"ontap_nonexistent"}})
+	res, err := ag.handleLoadTools(context.Background(), in)
+	if err != nil {
+		t.Fatalf("handleLoadTools error = %v", err)
+	}
+	if !strings.Contains(strings.ToLower(res), "unknown tool") {
+		t.Errorf("result = %q, want it to report the unknown tool", res)
+	}
+	if len(toolNameSet(mustFilter(t, ag))) > 1 { // only load_tools internal remains
+		t.Errorf("unknown tool must not activate anything")
+	}
+}
+
+// TestLoadToolsRequiresGroupsOrTools verifies an empty call is a usage error.
+func TestLoadToolsRequiresGroupsOrTools(t *testing.T) {
+	ag := oversizedGroupAgent("read-only")
+	if _, err := ag.handleLoadTools(context.Background(), json.RawMessage(`{}`)); err == nil {
+		t.Error("expected an error when neither groups nor tools is supplied")
+	}
+}
+
+// TestToolLevelLoadCountsAsSelection verifies a tool-level load suppresses the
+// forced-first-step nudge (the model has made a selection).
+func TestToolLevelLoadCountsAsSelection(t *testing.T) {
+	ag := oversizedGroupAgent("read-only")
+	if !ag.shouldForceGroupLoad() {
+		t.Fatal("precondition: nudge should fire before any selection")
+	}
+	loadIndividualTools(t, ag, "ontap_get_volume")
+	if ag.shouldForceGroupLoad() {
+		t.Error("a tool-level load should count as a selection and suppress the nudge")
+	}
+}
+
+// TestToolLevelTelemetry verifies a tool-level load surfaces in telemetry: the
+// owning group appears in GroupsLoaded and the tool in ToolsLoaded.
+func TestToolLevelTelemetry(t *testing.T) {
+	ag := oversizedGroupAgent("read-only")
+	loadIndividualTools(t, ag, "ontap_get_volume")
+
+	stats := ag.LastRoutingStats()
+	if len(stats.GroupsLoaded) != 1 || stats.GroupsLoaded[0] != "ontap" {
+		t.Errorf("GroupsLoaded = %v, want [ontap] (owning group of the loaded tool)", stats.GroupsLoaded)
+	}
+	if len(stats.ToolsLoaded) != 1 || stats.ToolsLoaded[0] != "ontap_get_volume" {
+		t.Errorf("ToolsLoaded = %v, want [ontap_get_volume]", stats.ToolsLoaded)
+	}
+}
+
+func mustFilter(t *testing.T, a *Agent) []llm.ToolDef {
+	t.Helper()
+	ft, err := a.filteredTools()
+	if err != nil {
+		t.Fatalf("filteredTools() error = %v", err)
+	}
+	return ft
+}
+
 // --- Layer 4: filteredTools restriction, budget, enforcement ---
 
 // TestRoutingModeOffUnaffected verifies that with mode off, filteredTools

@@ -40,6 +40,10 @@ type ChatDeps struct {
 	ToolRoutingMaxTools  int
 	ToolRoutingAlwaysOn  []string
 	ToolRoutingForceLoad bool
+	// ToolRoutingExpandThreshold enables S8 intra-group tool-level selection:
+	// groups larger than this are listed tool-by-tool in the routing menu so
+	// the model can load a subset. 0 disables expansion (pure group-level S7a).
+	ToolRoutingExpandThreshold int
 }
 
 // PendingApproval represents a tool call waiting for user approval.
@@ -441,7 +445,7 @@ func computeToolBudget(caps []capability.Capability, mode string, router mcpclie
 // annotated server (ReadOnlyHint) presents a smaller group and the model is
 // never offered tools it cannot call this turn. ask-on-write capabilities
 // surface their writes regardless of mode, matching filteredTools().
-func buildRoutingGroups(caps []capability.Capability, capStates map[string]capability.State, mode string, connected map[string]bool, toolServerMap map[string]string, router mcpclient.ToolRouter) []capability.Group {
+func buildRoutingGroups(caps []capability.Capability, capStates map[string]capability.State, mode string, connected map[string]bool, toolServerMap map[string]string, router mcpclient.ToolRouter, expandThreshold int) []capability.Group {
 	groupEnabled := make(map[string]bool, len(caps))
 	askOnWrite := make(map[string]bool, len(caps))
 	for _, c := range caps {
@@ -464,7 +468,7 @@ func buildRoutingGroups(caps []capability.Capability, capStates map[string]capab
 		}
 		toolsByCap[capID] = append(toolsByCap[capID], capability.ToolInfo{Name: t.Name, Description: t.Description})
 	}
-	return capability.BuildGroups(caps, groupEnabled, toolsByCap)
+	return capability.BuildGroupsExpanding(caps, groupEnabled, toolsByCap, expandThreshold)
 }
 
 // effectiveToolBudget returns the tool count that actually constrains a
@@ -661,7 +665,7 @@ func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit C
 	var groupIndex string
 	var groups []capability.Group
 	if deps.ToolRoutingMode == agent.ToolRoutingInBand {
-		groups = buildRoutingGroups(deps.Capabilities, capStates, mode, connectedServers, toolServerMap, deps.Router)
+		groups = buildRoutingGroups(deps.Capabilities, capStates, mode, connectedServers, toolServerMap, deps.Router, deps.ToolRoutingExpandThreshold)
 		groupIndex = capability.RenderGroupIndex(groups)
 	}
 

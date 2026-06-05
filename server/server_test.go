@@ -280,7 +280,7 @@ func TestRoutingMenuRespectsReadOnlyMode(t *testing.T) {
 	connected := map[string]bool{"harvest-mcp": true}
 	tsm := map[string]string{"get_thing": "harvest", "write_thing": "harvest"}
 
-	ro := buildRoutingGroups(caps, capStates, "read-only", connected, tsm, router)
+	ro := buildRoutingGroups(caps, capStates, "read-only", connected, tsm, router, 0)
 	if len(ro) != 1 {
 		t.Fatalf("read-only: got %d groups, want 1", len(ro))
 	}
@@ -288,9 +288,45 @@ func TestRoutingMenuRespectsReadOnlyMode(t *testing.T) {
 		t.Errorf("read-only menu tools = %v, want [get_thing] (write tool dropped)", ro[0].ToolNames)
 	}
 
-	rw := buildRoutingGroups(caps, capStates, "read-write", connected, tsm, router)
+	rw := buildRoutingGroups(caps, capStates, "read-write", connected, tsm, router, 0)
 	if len(rw) != 1 || len(rw[0].ToolNames) != 2 {
 		t.Errorf("read-write menu tools = %v, want both tools", rw[0].ToolNames)
+	}
+}
+
+// S8: with a group_expand_threshold set, an oversized capability is marked
+// expandable in the routing menu so the model can load individual tools.
+func TestRoutingMenuExpandsOversizedGroup(t *testing.T) {
+	router := mcpclient.NewMockRouter([]llm.ToolDef{
+		mcpclient.MockReadOnlyTool("ontap_a", "a"),
+		mcpclient.MockReadOnlyTool("ontap_b", "b"),
+		mcpclient.MockReadOnlyTool("ontap_c", "c"),
+		mcpclient.MockReadOnlyTool("jira_search", "search"),
+	})
+	router.SetServers([]string{"ontap-mcp", "jira-mcp"})
+	for tool, server := range map[string]string{
+		"ontap_a": "ontap-mcp", "ontap_b": "ontap-mcp", "ontap_c": "ontap-mcp", "jira_search": "jira-mcp",
+	} {
+		router.SetToolServer(tool, server)
+	}
+	caps := []capability.Capability{
+		{ID: "ontap", Name: "ONTAP", State: capability.StateAllow, ServerName: "ontap-mcp"},
+		{ID: "jira", Name: "Jira", State: capability.StateAllow, ServerName: "jira-mcp"},
+	}
+	capStates := capability.ToMap(caps)
+	connected := map[string]bool{"ontap-mcp": true, "jira-mcp": true}
+	tsm := map[string]string{"ontap_a": "ontap", "ontap_b": "ontap", "ontap_c": "ontap", "jira_search": "jira"}
+
+	groups := buildRoutingGroups(caps, capStates, "read-only", connected, tsm, router, 2)
+	byID := map[string]capability.Group{}
+	for _, g := range groups {
+		byID[g.ID] = g
+	}
+	if !byID["ontap"].Expandable {
+		t.Errorf("ontap (3 tools > threshold 2) should be expandable")
+	}
+	if byID["jira"].Expandable {
+		t.Errorf("jira (1 tool) should not be expandable")
 	}
 }
 

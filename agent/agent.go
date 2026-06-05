@@ -209,6 +209,10 @@ type Agent struct {
 	routingMu sync.Mutex
 	// loadedGroups is the set of group IDs the model has loaded this turn.
 	loadedGroups map[string]bool
+	// loadedTools is the set of individual tool names the model has loaded this
+	// turn via load_tools(tools:[…]) (S8 intra-group selection). A tool here is
+	// activated without activating its whole group.
+	loadedTools map[string]bool
 	// stats accumulates per-run routing telemetry (Layer 5).
 	stats RoutingStats
 }
@@ -219,7 +223,8 @@ type Agent struct {
 type RoutingStats struct {
 	Mode          string   // routing mode for the run
 	GroupsOffered int      // number of groups in the menu this turn
-	GroupsLoaded  []string // final set of loaded group IDs (sorted)
+	GroupsLoaded  []string // final set of loaded group IDs (sorted; includes groups owning any individually-loaded tool)
+	ToolsLoaded   []string // individually-loaded tool names (S8 intra-group selection; sorted)
 	LoadCalls     int      // number of load_tools invocations
 	Reloads       int      // load_tools invocations after the first (mid-task re-loads)
 	Skipped       bool     // a final answer was produced without ever loading a group while groups were available
@@ -244,6 +249,9 @@ func New(provider llm.Provider, router mcpclient.ToolRouter, opts ...Option) *Ag
 	if a.ToolRoutingMode == ToolRoutingInBand {
 		if a.loadedGroups == nil {
 			a.loadedGroups = make(map[string]bool)
+		}
+		if a.loadedTools == nil {
+			a.loadedTools = make(map[string]bool)
 		}
 		if a.InternalTools == nil {
 			a.InternalTools = make(map[string]InternalTool)
@@ -359,6 +367,7 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 	if a.ToolRoutingMode == ToolRoutingInBand {
 		a.routingMu.Lock()
 		a.loadedGroups = make(map[string]bool)
+		a.loadedTools = make(map[string]bool)
 		a.stats = RoutingStats{Mode: a.ToolRoutingMode, GroupsOffered: len(a.groups)}
 		a.routingMu.Unlock()
 		defer a.logRoutingStats()
@@ -934,6 +943,8 @@ Guidelines:
 		prompt += "can answer directly), you do not need to call `load_tools`.\n\n"
 		prompt += groupIndex
 		prompt += "\nCall `load_tools` with one or more of the Group IDs above, e.g. `load_tools({\"groups\": [\"<id>\"]})`.\n"
+		prompt += "For any group shown as a **Large server** with its tools listed individually, load only the\n"
+		prompt += "specific tools you need instead of the whole group, e.g. `load_tools({\"tools\": [\"<tool_name>\"]})`.\n"
 	}
 
 	// Append chart format spec and interest index when interests are available.
@@ -1227,11 +1238,14 @@ func (a *Agent) filteredTools() ([]llm.ToolDef, error) {
 	// remain, which is the intended "load before you act" starting state.
 	if a.ToolRoutingMode == ToolRoutingInBand && a.ToolServerMap != nil {
 		active := a.activeGroups()
+		activeTools := a.activeToolSet()
 		routed := make([]llm.ToolDef, 0, len(mcpTools))
 		perGroup := make(map[string]int)
 		for _, t := range mcpTools {
 			capID := a.ToolServerMap[t.Name]
-			if !active[capID] {
+			// A tool is included if its whole group is active (group-level
+			// S7a) or it was loaded individually (tool-level S8).
+			if !active[capID] && !activeTools[t.Name] {
 				continue
 			}
 			routed = append(routed, t)
@@ -1277,14 +1291,18 @@ func loadToolsDef() llm.ToolDef {
 			"groups": map[string]any{
 				"type":        "array",
 				"items":       map[string]any{"type": "string"},
-				"description": "Group IDs to load, taken from the Tool Groups table in the system prompt (e.g. [\"jira\"]). Loading is additive — call again to add more groups mid-task.",
+				"description": "Group IDs to load (loads the whole group), taken from the Tool Groups table in the system prompt (e.g. [\"jira\"]). Loading is additive — call again to add more mid-task.",
+			},
+			"tools": map[string]any{
+				"type":        "array",
+				"items":       map[string]any{"type": "string"},
+				"description": "Individual tool names to load. Use this for groups marked 'Large server' in the system prompt, loading only the specific tools you need (e.g. [\"ontap_get_volume\"]) instead of the whole group. Additive and idempotent.",
 			},
 		},
-		"required": []string{"groups"},
 	})
 	return llm.ToolDef{
 		Name:         "load_tools",
-		Description:  "Make the tools of one or more capability groups available to call. You MUST call this before using a group's tools. Calls are additive and idempotent.",
+		Description:  "Make tools available to call. Pass `groups` to load whole capability groups, and/or `tools` to load individual tools from a large group. You MUST call this before using a tool. Calls are additive and idempotent; supply at least one of groups or tools.",
 		Schema:       schema,
 		ReadOnlyHint: true,
 	}
@@ -1298,22 +1316,31 @@ func loadToolsDef() llm.ToolDef {
 func (a *Agent) handleLoadTools(_ context.Context, input json.RawMessage) (string, error) {
 	var req struct {
 		Groups []string `json:"groups"`
+		Tools  []string `json:"tools"`
 	}
 	if err := json.Unmarshal(input, &req); err != nil {
 		return "", fmt.Errorf("load_tools: invalid input: %w", err)
 	}
-	if len(req.Groups) == 0 {
-		return "", fmt.Errorf("load_tools: 'groups' is required and must be a non-empty array of group IDs")
+	if len(req.Groups) == 0 && len(req.Tools) == 0 {
+		return "", fmt.Errorf("load_tools: supply at least one of 'groups' (group IDs) or 'tools' (individual tool names)")
 	}
 
-	var known, unknown []string
+	var knownGroups, unknownGroups, knownTools, unknownTools []string
 	a.routingMu.Lock()
 	for _, g := range req.Groups {
 		if a.groupExistsLocked(g) {
 			a.loadedGroups[g] = true
-			known = append(known, g)
+			knownGroups = append(knownGroups, g)
 		} else {
-			unknown = append(unknown, g)
+			unknownGroups = append(unknownGroups, g)
+		}
+	}
+	for _, t := range req.Tools {
+		if a.toolExistsLocked(t) {
+			a.loadedTools[t] = true
+			knownTools = append(knownTools, t)
+		} else {
+			unknownTools = append(unknownTools, t)
 		}
 	}
 	// Telemetry: count this invocation; any invocation after the first is a
@@ -1326,24 +1353,52 @@ func (a *Agent) handleLoadTools(_ context.Context, input json.RawMessage) (strin
 	for g := range a.loadedGroups {
 		loaded = append(loaded, g)
 	}
+	loadedToolList := make([]string, 0, len(a.loadedTools))
+	for t := range a.loadedTools {
+		loadedToolList = append(loadedToolList, t)
+	}
 	a.routingMu.Unlock()
 
 	sort.Strings(loaded)
+	sort.Strings(loadedToolList)
 	loadedStr := "none"
-	if len(loaded) > 0 {
-		loadedStr = strings.Join(loaded, ", ")
+	if len(loaded) > 0 || len(loadedToolList) > 0 {
+		parts := make([]string, 0, 2)
+		if len(loaded) > 0 {
+			parts = append(parts, "groups: "+strings.Join(loaded, ", "))
+		}
+		if len(loadedToolList) > 0 {
+			parts = append(parts, "tools: "+strings.Join(loadedToolList, ", "))
+		}
+		loadedStr = strings.Join(parts, "; ")
 	}
 
-	if len(unknown) > 0 {
-		sort.Strings(unknown)
-		return fmt.Sprintf(
-			"Unknown group(s): %s. No such group exists. Available groups: %s. Currently loaded: %s.",
-			strings.Join(unknown, ", "), strings.Join(a.groupIDs(), ", "), loadedStr), nil
+	if len(unknownGroups) > 0 || len(unknownTools) > 0 {
+		sort.Strings(unknownGroups)
+		sort.Strings(unknownTools)
+		var problems []string
+		if len(unknownGroups) > 0 {
+			problems = append(problems, fmt.Sprintf("unknown group(s): %s (available: %s)",
+				strings.Join(unknownGroups, ", "), strings.Join(a.groupIDs(), ", ")))
+		}
+		if len(unknownTools) > 0 {
+			problems = append(problems, fmt.Sprintf("unknown tool(s): %s", strings.Join(unknownTools, ", ")))
+		}
+		return fmt.Sprintf("Could not load some items — %s. Currently loaded: %s.",
+			strings.Join(problems, "; "), loadedStr), nil
 	}
-	sort.Strings(known)
-	return fmt.Sprintf(
-		"Loaded tool group(s): %s. Their tools are now available to call. Currently loaded: %s.",
-		strings.Join(known, ", "), loadedStr), nil
+
+	var ack []string
+	if len(knownGroups) > 0 {
+		sort.Strings(knownGroups)
+		ack = append(ack, "group(s): "+strings.Join(knownGroups, ", "))
+	}
+	if len(knownTools) > 0 {
+		sort.Strings(knownTools)
+		ack = append(ack, "tool(s): "+strings.Join(knownTools, ", "))
+	}
+	return fmt.Sprintf("Loaded %s. Their tools are now available to call. Currently loaded: %s.",
+		strings.Join(ack, " and "), loadedStr), nil
 }
 
 // groupExistsLocked reports whether id names a known group. Caller holds
@@ -1353,6 +1408,20 @@ func (a *Agent) groupExistsLocked(id string) bool {
 	for _, g := range a.groups {
 		if g.ID == id {
 			return true
+		}
+	}
+	return false
+}
+
+// toolExistsLocked reports whether name is a tool belonging to any offered
+// group (the set the model may load individually via load_tools tools:[…]).
+// Caller holds routingMu.
+func (a *Agent) toolExistsLocked(name string) bool {
+	for _, g := range a.groups {
+		for _, tn := range g.ToolNames {
+			if tn == name {
+				return true
+			}
 		}
 	}
 	return false
@@ -1383,6 +1452,38 @@ func (a *Agent) activeGroups() map[string]bool {
 	return active
 }
 
+// activeToolSet returns the set of individually-loaded tool names (S8).
+func (a *Agent) activeToolSet() map[string]bool {
+	a.routingMu.Lock()
+	defer a.routingMu.Unlock()
+	tools := make(map[string]bool, len(a.loadedTools))
+	for t := range a.loadedTools {
+		tools[t] = true
+	}
+	return tools
+}
+
+// effectiveLoadedGroupsLocked returns the set of group IDs considered loaded
+// for telemetry: explicitly loaded groups unioned with the groups owning any
+// individually-loaded tool (S8). Caller holds routingMu.
+func (a *Agent) effectiveLoadedGroupsLocked() []string {
+	set := make(map[string]bool, len(a.loadedGroups))
+	for g := range a.loadedGroups {
+		set[g] = true
+	}
+	for t := range a.loadedTools {
+		if capID, ok := a.ToolServerMap[t]; ok && capID != "" {
+			set[capID] = true
+		}
+	}
+	out := make([]string, 0, len(set))
+	for g := range set {
+		out = append(out, g)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // shouldForceGroupLoad reports whether the agent should inject a corrective
 // nudge because the model is about to answer tool-lessly without having
 // activated any group while groups are available. Always-on groups count as
@@ -1394,7 +1495,9 @@ func (a *Agent) shouldForceGroupLoad() bool {
 	if len(a.groups) == 0 {
 		return false
 	}
-	return len(a.activeGroups()) == 0
+	// A tool-level load (S8) counts as a selection too, so don't nudge if the
+	// model has loaded individual tools even without a whole group.
+	return len(a.activeGroups()) == 0 && len(a.activeToolSet()) == 0
 }
 
 // checkRoutedBudget asserts the post-routing per-group tool counts fit within
@@ -1434,33 +1537,37 @@ func (a *Agent) LastRoutingStats() RoutingStats {
 	a.routingMu.Lock()
 	defer a.routingMu.Unlock()
 	s := a.stats
-	loaded := make([]string, 0, len(a.loadedGroups))
-	for g := range a.loadedGroups {
-		loaded = append(loaded, g)
+	s.GroupsLoaded = a.effectiveLoadedGroupsLocked()
+	tools := make([]string, 0, len(a.loadedTools))
+	for t := range a.loadedTools {
+		tools = append(tools, t)
 	}
-	sort.Strings(loaded)
-	s.GroupsLoaded = loaded
+	sort.Strings(tools)
+	s.ToolsLoaded = tools
 	return s
 }
 
 // logRoutingStats finalizes and emits the per-run routing telemetry (Layer 5).
 func (a *Agent) logRoutingStats() {
 	a.routingMu.Lock()
-	loaded := make([]string, 0, len(a.loadedGroups))
-	for g := range a.loadedGroups {
-		loaded = append(loaded, g)
+	loaded := a.effectiveLoadedGroupsLocked()
+	tools := make([]string, 0, len(a.loadedTools))
+	for t := range a.loadedTools {
+		tools = append(tools, t)
 	}
+	sort.Strings(tools)
 	a.stats.GroupsLoaded = loaded
+	a.stats.ToolsLoaded = tools
 	a.stats.Skipped = a.stats.GroupsOffered > 0 && a.stats.LoadCalls == 0 && len(a.AlwaysOnGroups) == 0
 	a.stats.Compliant = a.stats.LoadCalls > 0
 	stats := a.stats
 	a.routingMu.Unlock()
-	sort.Strings(loaded)
 
 	a.Logger.Info("tool routing summary",
 		"mode", stats.Mode,
 		"groups_offered", stats.GroupsOffered,
 		"groups_loaded", loaded,
+		"tools_loaded", tools,
 		"load_calls", stats.LoadCalls,
 		"reloads", stats.Reloads,
 		"skipped", stats.Skipped,

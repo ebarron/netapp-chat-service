@@ -138,10 +138,34 @@ func TestToolRoutingFields(t *testing.T) {
 	}
 }
 
+// TestToolRoutingGroupExpandThreshold verifies the S8 group_expand_threshold
+// field parses, defaults to 0, and rejects negative values.
+func TestToolRoutingGroupExpandThreshold(t *testing.T) {
+	cfg, err := loadConfigYAML(t, "tool_routing:\n  mode: in-band\n  group_expand_threshold: 25\n")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.ToolRouting.GroupExpandThreshold != 25 {
+		t.Errorf("group_expand_threshold = %d, want 25", cfg.ToolRouting.GroupExpandThreshold)
+	}
+
+	def, err := loadConfigYAML(t, "tool_routing:\n  mode: in-band\n")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if def.ToolRouting.GroupExpandThreshold != 0 {
+		t.Errorf("default group_expand_threshold = %d, want 0", def.ToolRouting.GroupExpandThreshold)
+	}
+
+	if _, err := loadConfigYAML(t, "tool_routing:\n  mode: in-band\n  group_expand_threshold: -1\n"); err == nil {
+		t.Fatal("expected error for negative group_expand_threshold, got nil")
+	}
+}
+
 // TestToolRoutingRoundTrip verifies marshal/unmarshal stability of the
 // tool_routing block.
 func TestToolRoutingRoundTrip(t *testing.T) {
-	orig := ToolRoutingConfig{Mode: "in-band", MaxTools: 64, AlwaysOn: []string{"a", "b"}}
+	orig := ToolRoutingConfig{Mode: "in-band", MaxTools: 64, AlwaysOn: []string{"a", "b"}, GroupExpandThreshold: 25}
 	data, err := yaml.Marshal(orig)
 	if err != nil {
 		t.Fatal(err)

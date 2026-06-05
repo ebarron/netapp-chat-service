@@ -83,6 +83,38 @@ func TestRunScenarioMultiGroup(t *testing.T) {
 	}
 }
 
+// S8: with expansion enabled, loading an individual tool must still score the
+// scenario as a Hit because the tool's owning group surfaces in GroupsLoaded.
+func TestRunScenarioToolLevelScoresOwningGroup(t *testing.T) {
+	sc := Scenario{
+		Name:    "ontap_expanded",
+		Message: "volumes please",
+		Caps: []capability.Capability{
+			cap("ontap", "ONTAP", "Storage"),
+			cap("jira", "Jira", "Issues"),
+		},
+		Tools: []ToolSpec{
+			{Name: "ontap_get_volume", Capability: "ontap", ReadOnly: true},
+			{Name: "ontap_list_volumes", Capability: "ontap", ReadOnly: true},
+			{Name: "ontap_get_cluster", Capability: "ontap", ReadOnly: true},
+			{Name: "jira_search", Capability: "jira", ReadOnly: true},
+		},
+		Expected:        []string{"ontap"},
+		ExpandThreshold: 2,
+	}
+	provider := &llm.MockProvider{Responses: [][]llm.StreamEvent{
+		llm.MockToolCallResponse("t1", "load_tools", map[string]any{"tools": []string{"ontap_get_volume"}}),
+		llm.MockTextResponse("done"),
+	}}
+	res := RunScenario(context.Background(), provider, sc)
+	if !res.Hit || !res.Exact {
+		t.Errorf("Hit=%v Exact=%v, want both true (loaded=%v) — owning group should be scored", res.Hit, res.Exact, res.Loaded)
+	}
+	if res.Skipped {
+		t.Error("Skipped=true, want false (a tool was loaded)")
+	}
+}
+
 // A model that answers without loading anything must register as Skipped, and
 // for a scenario that expected a load it is not a Hit. Two text responses cover
 // the one-shot forced-first-step nudge.

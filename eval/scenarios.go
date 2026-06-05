@@ -60,6 +60,11 @@ func DefaultScenarios() []Scenario {
 	mk := func(name, msg string, expected ...string) Scenario {
 		return Scenario{Name: name, Message: msg, Caps: caps, Tools: tools, Expected: expected}
 	}
+	expand := func(name, msg string, threshold int, expected ...string) Scenario {
+		s := mk(name, msg, expected...)
+		s.ExpandThreshold = threshold
+		return s
+	}
 	return []Scenario{
 		mk("jira_single", "Find the open Jira issues assigned to me.", "jira"),
 		mk("confluence_single", "Search Confluence for the onboarding runbook.", "confluence"),
@@ -69,5 +74,9 @@ func DefaultScenarios() []Scenario {
 		mk("jira_confluence", "Find the Jira bug about login failures and link the related Confluence design doc.", "jira", "confluence"),
 		mk("ontap_jira", "Check volume capacity on the cluster and tell me which Jira tickets mention it.", "harvest", "jira"),
 		mk("greeting_skip", "Hi there, what can you help me with?"),
+		// S8: with expansion enabled, harvest (3 tools) is offered tool-by-tool.
+		// The model should still route to harvest by loading individual tools,
+		// which surfaces harvest in GroupsLoaded.
+		expand("ontap_single_expanded", "Show me the volumes on the production cluster and their capacity.", 2, "harvest"),
 	}
 }

@@ -2,6 +2,10 @@
 
 ## v0.1.19
 
+All three additions are inert by default: with `tool_routing.mode` at its
+default `off`, behavior is byte-for-byte identical to v0.1.18. They affect only
+deployments that have in-band routing enabled.
+
 ### Changed
 
 - Tool routing (S6b, read-only footprint reduction): the in-band routing **group
@@ -18,6 +22,25 @@
 
 ### Added
 
+- Tool routing (S8, intra-group tool-level selection): `load_tools` now accepts
+  an additive `tools: []string` field alongside `groups`, letting the model load
+  **individual tools** from a large MCP server instead of the whole group. A new
+  `tool_routing.group_expand_threshold` config (default `0` = disabled) controls
+  this: any capability group whose tool count exceeds the threshold is rendered
+  in the routing menu as an expandable per-tool sub-index, so the model pulls in
+  only the handful of tools it needs. This lifts the group-granularity ceiling
+  S7a left behind — a single oversized server (e.g. an ~80-tool ONTAP MCP) can
+  now share a turn with other groups under the 128-tool cap by loading a subset.
+  Loading an individual tool activates only that tool (not its group), counts as
+  a forced-first-step selection, and surfaces its owning group in
+  `RoutingStats.GroupsLoaded` plus the tool in the new `RoutingStats.ToolsLoaded`.
+  Backward compatible: `groups` still works, and with the threshold at `0` every
+  group loads wholesale exactly as before. No UI change required.
+  - `capability.BuildGroupsExpanding` + expandable `RenderGroupIndex`; agent
+    `load_tools` contract, tool-level activation in `filteredTools`, and
+    telemetry; `tool_routing.group_expand_threshold` config wired through
+    `cmd/chat-service`. Eval harness (`eval/`) gains an `ExpandThreshold` knob
+    and a tool-level scenario.
 - Routing-quality eval harness (S7a Layer 6) in `eval/`. `eval.RunScenario`
   drives the real agent loop with in-band routing over a synthetic multi-MCP
   environment and scores which capability groups the model loaded against an

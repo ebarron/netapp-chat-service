@@ -1,11 +1,11 @@
 # Scaling to High MCP Tool Counts
 
 > **Status:** S7a (in-band supervisor) **implemented**, Layers 0–6. **S6b**
-> (read-only footprint reduction) and the **Layer 6** routing-quality eval
-> harness are now **implemented** (see §S6b, §4.2 Layer 6). Deferred: **S8**
-> (intra-group tool-level selection — the proposed next priority, see §S8), S3,
-> and S7b. Original design retained below for context; §4.3 records the
-> decisions locked in during the build.
+> (read-only footprint reduction), the **Layer 6** routing-quality eval harness,
+> and **S8** (intra-group tool-level selection for oversized servers) are now
+> **implemented** (see §S6b, §S8, §4.2 Layer 6). Deferred: S3 and S7b. Original
+> design retained below for context; §4.3 records the decisions locked in during
+> the build.
 > **Audience:** Engineers working on netapp-chat-service
 > **Scope:** Strategies for keeping the per-request tool list small, relevant,
 > and under the provider cap as the number of connected MCP servers grows. All
@@ -120,7 +120,7 @@ This plan builds **three** strategies: **S3** (opt-in context hints), **S6**
 building). Two further strategies were added **after S7a shipped**, to address
 the group-granularity ceiling it leaves behind (a single oversized server):
 **S6b** (read-only footprint reduction — **now implemented**) and **S8**
-(intra-group tool-level selection — the proposed next build). The strategy IDs
+(intra-group tool-level selection — **now implemented**). The strategy IDs
 are stable; the gaps below are alternatives we **evaluated and will not build**:
 
 - **S1 — per-turn relevance ranker ("tool RAG").** A Go/embedding ranker that
@@ -292,7 +292,14 @@ by operator config (e.g. `tool_routing: { mode: in-band | router | off }`).
 
 ### S8 — Intra-group (tool-level) selection for oversized groups
 
-> **Status: ⏳ Not implemented (proposed — candidate next priority).**
+> **Status: ✅ Implemented** — `capability/group.go` (`BuildGroupsExpanding`,
+> expandable `RenderGroupIndex`), `agent/agent.go` (`load_tools` `tools` field,
+> tool-level activation in `filteredTools`, telemetry `ToolsLoaded`),
+> `config/config.go` (`tool_routing.group_expand_threshold`), `server/server.go`
+> (`buildRoutingGroups` threshold), `cmd/chat-service/main.go` wiring. Disabled
+> by default (`group_expand_threshold: 0` → pure group-level S7a). Tests:
+> `capability/group_test.go`, `agent/routing_test.go`, `config/config_test.go`,
+> `server/server_test.go`, `eval/`.
 
 **Why.** S7a routes at **group (= MCP server) granularity**: `load_tools(group)`
 activates *all* of that server's tools. This is correct and generic, but it has
@@ -320,7 +327,11 @@ reused; only its grain changes:
 `groups: []string`. Loading stays additive and idempotent, and the mid-task
 re-`load_tools` recovery path is unchanged. `groups` remains valid (and is the
 only thing offered for small servers), so the change is **backward compatible**
-with the S7a contract.
+with the S7a contract. *(As built: at least one of `groups`/`tools` is required;
+an individually-loaded tool activates only that tool, and its owning group is
+reported in `RoutingStats.GroupsLoaded` while the tool itself appears in the new
+`RoutingStats.ToolsLoaded`. Tool-level loads also satisfy the forced-first-step
+nudge.)*
 
 **Where.** [`capability/group.go`](../capability/group.go) (emit a per-tool
 sub-index for oversized groups), `BuildSystemPromptWithRouting` (render the
@@ -393,11 +404,11 @@ re-`load_tools` recovery callback).
    (`server.buildRoutingGroups`). Remaining per-MCP annotation work lives in the
    MCP servers (Jira/Confluence landing now). Try this **before** S8 — it may
    relieve the oversized-server pressure with no further routing changes.
-4. ⏳ **Candidate next priority (proposed, not built):** **S8** intra-group
-   tool-level selection for oversized servers (the `ontap` ~80 case), with a
-   hybrid size threshold so small servers keep loading wholesale. This is the
-   logical next build now that S7a has shipped and the group-granularity ceiling
-   is the remaining gap.
+4. ✅ **Intra-group tool-level selection (done):** **S8** for oversized servers
+   (the `ontap` ~80 case), with a hybrid size threshold
+   (`tool_routing.group_expand_threshold`) so small servers keep loading
+   wholesale. Disabled by default; set the threshold to enable per-tool loading
+   from large groups.
 5. ⏳ **Opt-in, when an app asks (not built):** **S3** context hints as an opaque
    capability allowlist.
 6. ⏳ **Later, only if telemetry warrants (not built):** **S7b** behind the existing
@@ -698,5 +709,5 @@ in must change to send the signal; every other app is unaffected.
 | S3 context hints | [`server/server.go`](../server/server.go), [`capability/`](../capability/capability.go) | read inbound header → capability subset before `filteredTools()` |
 | S6 read-only | implemented | `filteredTools()` mode branch |
 | S6b read-only footprint (implemented) | MCP `ReadOnlyHint` / [`mcpclient`](../mcpclient/router.go) `read_only_tools`; product default mode; `server.buildRoutingGroups` | annotate writes so `filteredTools()` drops them; routing menu now mode-filtered; lean read-only for read-heavy turns |
-| S8 intra-group tool selection (proposed) | [`capability/group.go`](../capability/group.go), [`agent/agent.go`](../agent/agent.go) (`loadToolsDef`/`handleLoadTools`/`filteredTools`), `BuildSystemPromptWithRouting` | expand oversized groups into a per-tool sub-index; add additive `tools: []string` to `load_tools`; activate individual tools |
+| S8 intra-group tool selection (implemented) | [`capability/group.go`](../capability/group.go) (`BuildGroupsExpanding`), [`agent/agent.go`](../agent/agent.go) (`loadToolsDef`/`handleLoadTools`/`filteredTools`), `BuildSystemPromptWithRouting`, [`config/config.go`](../config/config.go) (`group_expand_threshold`) | expand oversized groups into a per-tool sub-index; additive `tools: []string` on `load_tools`; activate individual tools; off by default |
 | S7 supervisor | [`agent/agent.go`](../agent/agent.go), [`capability/group.go`](../capability/group.go), [`config/config.go`](../config/config.go), [`server/server.go`](../server/server.go), [`cmd/chat-service/main.go`](../cmd/chat-service/main.go) | **S7a (built):** `tool_routing` config; `capability.BuildGroups`/`RenderGroupIndex`; `BuildSystemPromptWithRouting` group index; internal `load_tools` tool + per-message state; `filteredTools()` restriction/recompute/budget; forced-first-step nudge; `RoutingStats` telemetry. **S7b (deferred):** pre-pass LLM call → capability subset → existing `filteredTools()` filter |

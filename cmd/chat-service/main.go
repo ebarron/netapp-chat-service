@@ -84,7 +84,8 @@ func main() {
 		ToolRoutingMaxTools: cfg.ToolRouting.MaxTools,
 		ToolRoutingAlwaysOn: cfg.ToolRouting.AlwaysOn,
 		// Forced-first-step enforcement defaults on for in-band routing.
-		ToolRoutingForceLoad: cfg.ToolRouting.Mode == agent.ToolRoutingInBand,
+		ToolRoutingForceLoad:       cfg.ToolRouting.Mode == agent.ToolRoutingInBand,
+		ToolRoutingExpandThreshold: cfg.ToolRouting.GroupExpandThreshold,
 	}
 
 	srv := server.New(deps)

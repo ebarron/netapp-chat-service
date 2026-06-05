@@ -65,6 +65,13 @@ type ToolRoutingConfig struct {
 	// AlwaysOn lists capability/group IDs that are loaded from the first turn
 	// without the model having to call load_tools.
 	AlwaysOn []string `yaml:"always_on"`
+	// GroupExpandThreshold enables S8 intra-group (tool-level) selection: any
+	// capability group whose tool count exceeds this value is rendered in the
+	// routing menu as an expandable list of individual tools, so the model can
+	// load only the tools it needs from a large server (e.g. an ~80-tool MCP)
+	// instead of the whole group. 0 (default) disables expansion — every group
+	// loads wholesale, reproducing group-level S7a behavior exactly.
+	GroupExpandThreshold int `yaml:"group_expand_threshold"`
 }
 
 // normalize fills defaults and validates the tool-routing config. An empty
@@ -81,6 +88,9 @@ func (t *ToolRoutingConfig) normalize() error {
 	}
 	if t.MaxTools < 0 {
 		return fmt.Errorf("tool_routing.max_tools %d is invalid (must be >= 0)", t.MaxTools)
+	}
+	if t.GroupExpandThreshold < 0 {
+		return fmt.Errorf("tool_routing.group_expand_threshold %d is invalid (must be >= 0)", t.GroupExpandThreshold)
 	}
 	return nil
 }

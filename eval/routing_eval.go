@@ -44,6 +44,11 @@ type Scenario struct {
 	Caps     []capability.Capability
 	Tools    []ToolSpec
 	Expected []string
+	// ExpandThreshold enables S8 intra-group expansion for this scenario: any
+	// group larger than this is offered tool-by-tool. 0 keeps every group
+	// whole (group-level S7a). Loading an individual tool still surfaces its
+	// owning group in GroupsLoaded, so Expected is scored the same way.
+	ExpandThreshold int
 }
 
 func (sc Scenario) mode() string {
@@ -106,7 +111,7 @@ func RunScenario(ctx context.Context, provider llm.Provider, sc Scenario) Result
 	}
 	router.SetServers(servers)
 
-	groups := capability.BuildGroups(sc.Caps, enabled, toolsByCap)
+	groups := capability.BuildGroupsExpanding(sc.Caps, enabled, toolsByCap, sc.ExpandThreshold)
 
 	ag := agent.New(provider, router,
 		agent.WithCapabilityFilter(states, sc.mode()),
