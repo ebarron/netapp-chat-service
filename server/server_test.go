@@ -165,6 +165,120 @@ func TestPostCapabilitiesAcceptsWithinBudget(t *testing.T) {
 	}
 }
 
+// routingBudgetServer builds a Server with two capabilities whose tool counts
+// sum to more than MaxToolsPerRequest but are each individually under it.
+// secondState seeds the ontap capability's state; routingOn toggles in-band
+// tool routing.
+func routingBudgetServer(perCap int, secondState capability.State, routingOn bool) *Server {
+	tools := make([]llm.ToolDef, 0, perCap*2)
+	for i := 0; i < perCap; i++ {
+		tools = append(tools, mcpclient.MockReadOnlyTool(fmt.Sprintf("h%d", i), "ro"))
+	}
+	for i := 0; i < perCap; i++ {
+		tools = append(tools, mcpclient.MockReadOnlyTool(fmt.Sprintf("o%d", i), "ro"))
+	}
+	router := mcpclient.NewMockRouter(tools)
+	router.SetServers([]string{"harvest-mcp", "ontap-mcp"})
+	for i := 0; i < perCap; i++ {
+		router.SetToolServer(fmt.Sprintf("h%d", i), "harvest-mcp")
+		router.SetToolServer(fmt.Sprintf("o%d", i), "ontap-mcp")
+	}
+	caps := []capability.Capability{
+		{ID: "harvest", Name: "Harvest", State: capability.StateAllow, ServerName: "harvest-mcp"},
+		{ID: "ontap", Name: "ONTAP", State: secondState, ServerName: "ontap-mcp"},
+	}
+	deps := &ChatDeps{Router: router, Capabilities: caps}
+	if routingOn {
+		deps.ToolRoutingMode = agent.ToolRoutingInBand
+	}
+	return New(deps)
+}
+
+// With in-band routing, GetChatCapabilities must report the largest single
+// capability (the per-turn floor), not the sum across capabilities — otherwise
+// the UI's read-write toggle blocks deployments whose total exceeds 128 even
+// though each routed turn stays under the cap. Regression for RTB tripping the
+// "N tools would be sent (max 128)" guard with routing enabled.
+func TestRoutingBudgetReportsMaxNotSum(t *testing.T) {
+	per := 80 // sum 160 > 128, each alone < 128
+	srv := routingBudgetServer(per, capability.StateAllow, true)
+
+	req := httptest.NewRequest(http.MethodGet, "/chat/capabilities?mode=read-write", nil)
+	w := httptest.NewRecorder()
+	srv.GetChatCapabilities(w, req)
+
+	var resp struct {
+		ToolBudgets struct {
+			ReadWrite struct {
+				Used int `json:"used"`
+				Max  int `json:"max"`
+			} `json:"read_write"`
+		} `json:"tool_budgets"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.ToolBudgets.ReadWrite.Used != per {
+		t.Errorf("routed used = %d, want %d (max single cap, not sum %d)",
+			resp.ToolBudgets.ReadWrite.Used, per, per*2)
+	}
+
+	// Sanity: with routing OFF the same deployment reports the sum.
+	srvOff := routingBudgetServer(per, capability.StateAllow, false)
+	wOff := httptest.NewRecorder()
+	srvOff.GetChatCapabilities(wOff, httptest.NewRequest(http.MethodGet, "/chat/capabilities?mode=read-write", nil))
+	_ = json.Unmarshal(wOff.Body.Bytes(), &resp)
+	if resp.ToolBudgets.ReadWrite.Used != per*2 {
+		t.Errorf("non-routed used = %d, want %d (sum)", resp.ToolBudgets.ReadWrite.Used, per*2)
+	}
+}
+
+// With in-band routing, enabling a capability that pushes the SUM over 128 must
+// be allowed as long as no single capability alone exceeds the cap.
+func TestPostCapabilitiesRoutingAllowsOverSumBudget(t *testing.T) {
+	per := 80 // enabling ontap makes the sum 160, but each cap is 80 < 128
+	srv := routingBudgetServer(per, capability.StateOff, true)
+
+	body, _ := json.Marshal(map[string]any{
+		"capabilities": map[string]string{"ontap": "allow"},
+		"mode":         "read-write",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/chat/capabilities", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.PostChatCapabilities(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (routing splits the budget per server)", w.Code)
+	}
+
+	// Without routing the same enable must be rejected (sum exceeds the cap).
+	srvOff := routingBudgetServer(per, capability.StateOff, false)
+	wOff := httptest.NewRecorder()
+	srvOff.PostChatCapabilities(wOff, httptest.NewRequest(http.MethodPost, "/chat/capabilities", bytes.NewReader(body)))
+	if wOff.Code != http.StatusConflict {
+		t.Fatalf("non-routed status = %d, want 409", wOff.Code)
+	}
+}
+
+// A single capability whose own tools exceed the cap must still be rejected
+// even with routing on — routing cannot split one server.
+func TestPostCapabilitiesRoutingRejectsIrreducibleServer(t *testing.T) {
+	per := agent.MaxToolsPerRequest + 5 // one server alone over the cap
+	srv := routingBudgetServer(per, capability.StateOff, true)
+
+	body, _ := json.Marshal(map[string]any{
+		"capabilities": map[string]string{"ontap": "allow"},
+		"mode":         "read-write",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/chat/capabilities", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.PostChatCapabilities(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (single server exceeds cap)", w.Code)
+	}
+}
+
 // twoServerDeps builds ChatDeps with a jira and bitbucket capability, each
 // with one read-only tool, and a mock provider replaying the given responses.
 func twoServerDeps(provider llm.Provider, mode string) (*ChatDeps, *mcpclient.MockRouter) {

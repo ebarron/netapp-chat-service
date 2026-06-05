@@ -268,8 +268,6 @@ func (s *Server) GetChatCapabilities(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	usedReadOnly := 0
-	usedReadWrite := 0
 	for i := range caps {
 		caps[i].Available = serverConnected[caps[i].ServerName]
 		c := perServer[caps[i].ServerName]
@@ -280,17 +278,20 @@ func (s *Server) GetChatCapabilities(w http.ResponseWriter, r *http.Request) {
 			caps[i].ToolsCount = 0
 			caps[i].ReadOnlyToolsCount = 0
 		}
-		if caps[i].State == capability.StateOff {
-			continue
-		}
-		usedReadOnly += caps[i].ReadOnlyToolsCount
-		usedReadWrite += caps[i].ToolsCount
-		// Ask-on-write capabilities surface writes to the LLM regardless of
-		// the global mode, so charge them against the read-only budget too.
-		if caps[i].State == capability.StateAskOnWrite {
-			usedReadOnly += caps[i].ToolsCount - caps[i].ReadOnlyToolsCount
-		}
 	}
+
+	// Budget reporting. When in-band tool routing is enabled the per-request
+	// tool list is the subset the model loads via load_tools, not the sum of
+	// every enabled capability. The binding limit is therefore the largest
+	// single capability (the smallest set the model can load) rather than the
+	// total — otherwise the UI's read-write toggle / enable guards would block
+	// legitimate multi-server deployments that only ever send a routed subset
+	// per turn. See docs/high-tool-count-scaling.md.
+	routingOn := s.deps.ToolRoutingMode == agent.ToolRoutingInBand
+	roTotal, roPerCap := computeToolBudget(caps, "read-only", router)
+	rwTotal, rwPerCap := computeToolBudget(caps, "read-write", router)
+	usedReadOnly := effectiveToolBudget(roTotal, roPerCap, routingOn)
+	usedReadWrite := effectiveToolBudget(rwTotal, rwPerCap, routingOn)
 
 	used := usedReadOnly
 	if mode == "read-write" {
@@ -347,14 +348,27 @@ func (s *Server) PostChatCapabilities(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Compute the resulting tool count.
-	used, perCap := computeToolBudget(proposed, mode, s.deps.Router)
+	// Compute the resulting tool count. With in-band routing on, the binding
+	// limit is the largest single capability (what the model loads per turn),
+	// not the sum across enabled capabilities.
+	total, perCap := computeToolBudget(proposed, mode, s.deps.Router)
+	routingOn := s.deps.ToolRoutingMode == agent.ToolRoutingInBand
+	used := effectiveToolBudget(total, perCap, routingOn)
 	if used > agent.MaxToolsPerRequest {
-		writeJSON(w, http.StatusConflict, map[string]any{
-			"message": fmt.Sprintf(
-				"Enabling these capabilities would use %d tools (max %d) in %s mode. Disable a capability or switch mode to fit within the budget.",
+		msg := fmt.Sprintf(
+			"Enabling these capabilities would use %d tools (max %d) in %s mode. Disable a capability or switch mode to fit within the budget.",
+			used, agent.MaxToolsPerRequest, mode,
+		)
+		if routingOn {
+			// Routing splits tools by capability, so the only unroutable case
+			// is one server whose own tools exceed the cap.
+			msg = fmt.Sprintf(
+				"A single capability exposes %d tools, over the %d-tool per-request limit (mode=%s). Tool routing cannot split one server — reduce that server's tool set.",
 				used, agent.MaxToolsPerRequest, mode,
-			),
+			)
+		}
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"message": msg,
 			"tool_budget": map[string]any{
 				"used":           used,
 				"max":            agent.MaxToolsPerRequest,
@@ -418,6 +432,27 @@ func computeToolBudget(caps []capability.Capability, mode string, router mcpclie
 		total++
 	}
 	return total, perCap
+}
+
+// effectiveToolBudget returns the tool count that actually constrains a
+// request. Without routing it is the total across all enabled capabilities.
+// With in-band routing the model loads capabilities on demand via load_tools
+// and the agent caps each turn at MaxToolsPerRequest, so the real floor is the
+// largest single capability — the smallest set the model can load. Reporting
+// the max (not the sum) is what lets a deployment enable more than 128 tools
+// total while keeping the UI's budget guards meaningful (they then only block
+// a single server whose own tools exceed the cap, which routing cannot split).
+func effectiveToolBudget(total int, perCap map[string]int, routingOn bool) int {
+	if !routingOn {
+		return total
+	}
+	max := 0
+	for _, n := range perCap {
+		if n > max {
+			max = n
+		}
+	}
+	return max
 }
 
 // PostChatApprove approves a pending tool call.

@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.1.18
+
+### Fixed
+
+- Tool routing: the `/chat/capabilities` budget endpoints now account for
+  in-band routing. Previously they always summed every enabled capability's
+  tools, so with routing enabled the UI still reported e.g. "140 tools would be
+  sent (max 128)" and blocked the read-write toggle / capability enables — even
+  though each routed turn stays under the cap. When `tool_routing.mode` is
+  `in-band`, `GetChatCapabilities` and `PostChatCapabilities` now report the
+  binding limit as the **largest single capability** (the smallest set the
+  model can load via `load_tools`) instead of the sum. A deployment can now
+  enable more than 128 tools total; only a single server whose own tools exceed
+  the cap is rejected (routing cannot split one server). No chat-component /
+  UI change required — the component reads the server's `tool_budgets` directly.
+
 ## v0.1.17
 
 ### Docs
