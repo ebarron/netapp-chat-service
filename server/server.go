@@ -434,6 +434,39 @@ func computeToolBudget(caps []capability.Capability, mode string, router mcpclie
 	return total, perCap
 }
 
+// buildRoutingGroups derives the in-band routing group menu (S7a) from the
+// connected, enabled capabilities. The menu is built from only the tools that
+// are callable in the given mode (S6b): in read-only mode a server's write
+// tools are dropped exactly as filteredTools() drops them, so a read-only-
+// annotated server (ReadOnlyHint) presents a smaller group and the model is
+// never offered tools it cannot call this turn. ask-on-write capabilities
+// surface their writes regardless of mode, matching filteredTools().
+func buildRoutingGroups(caps []capability.Capability, capStates map[string]capability.State, mode string, connected map[string]bool, toolServerMap map[string]string, router mcpclient.ToolRouter) []capability.Group {
+	groupEnabled := make(map[string]bool, len(caps))
+	askOnWrite := make(map[string]bool, len(caps))
+	for _, c := range caps {
+		if connected[c.ServerName] && capStates[c.ID] != capability.StateOff {
+			groupEnabled[c.ID] = true
+		}
+		if capStates[c.ID] == capability.StateAskOnWrite {
+			askOnWrite[c.ID] = true
+		}
+	}
+	toolsByCap := make(map[string][]capability.ToolInfo)
+	for _, t := range router.Tools() {
+		capID, ok := toolServerMap[t.Name]
+		if !ok {
+			continue
+		}
+		allowWrites := mode == "read-write" || askOnWrite[capID]
+		if !allowWrites && !t.ReadOnlyHint {
+			continue
+		}
+		toolsByCap[capID] = append(toolsByCap[capID], capability.ToolInfo{Name: t.Name, Description: t.Description})
+	}
+	return capability.BuildGroups(caps, groupEnabled, toolsByCap)
+}
+
 // effectiveToolBudget returns the tool count that actually constrains a
 // request. Without routing it is the total across all enabled capabilities.
 // With in-band routing the model loads capabilities on demand via load_tools
@@ -628,19 +661,7 @@ func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit C
 	var groupIndex string
 	var groups []capability.Group
 	if deps.ToolRoutingMode == agent.ToolRoutingInBand {
-		groupEnabled := make(map[string]bool, len(deps.Capabilities))
-		for _, cap := range deps.Capabilities {
-			if connectedServers[cap.ServerName] && capStates[cap.ID] != capability.StateOff {
-				groupEnabled[cap.ID] = true
-			}
-		}
-		toolsByCap := make(map[string][]capability.ToolInfo)
-		for _, t := range deps.Router.Tools() {
-			if capID, ok := toolServerMap[t.Name]; ok {
-				toolsByCap[capID] = append(toolsByCap[capID], capability.ToolInfo{Name: t.Name, Description: t.Description})
-			}
-		}
-		groups = capability.BuildGroups(deps.Capabilities, groupEnabled, toolsByCap)
+		groups = buildRoutingGroups(deps.Capabilities, capStates, mode, connectedServers, toolServerMap, deps.Router)
 		groupIndex = capability.RenderGroupIndex(groups)
 	}
 

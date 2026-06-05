@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.1.19
+
+### Changed
+
+- Tool routing (S6b, read-only footprint reduction): the in-band routing **group
+  menu** is now built from the *mode-filtered* tool set instead of every tool the
+  router knows about. Previously, in read-only mode the menu still advertised a
+  server's write tools (which the model could not call) and a read-only-annotated
+  server did not present its reduced footprint. The menu now drops write tools in
+  read-only mode exactly as `filteredTools()` does (ask-on-write capabilities
+  still surface their writes), so read-only-annotated servers (e.g. Jira/
+  Confluence as their `ReadOnlyHint` annotations land) show a smaller, accurate
+  group and the model is never offered tools it cannot use this turn. The
+  per-turn budget/headroom benefit was already automatic via `computeToolBudget`
+  / `filteredTools`; this completes the menu side. No UI change required.
+
+### Added
+
+- Routing-quality eval harness (S7a Layer 6) in `eval/`. `eval.RunScenario`
+  drives the real agent loop with in-band routing over a synthetic multi-MCP
+  environment and scores which capability groups the model loaded against an
+  expected set; `eval.RunSuite` aggregates top-1 / exact / skip metrics — the
+  empirical basis for the S7a→S7b decision. `eval.DefaultScenarios` seeds a
+  representative jira/confluence/bitbucket/harvest(ONTAP)/zoom fixture set.
+  Deterministic mock-provider tests run in CI; the live-provider run
+  (`TestRealProviderEval`) is opt-in and gated behind `CHAT_EVAL_*` env vars so
+  CI stays hermetic. Test-only — no runtime impact.
+
 ## v0.1.18
 
 ### Fixed

@@ -1,10 +1,11 @@
 # Scaling to High MCP Tool Counts
 
-> **Status:** S7a (in-band supervisor) **implemented**, Layers 0–5. Deferred:
-> **S8** (intra-group tool-level selection — the proposed next priority, see §S8),
-> **S6b** (read-only footprint reduction — cheapest follow-up), S3, S7b, and the
-> Layer 6 LLM eval (see §4.2–4.3). Original design retained below for context;
-> §4.3 records the decisions locked in during the build.
+> **Status:** S7a (in-band supervisor) **implemented**, Layers 0–6. **S6b**
+> (read-only footprint reduction) and the **Layer 6** routing-quality eval
+> harness are now **implemented** (see §S6b, §4.2 Layer 6). Deferred: **S8**
+> (intra-group tool-level selection — the proposed next priority, see §S8), S3,
+> and S7b. Original design retained below for context; §4.3 records the
+> decisions locked in during the build.
 > **Audience:** Engineers working on netapp-chat-service
 > **Scope:** Strategies for keeping the per-request tool list small, relevant,
 > and under the provider cap as the number of connected MCP servers grows. All
@@ -118,7 +119,7 @@ This plan builds **three** strategies: **S3** (opt-in context hints), **S6**
 (read-only reduction, already implemented), and **S7** (the supervisor we are
 building). Two further strategies were added **after S7a shipped**, to address
 the group-granularity ceiling it leaves behind (a single oversized server):
-**S6b** (read-only footprint reduction — cheapest, mostly config) and **S8**
+**S6b** (read-only footprint reduction — **now implemented**) and **S8**
 (intra-group tool-level selection — the proposed next build). The strategy IDs
 are stable; the gaps below are alternatives we **evaluated and will not build**:
 
@@ -171,8 +172,11 @@ write tools a server exposes.
 
 #### S6b — shrink a group's read-only footprint (lowest-hanging follow-up)
 
-> **Status: ⏳ Not implemented (proposed — mostly config/annotation, little or
-> no service code).**
+> **Status: ✅ Implemented** — the budget/headroom benefit was already automatic
+> via `computeToolBudget()` + `filteredTools()`; the routing **menu** is now
+> mode-aware too (`server.buildRoutingGroups`, `server/server_test.go`
+> `TestRoutingMenuRespectsReadOnlyMode`). Remaining work is per-MCP annotation,
+> which lives in the MCP servers, not this service.
 
 The per-turn cost of a large server is dominated by its **write** tools, and the
 budget unit in S7a is the whole server (see §S8). Two near-zero-code levers cut a
@@ -181,6 +185,8 @@ group's footprint on read-only turns:
 1. **Annotate `ReadOnlyHint` (or supply `read_only_tools`)** on each MCP so
    `filteredTools()` can drop writes. `ontap-mcp` already publishes
    `ReadOnlyHint`; `harvest-mcp` uses the `read_only_tools` allowlist label.
+   Jira/Confluence read-only annotations are landing, so this benefit is now
+   realized for those servers automatically.
 2. **Lean toward a read-only default** for read-heavy products.
 
 For an `ontap` that is ~80 tools total but, say, ~45 read-only, a read-only turn
@@ -189,6 +195,14 @@ another group under `MaxToolsPerRequest` **with no new routing code at all**.
 This is the cheapest mitigation for the oversized-server problem and should be
 exhausted first. It does **not** help inherently-write turns (e.g. volume
 provisioning), which is exactly where S8 (below) earns its keep.
+
+> **Service-side change (done):** the routing group menu in `server.RunChat` is
+> now built from the *mode-filtered* tool set (`buildRoutingGroups`). Previously
+> the menu was derived from `Router.Tools()` (all tools), so in read-only mode it
+> still advertised write tools the model could not call and a read-only server
+> did not show its reduced footprint. The menu now drops writes in read-only mode
+> exactly as `filteredTools()` does (ask-on-write capabilities still surface
+> writes), so an annotated read-only server presents a smaller, accurate group.
 
 > NABox note: `ontap` currently defaults to `ask-on-write`, which surfaces its
 > write tools to the model (and the budget) regardless of mode. A product that
@@ -372,10 +386,13 @@ re-`load_tools` recovery callback).
 
 1. ✅ **Primary build (done):** implement **S7a** (see §5 for the layered plan).
 2. ✅ **In use, no work:** **S6** read-only reduction stays as-is.
-3. ⏳ **Lowest-hanging follow-up (config/annotation, little/no code):** **S6b**
-   shrink big servers' read-only footprint via `ReadOnlyHint` / `read_only_tools`
-   annotations + read-only-leaning defaults. Try this **before** S8 — it may
-   relieve the oversized-server pressure with no routing changes.
+3. ✅ **Lowest-hanging follow-up (done):** **S6b** shrink big servers' read-only
+   footprint via `ReadOnlyHint` / `read_only_tools` annotations + read-only-
+   leaning defaults. The service now also builds the routing menu from the
+   mode-filtered tool set so read-only servers present their reduced footprint
+   (`server.buildRoutingGroups`). Remaining per-MCP annotation work lives in the
+   MCP servers (Jira/Confluence landing now). Try this **before** S8 — it may
+   relieve the oversized-server pressure with no further routing changes.
 4. ⏳ **Candidate next priority (proposed, not built):** **S8** intra-group
    tool-level selection for oversized servers (the `ontap` ~80 case), with a
    hybrid size threshold so small servers keep loading wholesale. This is the
@@ -395,9 +412,11 @@ the two adjacent consumers (RTB-Platform/CADENCE — `static` discovery,
 `harvest`/`ontap`/`grafana`, interest-heavy), both of which already map each MCP
 server 1:1 to a capability.
 
-1. **Scope = S7a, Layers 0–5.** S3 (context hints), S7b (router model), and the
-   Layer 6 LLM eval are deferred. S7b stays a config-time mode that fails fast at
-   startup until built.
+1. **Scope = S7a, Layers 0–5.** S3 (context hints) and S7b (router model) are
+   deferred; S7b stays a config-time mode that fails fast at startup until built.
+   *(Update: the Layer 6 routing-quality eval and S6b read-only footprint
+   reduction have since been implemented as follow-ups — see §S6b and §4.2
+   Layer 6.)*
 2. **1:1 server = capability = group; no operator group-merging.** Every MCP
    server is its own group, toggled on/off globally. Users get only the
    read/read-write toggle; there is no per-tool user control and no
@@ -423,7 +442,8 @@ server 1:1 to a capability.
 ## 5. Implementation plan — S7a (in-band supervisor)
 
 > **Status: ✅ Implemented — Layers 0–5 built, tested, and wired. Layer 6
-> (LLM eval) ⏳ deferred.** Each layer below carries its own status marker and an
+> (routing-quality eval) ✅ now implemented as an opt-in/non-CI harness
+> (`eval/`).** Each layer below carries its own status marker and an
 > *As built* note.
 
 This is the build plan for the chosen primary selector. It is layered so each
@@ -599,16 +619,37 @@ answer with zero load calls and no `always_on` baseline.
 
 ### Layer 6 — End-to-end intent-quality eval (LLM, separate suite)
 
-> **Status: ⏳ Not implemented (deferred — opt-in, non-CI eval).**
+> **Status: ✅ Implemented (harness + seed fixtures)** — `eval/routing_eval.go`,
+> `eval/scenarios.go`, `eval/routing_eval_test.go`. The live-provider run is
+> opt-in / non-CI by design (gated behind `CHAT_EVAL_*` env vars).
 
 **Build.** A small, curated fixture set of representative user turns mapped to
-the group(s) they *should* load. Run against a real provider in a **non-CI / opt-in**
-eval job (LLM calls are non-deterministic and cost money). Report top-1 / top-k
-routing accuracy and skip rate — the empirical basis for the S7a→S7b decision.
+the group(s) they *should* load (`eval.DefaultScenarios` — a fixed
+jira/confluence/bitbucket/harvest(ONTAP)/zoom environment). `eval.RunScenario`
+spins up the real agent loop with in-band routing over a `MockRouter`
+environment, runs one turn against the supplied `llm.Provider`, and scores the
+groups the model loaded (`RoutingStats.GroupsLoaded`) against the expected set.
+`eval.RunSuite` aggregates into `Top1Accuracy` (recall == 1.0 per turn),
+`ExactAccuracy` (no over/under-load), and `SkipRate` — the empirical basis for
+the S7a→S7b decision. The harness performs no network I/O itself; pass a real
+provider for an accuracy run or a `MockProvider` for deterministic self-tests.
+
+**Run the live eval (opt-in, non-CI):**
+
+```bash
+CHAT_EVAL_PROVIDER=openai \
+CHAT_EVAL_ENDPOINT=... CHAT_EVAL_MODEL=gpt-4.1 CHAT_EVAL_API_KEY=... \
+go test ./eval/ -run TestRealProviderEval -v
+```
+
+Without the `CHAT_EVAL_*` vars the live test skips, so CI stays hermetic.
 
 **Tests.**
-- Fixture-driven accuracy report (thresholds advisory, not a hard CI gate).
-- Regression comparison against the prior run's accuracy/skip numbers.
+- Deterministic mock-provider tests pin the harness scoring (exact hit, misroute,
+  over-load = hit-not-exact, multi-group, skip, correct-skip, suite aggregation,
+  fixture well-formedness) — these run in CI.
+- `TestRealProviderEval` produces the fixture-driven accuracy report and asserts
+  a permissive top-1 floor (advisory, not a hard gate); skipped unless enabled.
 
 ### Definition of done
 
@@ -656,6 +697,6 @@ in must change to send the signal; every other app is unaffected.
 |----------|---------|-----------------|
 | S3 context hints | [`server/server.go`](../server/server.go), [`capability/`](../capability/capability.go) | read inbound header → capability subset before `filteredTools()` |
 | S6 read-only | implemented | `filteredTools()` mode branch |
-| S6b read-only footprint (proposed) | MCP `ReadOnlyHint` / [`mcpclient`](../mcpclient/router.go) `read_only_tools`; product default mode | annotate writes so `filteredTools()` drops them; lean read-only for read-heavy turns |
+| S6b read-only footprint (implemented) | MCP `ReadOnlyHint` / [`mcpclient`](../mcpclient/router.go) `read_only_tools`; product default mode; `server.buildRoutingGroups` | annotate writes so `filteredTools()` drops them; routing menu now mode-filtered; lean read-only for read-heavy turns |
 | S8 intra-group tool selection (proposed) | [`capability/group.go`](../capability/group.go), [`agent/agent.go`](../agent/agent.go) (`loadToolsDef`/`handleLoadTools`/`filteredTools`), `BuildSystemPromptWithRouting` | expand oversized groups into a per-tool sub-index; add additive `tools: []string` to `load_tools`; activate individual tools |
 | S7 supervisor | [`agent/agent.go`](../agent/agent.go), [`capability/group.go`](../capability/group.go), [`config/config.go`](../config/config.go), [`server/server.go`](../server/server.go), [`cmd/chat-service/main.go`](../cmd/chat-service/main.go) | **S7a (built):** `tool_routing` config; `capability.BuildGroups`/`RenderGroupIndex`; `BuildSystemPromptWithRouting` group index; internal `load_tools` tool + per-message state; `filteredTools()` restriction/recompute/budget; forced-first-step nudge; `RoutingStats` telemetry. **S7b (deferred):** pre-pass LLM call → capability subset → existing `filteredTools()` filter |

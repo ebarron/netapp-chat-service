@@ -260,6 +260,40 @@ func TestPostCapabilitiesRoutingAllowsOverSumBudget(t *testing.T) {
 	}
 }
 
+// S6b: the in-band routing group menu must be built from the mode-filtered
+// tool set — in read-only mode a server's write tools are excluded, so the
+// model is never offered tools it cannot call and read-only-annotated servers
+// present a smaller group.
+func TestRoutingMenuRespectsReadOnlyMode(t *testing.T) {
+	router := mcpclient.NewMockRouter([]llm.ToolDef{
+		mcpclient.MockReadOnlyTool("get_thing", "read"),
+		mcpclient.MockTool("write_thing", "write"),
+	})
+	router.SetServers([]string{"harvest-mcp"})
+	router.SetToolServer("get_thing", "harvest-mcp")
+	router.SetToolServer("write_thing", "harvest-mcp")
+
+	caps := []capability.Capability{
+		{ID: "harvest", Name: "Harvest", State: capability.StateAllow, ServerName: "harvest-mcp"},
+	}
+	capStates := capability.ToMap(caps)
+	connected := map[string]bool{"harvest-mcp": true}
+	tsm := map[string]string{"get_thing": "harvest", "write_thing": "harvest"}
+
+	ro := buildRoutingGroups(caps, capStates, "read-only", connected, tsm, router)
+	if len(ro) != 1 {
+		t.Fatalf("read-only: got %d groups, want 1", len(ro))
+	}
+	if len(ro[0].ToolNames) != 1 || ro[0].ToolNames[0] != "get_thing" {
+		t.Errorf("read-only menu tools = %v, want [get_thing] (write tool dropped)", ro[0].ToolNames)
+	}
+
+	rw := buildRoutingGroups(caps, capStates, "read-write", connected, tsm, router)
+	if len(rw) != 1 || len(rw[0].ToolNames) != 2 {
+		t.Errorf("read-write menu tools = %v, want both tools", rw[0].ToolNames)
+	}
+}
+
 // A single capability whose own tools exceed the cap must still be rejected
 // even with routing on — routing cannot split one server.
 func TestPostCapabilitiesRoutingRejectsIrreducibleServer(t *testing.T) {
