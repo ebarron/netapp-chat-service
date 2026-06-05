@@ -1,8 +1,10 @@
 # Scaling to High MCP Tool Counts
 
-> **Status:** S7a (in-band supervisor) **implemented**, Layers 0–5. S3, S7b,
-> and the Layer 6 LLM eval remain deferred (see §4.3). Original design retained
-> below for context; §4.3 records the decisions locked in during the build.
+> **Status:** S7a (in-band supervisor) **implemented**, Layers 0–5. Deferred:
+> **S8** (intra-group tool-level selection — the proposed next priority, see §S8),
+> **S6b** (read-only footprint reduction — cheapest follow-up), S3, S7b, and the
+> Layer 6 LLM eval (see §4.2–4.3). Original design retained below for context;
+> §4.3 records the decisions locked in during the build.
 > **Audience:** Engineers working on netapp-chat-service
 > **Scope:** Strategies for keeping the per-request tool list small, relevant,
 > and under the provider cap as the number of connected MCP servers grows. All
@@ -114,8 +116,11 @@ façade MCP.
 
 This plan builds **three** strategies: **S3** (opt-in context hints), **S6**
 (read-only reduction, already implemented), and **S7** (the supervisor we are
-building). The strategy IDs are stable; the gaps below are alternatives we
-**evaluated and will not build**:
+building). Two further strategies were added **after S7a shipped**, to address
+the group-granularity ceiling it leaves behind (a single oversized server):
+**S6b** (read-only footprint reduction — cheapest, mostly config) and **S8**
+(intra-group tool-level selection — the proposed next build). The strategy IDs
+are stable; the gaps below are alternatives we **evaluated and will not build**:
 
 - **S1 — per-turn relevance ranker ("tool RAG").** A Go/embedding ranker that
   trims tools per turn. Rejected: a recall cliff and per-turn non-determinism for
@@ -163,6 +168,32 @@ Do **not** bake any view→capability map into this repo.
 This is a real count reduction, not just a permission gate. **No work required**;
 documented here so it isn't reinvented. It only helps in proportion to how many
 write tools a server exposes.
+
+#### S6b — shrink a group's read-only footprint (lowest-hanging follow-up)
+
+> **Status: ⏳ Not implemented (proposed — mostly config/annotation, little or
+> no service code).**
+
+The per-turn cost of a large server is dominated by its **write** tools, and the
+budget unit in S7a is the whole server (see §S8). Two near-zero-code levers cut a
+group's footprint on read-only turns:
+
+1. **Annotate `ReadOnlyHint` (or supply `read_only_tools`)** on each MCP so
+   `filteredTools()` can drop writes. `ontap-mcp` already publishes
+   `ReadOnlyHint`; `harvest-mcp` uses the `read_only_tools` allowlist label.
+2. **Lean toward a read-only default** for read-heavy products.
+
+For an `ontap` that is ~80 tools total but, say, ~45 read-only, a read-only turn
+loading `ontap` drops from 80 → ~45 — often enough to let `ontap` pair with
+another group under `MaxToolsPerRequest` **with no new routing code at all**.
+This is the cheapest mitigation for the oversized-server problem and should be
+exhausted first. It does **not** help inherently-write turns (e.g. volume
+provisioning), which is exactly where S8 (below) earns its keep.
+
+> NABox note: `ontap` currently defaults to `ask-on-write`, which surfaces its
+> write tools to the model (and the budget) regardless of mode. A product that
+> wants the read-only footprint reduction must run the relevant turns in
+> `read-only` mode (or set `ontap` read-only), not `ask-on-write`.
 
 ### S7 — Router / dispatcher agent (supervisor; intent-based selection)
 
@@ -245,6 +276,67 @@ is auto-derived from the capability registry + operator config (§1), not from
 host semantics. Default (supervisor disabled) → identical to today; apps opt in
 by operator config (e.g. `tool_routing: { mode: in-band | router | off }`).
 
+### S8 — Intra-group (tool-level) selection for oversized groups
+
+> **Status: ⏳ Not implemented (proposed — candidate next priority).**
+
+**Why.** S7a routes at **group (= MCP server) granularity**: `load_tools(group)`
+activates *all* of that server's tools. This is correct and generic, but it has
+no lever when a **single server is itself large**, because the budget unit is the
+whole server. Concretely (NABox): `ontap-mcp` exposes ~80 tools. A turn that
+loads `ontap` alone (~80 + ~8 internal ≈ 88) fits, but a turn that legitimately
+needs `ontap` **and** `harvest` (~80 + ~44 = 124 MCP + internal ≈ 132) exceeds
+`MaxToolsPerRequest` *even with routing on*. Group-level routing cannot split one
+server, so this is the ceiling S7a leaves behind.
+
+**What.** Extend the in-band selector to optionally operate at **tool
+granularity for groups that exceed a size threshold**, keeping whole-group
+loading for small servers (a **hybrid**). The proven `load_tools` mechanism is
+reused; only its grain changes:
+
+- **Small groups** (≤ `group_expand_threshold`, e.g. 25) behave exactly as today:
+  one menu row, load the whole server.
+- **Oversized groups** are rendered as an **expandable sub-index** of
+  `tool_name — one-line description` rows (descriptions auto-derived from the
+  tool's own MCP metadata — the same content-derived rule used for group
+  descriptions). `load_tools` accepts individual tool names for these, so the
+  model pulls in only the handful it needs (e.g. 8–12 of `ontap`'s 80).
+
+**Contract.** `load_tools` gains an additive `tools: []string` field alongside
+`groups: []string`. Loading stays additive and idempotent, and the mid-task
+re-`load_tools` recovery path is unchanged. `groups` remains valid (and is the
+only thing offered for small servers), so the change is **backward compatible**
+with the S7a contract.
+
+**Where.** [`capability/group.go`](../capability/group.go) (emit a per-tool
+sub-index for oversized groups), `BuildSystemPromptWithRouting` (render the
+nested rows under a collapsible group heading), and `Agent.handleLoadTools` /
+`filteredTools()` (activate individual tools, not just whole groups). The budget
+assertion (`≤ MaxToolsPerRequest`) is unchanged — it simply sees a smaller routed
+set.
+
+**Downsides.**
+- **Prompt menu grows** for expanded groups (one row per tool, not per server).
+  Bounded by only expanding oversized servers and by listing `name + 1-line
+  desc`, not full schemas. At extreme total tool counts this trends toward the
+  S1 "tool RAG" regime, which remains the right tool for thousands-of-tools
+  deployments.
+- **Selection recall risk on names/descriptions** — the model picks tools from
+  one-liners, not full schemas (the same risk S1 carried). Here it is (a) limited
+  to oversized servers, (b) made by the *main* model, and (c) recoverable via the
+  existing mid-task re-`load_tools` callback, so there is **no fixed-threshold
+  recall cliff**.
+
+**Why this is not the rejected S1/S5.** S8 is **model-driven** (no embedding
+ranker, no recall cliff — re-load recovers) and **auto-derived** (no operator
+tool enumeration). It is the natural extension of S7a's proven in-band mechanism
+to a finer grain, triggered *only* when a group is too big to load wholesale.
+That is precisely what S1 (ranker) and S5 (operator allowlist) gave up.
+
+**Genericness / app impact.** **Safe, no app changes.** Tool names/descriptions
+are content-derived; no host semantics. The default threshold leaves
+small-server deployments behaving exactly like today's group-level S7a.
+
 ---
 
 ## 4. Recommended sequencing
@@ -280,9 +372,18 @@ re-`load_tools` recovery callback).
 
 1. ✅ **Primary build (done):** implement **S7a** (see §5 for the layered plan).
 2. ✅ **In use, no work:** **S6** read-only reduction stays as-is.
-3. ⏳ **Opt-in, when an app asks (not built):** **S3** context hints as an opaque
+3. ⏳ **Lowest-hanging follow-up (config/annotation, little/no code):** **S6b**
+   shrink big servers' read-only footprint via `ReadOnlyHint` / `read_only_tools`
+   annotations + read-only-leaning defaults. Try this **before** S8 — it may
+   relieve the oversized-server pressure with no routing changes.
+4. ⏳ **Candidate next priority (proposed, not built):** **S8** intra-group
+   tool-level selection for oversized servers (the `ontap` ~80 case), with a
+   hybrid size threshold so small servers keep loading wholesale. This is the
+   logical next build now that S7a has shipped and the group-granularity ceiling
+   is the remaining gap.
+5. ⏳ **Opt-in, when an app asks (not built):** **S3** context hints as an opaque
    capability allowlist.
-4. ⏳ **Later, only if telemetry warrants (not built):** **S7b** behind the existing
+6. ⏳ **Later, only if telemetry warrants (not built):** **S7b** behind the existing
    `tool_routing.mode: router` flag — no rearchitecture, a second selector path
    on the same registry.
 
@@ -555,4 +656,6 @@ in must change to send the signal; every other app is unaffected.
 |----------|---------|-----------------|
 | S3 context hints | [`server/server.go`](../server/server.go), [`capability/`](../capability/capability.go) | read inbound header → capability subset before `filteredTools()` |
 | S6 read-only | implemented | `filteredTools()` mode branch |
+| S6b read-only footprint (proposed) | MCP `ReadOnlyHint` / [`mcpclient`](../mcpclient/router.go) `read_only_tools`; product default mode | annotate writes so `filteredTools()` drops them; lean read-only for read-heavy turns |
+| S8 intra-group tool selection (proposed) | [`capability/group.go`](../capability/group.go), [`agent/agent.go`](../agent/agent.go) (`loadToolsDef`/`handleLoadTools`/`filteredTools`), `BuildSystemPromptWithRouting` | expand oversized groups into a per-tool sub-index; add additive `tools: []string` to `load_tools`; activate individual tools |
 | S7 supervisor | [`agent/agent.go`](../agent/agent.go), [`capability/group.go`](../capability/group.go), [`config/config.go`](../config/config.go), [`server/server.go`](../server/server.go), [`cmd/chat-service/main.go`](../cmd/chat-service/main.go) | **S7a (built):** `tool_routing` config; `capability.BuildGroups`/`RenderGroupIndex`; `BuildSystemPromptWithRouting` group index; internal `load_tools` tool + per-message state; `filteredTools()` restriction/recompute/budget; forced-first-step nudge; `RoutingStats` telemetry. **S7b (deferred):** pre-pass LLM call → capability subset → existing `filteredTools()` filter |
