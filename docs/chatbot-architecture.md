@@ -1,36 +1,50 @@
-# host application Chatbot Architecture
+# netapp-chat-service — Chatbot Architecture
 
 > **Status:** Living document — updated as features ship  
-> **Audience:** Engineers working on host application  
-> **Scope:** Everything built in the chatbot system: backend, frontend, protocols, type system, interest system, capability controls
+> **Audience:** Engineers working on netapp-chat-service and the host applications that embed it  
+> **Scope:** Everything in the chat service: backend, the embeddable chat UI component, protocols, type system, interest system, capability controls, tool routing
+>
+> **`netapp-chat-service` is a host-agnostic, embeddable chatbot service.** It ships
+> no product-specific behavior, and it is not aware of which application embeds it.
+> A *host application* embeds it — as a Go library or by running the standalone
+> server — and injects everything domain-specific through configuration and
+> dependencies: the LLM provider, the MCP servers (and their capability states), the
+> system-prompt text, the interest catalog, and any bespoke render tools. Any
+> domain-flavored examples in this document (e.g. storage metrics, volume detail) are
+> illustrative only, not built-in features of the service.
 
 ---
 
 ## 1. Overview
 
-The host application chatbot is an AI-powered storage infrastructure assistant embedded in the host application admin UI. It connects to NetApp monitoring data via MCP (Model Context Protocol) servers, uses an LLM for reasoning and data interpretation, and renders rich visual responses — charts, dashboards, status grids, action buttons — inline within the chat conversation.
+`netapp-chat-service` is an embeddable, AI-powered chatbot service. The host
+application supplies an LLM provider and a set of MCP (Model Context Protocol)
+servers; the service runs an agentic tool-use loop, gates tool access behind
+per-capability states, and renders rich visual responses — charts, dashboards,
+status grids, object-detail cards, action buttons — inline in the chat
+conversation (and optionally in a side canvas). Nothing about the domain is baked
+in: the host wires in its own MCP servers, prompt text, interests, and render
+tools.
 
 The system has three main layers:
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                      Admin UI (React)                   │
-│  ChatPanel │ Charts │ DashboardBlock │ CapabilityControls│
-├─────────────────────────────────────────────────────────┤
-│                  chat-service Backend (Go)                    │
-│  Agent Loop │ LLM Providers │ MCP Router │ Sessions     │
-├─────────────────────────────────────────────────────────┤
-│                  MCP Tool Servers                       │
-│  harvest-mcp │ ontap-mcp │ grafana-mcp                  │
-└─────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    UI["<b>Host application UI</b><br/>embeds @edjbarron/netapp-chat-component<br/>ChatPanel · Charts · DashboardBlock · CapabilityControls"]
+    SVC["<b>netapp-chat-service (Go)</b><br/>Agent Loop · LLM Providers · MCP Router · Sessions<br/>Capabilities · Interests · Tool Routing · Render kit"]
+    MCP["<b>Host-supplied MCP Tool Servers</b><br/>e.g. harvest-mcp · ontap-mcp · grafana-mcp"]
+    UI <--> SVC
+    SVC <--> MCP
 ```
 
 **Key design principles:**
 
-- **LLM as orchestrator** — the LLM decides which tools to call, how to interpret results, and what visualization format to use. For LLM-generated dashboards, the backend doesn't pre-process or shape data. For bespoke render tools (§5.6), the Go handler fetches time-series chart data server-side from VictoriaMetrics so the LLM only needs to pass scalar properties.
-- **Declarative rendering** — the LLM emits typed JSON; the frontend dispatches to React components by type. No executable code crosses the wire.
-- **Capability-gated tool access** — each MCP server maps to a capability with an Off/Ask/Allow state. Users control what the LLM can do.
-- **Interest-driven responses** — predefined "interests" teach the LLM how to produce rich dashboard layouts for common questions, without hardcoding behavior in the backend or frontend.
+- **Host-agnostic core** — the service hardcodes no products, MCP servers, capabilities, interests, or prompt copy. A host application injects all of these via config (standalone server) or `server.ChatDeps` fields (embedded library). The NetApp servers above are an example consumer's wiring.
+- **LLM as orchestrator** — the LLM decides which tools to call, how to interpret results, and what visualization format to use. For LLM-generated output the service doesn't pre-process data. For bespoke render tools (§5.6), a host-supplied Go handler builds the output deterministically (and may fetch its own data server-side).
+- **Declarative rendering** — the LLM emits typed JSON in fenced code blocks; the UI component dispatches to React components by type. No executable code crosses the wire.
+- **Capability-gated tool access** — each MCP server maps to a capability with an Off/Ask/Ask-on-write/Allow state. Users control what the LLM can do.
+- **Interest-driven responses** — host-supplied "interests" teach the LLM how to produce rich layouts for common questions, without hardcoding behavior in the service.
+- **Tool routing for scale** — optional in-band supervisor (§2.7) keeps the per-turn tool list under the provider cap as the number of MCP servers grows.
 
 ---
 
@@ -40,11 +54,15 @@ The system has three main layers:
 
 `cmd/chat-service/main.go` — `initChatbot()` runs at server start:
 
-1. Loads AI configuration from `/etc/host application/ai.yaml` (provider, API key, model, capability states)
+1. Loads AI configuration from the host-configured path (e.g. `config.yaml`/`ai.yaml`) — provider, API key, model, capability states
 2. Creates the LLM provider (OpenAI, Anthropic, Bedrock, or OpenAI-compatible custom endpoint)
-3. Connects to MCP servers (harvest-mcp, ontap-mcp, grafana-mcp) — discovers available tools from each
-4. Loads the interest catalog (embedded built-in interests + user-defined from `/etc/host application/interests/`)
-5. Builds the default capability list and merges saved states
+3. Connects to the host-configured MCP servers (e.g. harvest-mcp, ontap-mcp, grafana-mcp) — discovers available tools from each
+4. Loads the interest catalog the host supplied (host's embedded interests + user-defined from the host's `InterestsDir`)
+5. Builds the capability list from the configured servers and merges saved states
+
+> When embedded as a Go library, a host skips the standalone `initChatbot()` and
+> instead constructs `server.ChatDeps` directly (provider, router, capabilities,
+> catalog, prompt config, extra tools, tool-routing settings).
 
 If no AI configuration exists, the chatbot is disabled — the frontend shows a setup prompt instead of the chat interface.
 
@@ -54,29 +72,24 @@ If no AI configuration exists, the chatbot is disabled — the frontend shows a 
 
 The `Agent.Run()` function implements an agentic tool-use loop:
 
-```
-User message
-    │
-    ▼
-┌──────────────────────────────────────────────┐
-│ Send messages + filtered tools to LLM        │
-│                                              │
-│   LLM streams response:                     │
-│   ├── Text tokens → emit EventText           │
-│   └── Tool calls → collect in pending list    │
-│                                              │
-│ If no tool calls → emit EventDone, return     │
-│                                              │
-│ For each tool call (in parallel):            │
-│   ├── Internal tool? → execute locally        │
-│   └── MCP tool? → route via Router.CallTool   │
-│       ├── Ask-mode? → emit approval request   │
-│       │   └── Wait for user approve/deny      │
-│       └── Execute and emit result             │
-│                                              │
-│ Append tool results to messages               │
-│ Loop (max 10 iterations)                      │
-└──────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    A["User message"] --> B["Send messages + filtered tools to LLM"]
+    B --> C["LLM streams response<br/>text tokens → EventText"]
+    C --> D{"Tool calls?"}
+    D -- No --> E["Emit EventDone · return"]
+    D -- Yes --> F["For each tool call, in parallel"]
+    F --> G{"Internal or MCP tool?"}
+    G -- Internal --> H["Execute locally"]
+    G -- MCP --> I{"Ask-mode?"}
+    I -- Yes --> J["Emit approval request<br/>wait for approve / deny"]
+    I -- No --> K["Route via Router.CallTool"]
+    J --> K
+    H --> L["Append tool results to messages"]
+    K --> L
+    L --> M{"Iteration &lt; 10?"}
+    M -- Yes --> B
+    M -- No --> E
 ```
 
 **Key behaviors:**
@@ -110,7 +123,7 @@ Supported providers:
 
 All providers implement streaming via `iter.Seq2[StreamEvent, error]` — a Go 1.23 iterator that yields text deltas and tool calls as they arrive from the upstream API.
 
-Configuration is stored in `/etc/host application/ai.yaml`:
+Configuration is loaded from the host-configured path (e.g. `config.yaml`, or `ai.yaml` on an appliance host):
 
 ```yaml
 provider: openai
@@ -164,65 +177,88 @@ type Session struct {
 
 Sessions use a sliding window to cap context size. When the message count exceeds the maximum, `trimWindow()` removes the oldest non-system messages. Sessions are keyed by a client-generated UUID stored in the frontend.
 
-There is no persistence — sessions are lost on chat-service restart. This is intentional: host application is an appliance, and conversation history is ephemeral.
+There is no persistence — sessions are lost on chat-service restart. This is intentional: conversation history is treated as ephemeral (well-suited to appliance-style hosts).
 
 ### 2.6 System Prompt
 
-`BuildSystemPrompt()` in `agent.go` constructs a dynamic system prompt from runtime state:
+`BuildSystemPrompt()` in `agent.go` constructs a dynamic system prompt from runtime state. The product-specific copy is **not hardcoded** — it comes from the host-supplied `agent.SystemPromptConfig`:
+
+| `SystemPromptConfig` field | Purpose | Default |
+|---|---|---|
+| `ProductName` | Assistant display name set by the host (e.g. "Acme Assistant") | empty |
+| `ProductDescription` | Paragraph describing the product/data-source context | empty |
+| `Guidelines` | Product-specific guideline lines (e.g. URL-rewriting rules) | none |
+| `Vocabulary` | Free-form markdown block for domain guidance (entity kinds, link patterns, CLI proposal formats) injected before the data-source list | empty (no block) |
+
+The service ships **no role text, guidelines, or vocabulary by default** — a host with an empty config gets a generic assistant. The blocks assembled are:
 
 ```
 ┌─────────────────────────────────────────────┐
-│ 1. Role & guidelines                        │
-│    - Storage infrastructure expert           │
-│    - Markdown formatting rules               │
-│    - Grafana URL rewriting                   │
-│    - Destructive operation confirmations      │
+│ 1. Role & guidelines (host-supplied)        │
+│    - ProductName / ProductDescription        │
+│    - Guidelines[] (host-specific rules)      │
+│    - Markdown formatting rules (generic)      │
+│    - Destructive-operation confirmations      │
+│    - Vocabulary block (host-supplied)         │
 ├─────────────────────────────────────────────┤
 │ 2. Connected data sources                   │
-│    - List of MCP server names                │
-│    - Tool count                              │
+│    - List of MCP server names + tool count   │
 ├─────────────────────────────────────────────┤
 │ 3. Chart format spec (if interests loaded)  │
-│    - 12 chart types with JSON schemas        │
-│    - Dashboard panel layout rules             │
-│    - Data point limits                        │
+│    - panel types with JSON schemas           │
+│    - dashboard/object-detail layout rules     │
 ├─────────────────────────────────────────────┤
 │ 4. Interest catalog (if interests loaded)   │
 │    - Compact index table (ID │ Name │ Triggers)│
-│    - Critical instruction: match triggers →  │
-│      call get_interest before anything else   │
+│    - Match triggers → call get_interest first │
 ├─────────────────────────────────────────────┤
 │ 5. Interest management spec (if save/delete │
 │    tools available)                          │
-│    - Create/update/delete workflow instructions│
-│    - Confirmation requirements                │
+├─────────────────────────────────────────────┤
+│ 6. Tool group index (if tool routing on §2.7)│
 └─────────────────────────────────────────────┘
 ```
 
-The chart format spec is a string constant (`chartFormatSpec`) that documents all 12 panel types with their JSON schemas. The interest catalog is a dynamic markdown table built from loaded interests. Together they give the LLM the vocabulary and instructions to produce structured visual responses.
+The chart format spec is a generic string constant (`chartFormatSpec`) documenting the panel types and their JSON schemas. The interest catalog is a dynamic markdown table built from whatever interests the host loaded. Together they give the LLM the vocabulary and instructions to produce structured visual responses — but only when the host has supplied interests.
 
 When **tool routing** is enabled (§2.7), `BuildSystemPromptWithRouting()` injects a sixth block — the capability **group index** — and instructs the model to call `load_tools` before using any grouped tools. When tool routing is off (the default), this block is absent and the prompt is byte-for-byte identical to the legacy `BuildSystemPrompt()` output.
 
 ### 2.7 Tool Routing (High Tool-Count Scaling)
 
-As more MCP servers connect, the flattened per-turn tool list grows toward the provider's hard cap (`MaxToolsPerRequest = 128`) and selection accuracy degrades well before that. **Tool routing** (strategy S7a, the "in-band supervisor") keeps the per-turn tool list small without a dedicated routing-model round trip. It is **opt-in and off by default**; absent configuration, behavior is byte-for-byte identical to before.
+As more MCP servers connect, the flattened per-turn tool list grows toward the provider's hard cap (`MaxToolsPerRequest = 128`) and selection accuracy degrades well before that. **Tool routing** — the in-band supervisor — keeps the per-turn tool list small without a dedicated routing-model round trip. It is **opt-in and off by default**; absent configuration, behavior is byte-for-byte identical to before.
 
 How it works (in-band mode):
 
 1. **Group registry** — `capability.BuildGroups()` derives a capability/group menu 1:1 from the connected capabilities (no hardcoded product/view map). Each group's label/description come from optional per-server `capability_name`/`capability_description` config, falling back to the server's tool names. `capability.RenderGroupIndex()` renders this as a compact menu.
 2. **Group index in the system prompt** — the menu is injected (§2.6) instead of the full flattened tool schema. The model sees group names + descriptions, not every tool.
-3. **`load_tools` internal tool** — the model self-selects the groups it needs by calling `load_tools(groups)`. Only then are those groups' tools loaded into the tool list for subsequent iterations. This is the same in-band "search-then-load" shape the interest system already uses (`get_interest`), not a separate supervisor request. Groups named in the `always_on` config list are preloaded from the first turn without requiring a `load_tools` call. When `group_expand_threshold` is set (S8), a group larger than the threshold is offered tool-by-tool and the model can load just the tools it needs via `load_tools(tools)` instead of the whole server — useful when a single MCP (e.g. an ~80-tool storage server) is too large to pair with others under the cap.
+3. **`load_tools` internal tool** — the model self-selects the groups it needs by calling `load_tools(groups)`. Only then are those groups' tools loaded into the tool list for subsequent iterations. This is the same in-band "search-then-load" shape the interest system already uses (`get_interest`), not a separate supervisor request. Groups named in the `always_on` config list are preloaded from the first turn without requiring a `load_tools` call. When `group_expand_threshold` is set, a group larger than the threshold is offered tool-by-tool and the model can load just the tools it needs via `load_tools(tools)` instead of the whole server — useful when a single MCP (e.g. an ~80-tool storage server) is too large to pair with others under the cap.
 4. **Per-message filtering + budget guard** — `filteredTools()` restricts the offered tools to loaded groups (plus internal tools), recomputed each iteration, and enforces the `max_tools` budget so the request stays under the cap.
 5. **Forced-first-step nudge** — in `in-band` mode (on by default) the agent ensures `load_tools` is called before grouped tools are used; if the model skips it, the agent nudges and retries.
 6. **Telemetry** — `agent.RoutingStats` (via `(*Agent).LastRoutingStats`) records groups offered/loaded, `load_tools` call count, reloads, and skip/compliant outcomes.
+
+```mermaid
+flowchart TD
+    A["Connected capabilities"] --> B["capability.BuildGroups()<br/>derive group menu 1:1"]
+    B --> C["RenderGroupIndex()<br/>compact menu injected in system prompt"]
+    C --> D["LLM sees group names + descriptions,<br/>not every tool"]
+    D --> E{"How is a group loaded?"}
+    E -- "always_on config" --> G["Preloaded from first turn"]
+    E -- "model self-selects" --> F["load_tools(groups)"]
+    F --> G
+    G --> H["filteredTools()<br/>restrict to loaded groups + internal tools"]
+    H --> I{"Within max_tools budget?<br/>cap = 128"}
+    I -- No --> H
+    I -- Yes --> J["Tools offered to LLM next iteration"]
+    J --> K["RoutingStats records offered / loaded / skips"]
+```
 
 Configuration is via the `tool_routing` block (§10.4):
 
 | Mode | Behavior |
 |------|----------|
 | `off` | Default. No routing; full filtered tool list as before. |
-| `in-band` | S7a supervisor — group index + `load_tools` self-selection. |
-| `router` | S7b dedicated routing model. Parsed but **rejected at startup** until implemented. |
+| `in-band` | In-band supervisor — group index + `load_tools` self-selection. |
+| `router` | Dedicated routing model (not yet implemented; parsed but **rejected at startup**). |
 
 This feature is **server-side only** — the chat UI component (`@edjbarron/netapp-chat-component`) is unchanged; `load_tools` appears in the UI like any other internal tool under the existing trace toggle. See `docs/high-tool-count-scaling.md` for the full design, decisions, and deferred work.
 
@@ -232,7 +268,7 @@ This feature is **server-side only** — the chat UI component (`@edjbarron/neta
 
 ### 3.1 Chat Panel
 
-`chat-service/frontend/src/components/ChatPanel/ChatPanel.tsx` — the main chat interface, implemented as a Mantine `Drawer` that slides in from the left side of the admin UI.
+The chat UI is shipped as a reusable React package — `@edjbarron/netapp-chat-component` (`packages/chat-component/src/`) — that the host application embeds. `packages/chat-component/src/ChatPanel.tsx` is the main chat interface, implemented as a Mantine `Drawer` that slides in from the side of the host UI.
 
 **Structure:**
 
@@ -286,10 +322,32 @@ The frontend issues the streaming POST through `ChatAPI.stream(path, body, signa
 | `message` (type: tool_result) | Update ToolStatusCard with result + optional auto-vis |
 | `message` (type: tool_error) | Update ToolStatusCard with error |
 | `tool_approval_required` | Show ActionConfirmation inline card |
+| `canvas_open` | Open/update a canvas tab, render payload via DashboardBlock / ObjectDetailBlock |
 | `error` | Display error message |
 | `done` | Finalize message, save session ID |
 
 Text tokens stream incrementally — the user sees the response building in real time. Dashboard blocks are buffered until the closing fence arrives, with an "Assembling dashboard..." placeholder shown during accumulation.
+
+```mermaid
+sequenceDiagram
+    participant UI as Frontend (ChatAPI.stream)
+    participant Server
+    participant Agent
+    UI->>Server: POST /chat/message
+    Server-->>UI: text/event-stream
+    loop until done
+        Agent->>Server: EventText / tool_call / tool_result
+        Server-->>UI: event: message
+        UI->>UI: append text / update ToolStatusCard
+    end
+    opt ask-mode capability
+        Agent->>Server: EventToolApprovalRequired
+        Server-->>UI: event: tool_approval_required
+    end
+    Agent->>Server: EventDone
+    Server-->>UI: event: done
+    UI->>UI: finalize message, save session id
+```
 
 ---
 
@@ -343,7 +401,7 @@ Two entry points handle chart JSON:
 ```​
 ```
 
-**Object detail views** (planned) — `ObjectDetailBlock.tsx` will handle `language-object-detail` code fences:
+**Object detail views** — `ObjectDetailBlock.tsx` handles `language-object-detail` code fences:
 
 ```
 ```object-detail
@@ -380,11 +438,92 @@ The detector:
 
 `downsample()` in `chartTypes.ts` is a safety net for large data arrays. If a chart's data array exceeds 200 points, it is downsampled by picking every Nth point. The system prompt also instructs the LLM to limit data to ~50–100 rows.
 
+### 4.6 Canvas Rendering
+
+Inline rendering puts the visual block in the message stream. The **canvas** is an
+alternative surface: instead of (or in addition to) flowing inline, content opens
+in a pinned side panel with its own tabs, so the user can keep a dashboard or
+object-detail view visible while continuing to chat.
+
+Canvas is driven by two additional fence types that mirror the inline ones:
+
+| Inline fence | Canvas fence |
+|---|---|
+| ` ```object-detail ` | ` ```canvas-object-detail ` |
+| ` ```dashboard ` | ` ```canvas-dashboard ` |
+
+**How it works (server side):** the agent wraps its text emit with a
+`canvasFenceInterceptor` (`agent/canvas.go`). As tokens stream, the interceptor
+buffers anything that might be the start of a canvas fence; mid-content backticks
+(inline code) are *not* held. When a complete `canvas-object-detail` /
+`canvas-dashboard` block arrives, the interceptor:
+
+1. **suppresses** the fence from the normal `EventText` stream (so it does not also render inline), and
+2. emits an `EventCanvasOpen` carrying a `CanvasPayload{ TabID, Title, Kind, Qualifier, Content }`. The `TabID` is derived as `kind::title::qualifier` so re-opening the same object reuses its tab. The `Content` is the raw inner JSON (an ordinary `object-detail` or `dashboard` object).
+
+The server serializes this as a dedicated SSE event — `event: canvas_open` with the
+`CanvasPayload` as data (`server/server.go`). Malformed/incomplete fences fall back
+to plain text, so a partial stream never corrupts the message.
+
+**Producing canvas blocks:** the LLM can emit a canvas fence directly, or a bespoke
+render tool (§5.6) can call `(*render.ObjectDetail).MarshalCanvasBlock()` instead of
+`MarshalBlock()` to target the canvas.
+
+**Canvas context in the prompt:** open canvas tabs are fed back to the model.
+`BuildSystemPrompt` / `BuildSystemPromptWithRouting` accept variadic
+`CanvasTabSummary` values (passed by the server from `req.CanvasTabs`) and append a
+"canvas context" section so the LLM knows what the user has pinned and can refer to
+or update it.
+
+**Frontend:** the chat UI component (`@edjbarron/netapp-chat-component`) handles
+`canvas_open` by opening/updating a canvas tab and rendering the payload with the
+same `DashboardBlock` / `ObjectDetailBlock` components used inline (see
+`useChatPanel.canvas.test.ts`).
+
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant CI as canvasFenceInterceptor
+    participant Server
+    participant UI as Frontend
+    Agent->>CI: stream text tokens
+    CI->>CI: buffer possible canvas fence<br/>(inline backticks not held)
+    alt complete canvas-* fence
+        CI->>CI: suppress fence from EventText
+        CI->>Server: EventCanvasOpen<br/>CanvasPayload{TabID, Title, Kind, Qualifier, Content}
+        Server-->>UI: event: canvas_open
+        UI->>UI: open/update canvas tab<br/>render via DashboardBlock / ObjectDetailBlock
+    else malformed or partial
+        CI->>Server: fall back to plain EventText
+    end
+```
+
 ---
 
 ## 5. Interest System
 
-Interests are predefined response patterns that teach the LLM how to produce rich, structured responses for common questions. They bridge the gap between "the LLM knows the chart vocabulary" and "the LLM consistently produces the exact dashboard layout we want."
+Interests are predefined response patterns that teach the LLM how to produce rich, structured responses for common questions. They bridge the gap between "the LLM knows the chart vocabulary" and "the LLM consistently produces the exact layout we want."
+
+**Interests are host-supplied, not built into the service.** The service provides
+the *mechanism* (catalog loading, the system-prompt index, the `get_interest` /
+`save_interest` / `delete_interest` tools, and the bespoke-render-tool plumbing);
+the host application provides the *content*. A host wires its catalog in via
+`server.ChatDeps`:
+
+| `ChatDeps` field | Role |
+|---|---|
+| `Catalog *interest.Catalog` | The loaded interest catalog (built/indexed by the host) |
+| `InterestsDir string` | Directory where user-created interests are persisted |
+| `ExtraTools map[string]agent.InternalTool` | Host-supplied internal tools, including any bespoke render tools (§5.6) |
+
+A host typically embeds its own interest `.md` files with `//go:embed`, then uses
+`interest.ExtractFS(fsys, dir)` to materialize them into a directory that
+`interest.Catalog.Load` reads. This repo ships only **generic example interests**
+under `interest/examples/` (`health-check.md`, `resource-status.md`,
+`object-detail.md`) for reference — they are not loaded by default and carry no
+product semantics. If a host supplies no catalog, the interest index and chart
+spec are simply omitted from the prompt and the agent behaves as a plain tool-use
+assistant.
 
 ### 5.1 Concept
 
@@ -414,24 +553,34 @@ When the user wants an overall health check, produce a dashboard with:
 
 ### 5.2 Two Tiers
 
-**Built-in interests** are authored by the host application team, embedded in the binary via `//go:embed`, and prescriptive — they specify exact panel types, widths, tool calls, and layout order. Six ship today:
+Interests carry a `source` field that puts them in one of two tiers:
 
-| Interest | Triggers | Requires | Output type | Render |
-|----------|----------|----------|-------------|--------|
-| `morning-coffee` | "how's everything", "any issues", "summary", "fleet summary" | harvest | `dashboard` | LLM-generated |
-| `morning-coffee-v2` | "per cluster view", "cluster breakdown", "detailed fleet view" | harvest | `dashboard` | LLM-generated |
-| `resource-status` | "tell me about cluster/SVM/aggregate", "how is", "status of" | harvest | `object-detail` or `dashboard` | LLM-generated |
-| `object-list` | "show me volumes", "list aggregates", "top clusters" | harvest | `dashboard` | LLM-generated |
-| `volume-detail` | "tell me about volume", "volume details", "monitor this volume" | harvest | `object-detail` | **Bespoke** (`render_volume_detail`) |
-| `volume-provision` | "provision a volume", "new volume", "need storage" | harvest, ontap | `dashboard` (with `action-form`) | LLM-generated |
+**`source: builtin`** — authored by the host application team and shipped in the
+host's binary (typically via `//go:embed` + `interest.ExtractFS`). These are
+usually **prescriptive**: they specify exact panel types, widths, tool calls, and
+layout order. They cannot be deleted by users and their IDs cannot be shadowed by
+user interests.
 
-Most interests are **LLM-generated** — the interest body tells the LLM exactly what tools to call and what output structure to produce, and the LLM assembles the final JSON (`dashboard` or `object-detail` block) itself.
+**`source: user`** — created by end users (via chat, or by dropping `.md` files
+in the host's `InterestsDir`). These are usually **descriptive** — prose the LLM
+interprets to choose panel types and layout. They are capped (max 10) and fully
+user-managed.
 
-One interest — `volume-detail` — is **bespoke**: the interest body tells the LLM what data to gather, but the final output is built by a Go render tool (`render_volume_detail`) rather than by the LLM. See §5.6 for the bespoke render tool architecture.
+Within either tier, an interest is either **LLM-generated** (the body tells the
+LLM what tools to call and what output JSON to assemble — a `dashboard` or
+`object-detail` block) or **bespoke** (the body tells the LLM what data to gather
+and which host-supplied render tool to call; a Go tool builds the final JSON —
+see §5.6).
 
-The two fleet health interests (`morning-coffee` and `morning-coffee-v2`) form a summary/detailed pair. Each dashboard includes a `toggle` field that renders a clickable badge next to the title, switching between the two views by injecting a trigger message for the other interest.
+> **Illustrative example.** A host might ship a builtin catalog such as a
+> fleet-health interest (→ `dashboard`), a resource-status interest, an object-list
+> interest, and a bespoke object-detail interest (→ a custom render tool). Those
+> interests and their `requires:` capabilities live in the *host's* repo, not in
+> netapp-chat-service. They are shown here only to illustrate the patterns.
 
-**User-defined interests** are created by users (via chat or by dropping files in `/etc/host application/interests/`), have `source: user`, and are typically descriptive — prose that the LLM interprets to choose panel types and layout.
+An interest's output may also include a `toggle` field that renders a clickable
+badge next to the title, switching between paired views by injecting a trigger
+message for the other interest (e.g. a summary/detailed dashboard pair).
 
 ### 5.3 How It Works
 
@@ -439,50 +588,28 @@ The interest catalog flows through the system in three stages:
 
 **Stage 1 — Index in system prompt**: At session start, `BuildSystemPrompt()` includes a compact table of interest IDs, names, and trigger phrases. This costs ~200-600 tokens regardless of catalog size.
 
-**Stage 1.5 — Pre-filter tools by interest** (optional): Before the agent is created, the chat handler attempts a fast substring match of the user message against all interest triggers using `Catalog.Match()`. If a trigger matches, the handler narrows the tool set to only the matched interest's required capabilities (e.g. morning-coffee requires only `harvest`, so ontap and grafana tools are excluded). This reduces the tool schema sent to the LLM on every iteration, improving TTFT. If no trigger matches, the full tool set is sent. See §6.2 for details.
+**Stage 1.5 — Pre-filter tools by interest** (optional): Before the agent is created, the chat handler attempts a fast substring match of the user message against all interest triggers using `Catalog.Match()`. If a trigger matches, the handler narrows the tool set to only the matched interest's `requires:` capabilities (e.g. an interest that requires only `harvest` excludes all other servers' tools). This reduces the tool schema sent to the LLM on every iteration, improving TTFT. If no trigger matches, the full tool set is sent. See §6.2 for details.
 
 **Stage 2 — LLM matches and retrieves**: When the user sends a message, the LLM checks if it semantically matches any trigger phrase. If so, it calls `get_interest(id)` as its first tool call to retrieve the full interest body. This is a local lookup — no network call.
 
 **Stage 3 — LLM follows instructions**: The LLM reads the interest body, calls the specified tools to gather data, then produces the output. The final step depends on whether the interest is LLM-generated or bespoke:
 
-- **LLM-generated** (5 of 6 built-in interests): The LLM assembles the output JSON itself — a `dashboard` or `object-detail` code block following the layout instructions. For built-in interests, the instructions are precise (specific panel types, widths, queries). For user-defined interests, the LLM exercises judgment.
+- **LLM-generated**: The LLM assembles the output JSON itself — a `dashboard` or `object-detail` code block following the layout instructions. For prescriptive (`builtin`) interests, the instructions are precise (specific panel types, widths, queries). For `user` interests, the LLM exercises judgment.
 
-- **Bespoke** (currently `volume-detail` only): The LLM gathers scalar data (properties, status, monitoring state) and then calls a **render tool** (`render_volume_detail`). The render tool — a Go `InternalTool` — deterministically builds the `object-detail` JSON. The LLM does not assemble the output; Go code does. See §5.6 for details.
+- **Bespoke**: The LLM gathers scalar data (properties, status, etc.) and then calls a host-supplied **render tool** (registered in `ChatDeps.ExtraTools`). The render tool — a Go `InternalTool` — deterministically builds the `object-detail` JSON. The LLM does not assemble the output; Go code does. See §5.6 for details.
 
-```
-User: "How's everything looking?"         User: "Tell me about volume proxmox1"
-  │                                         │
-  ▼                                         ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│ Stage 1 — System prompt includes interest index                    │
-│ Stage 2 — LLM matches trigger → calls get_interest(id)            │
-│           Returns: full interest body with instructions            │
-│ Stage 3 — LLM calls data-gathering tools (metrics, alerts, etc.)  │
-└──────────────────────────┬──────────────────────────────────────────┘
-                           │
-              ┌────────────┴────────────┐
-              ▼                         ▼
-     LLM-Generated                  Bespoke
-  (5 of 6 interests)           (volume-detail)
-              │                         │
-  LLM assembles dashboard      LLM calls render_*() tool
-  or object-detail JSON        with scalar properties
-              │                         │
-              │                 Go handler builds
-              │                 object-detail JSON +
-              │                 fetches chart data from
-              │                 VictoriaMetrics
-              │                         │
-              │                 Result emitted directly
-              │                 to frontend (EmitResult)
-              │                         │
-              ▼                         ▼
-  LLM adds narrative text      LLM adds brief summary
-              │                         │
-              ▼                         ▼
-  Frontend renders              Frontend renders
-  DashboardBlock or             ObjectDetail +
-  ObjectDetail + text           markdown text
+```mermaid
+flowchart TD
+    Q["User message"] --> S1["Stage 1 — system prompt includes interest index"]
+    S1 --> S2["Stage 2 — LLM matches trigger,<br/>calls get_interest(id)"]
+    S2 --> S3["Stage 3 — LLM gathers data via tools"]
+    S3 --> D{"Interest type?"}
+    D -- "LLM-generated" --> G["LLM assembles dashboard<br/>or object-detail JSON"]
+    D -- "Bespoke" --> B["LLM calls render_*() tool<br/>with scalar properties"]
+    B --> BG["Go handler builds object-detail JSON,<br/>fetches chart data server-side"]
+    BG --> BE["Result emitted directly (EmitResult)"]
+    G --> GR["Frontend renders DashboardBlock /<br/>ObjectDetail + narrative text"]
+    BE --> BR["Frontend renders ObjectDetail + markdown"]
 ```
 
 ### 5.4 Interest Management
@@ -503,68 +630,65 @@ The LLM mediates all management actions — when a user says "save a new interes
 |------|---------|
 | `interest/interest.go` | `InterestMeta`, `Interest` types; YAML frontmatter parser |
 | `interest/catalog.go` | `Catalog` — load, filter, index, save, delete |
-| `interest/embed.go` | `//go:embed interests/*.md` |
+| `interest/embed.go` | `ExtractFS(fsys, destDir)` — materializes a host's embedded interest FS into a directory `Catalog.Load` can read |
 | `interest/tool.go` | Tool definitions and handlers for get/save/delete |
-| `interest/interests/*.md` | Built-in interest files |
+| `interest/examples/*.md` | Generic example interests (reference only; not loaded by default) |
 
 ### 5.6 Bespoke Render Tools
 
-Built-in interests instruct the LLM to gather data and produce structured UI
-blocks. In the original design the LLM also assembled the final JSON output
-(the `object-detail` or `dashboard` block). This works well for dashboards,
-but for single-object detail views the LLM occasionally omits sections,
-forgets buttons, or varies the layout across sessions.
+Bespoke render tools are a host-extensibility mechanism, not a NetApp feature.
+Interests can instruct the LLM to gather data and produce structured UI blocks; if
+the LLM also assembles the final JSON it occasionally omits sections, forgets
+buttons, or varies the layout across sessions. For views that must be exact, the
+host supplies a **render tool** instead.
 
-**Bespoke render tools** solve this by splitting the pipeline:
+**Bespoke render tools** split the pipeline:
 
-1. The **interest** tells the LLM *what data to gather* (metrics, alerts,
-   monitoring status) and *which render tool to call*.
-2. The **render tool** (a Go `InternalTool` in `render/`)
-   deterministically builds the `object-detail` JSON from the gathered data.
+1. The **interest** tells the LLM *what data to gather* and *which render tool to call*.
+2. The **render tool** — a Go `agent.InternalTool` the host registers in
+   `ChatDeps.ExtraTools` — deterministically builds the `object-detail` JSON from
+   the gathered data.
 
 This keeps the flexible, natural-language data-gathering step (which the LLM
 excels at) while guaranteeing the final UI is always correct and complete.
 
-**Server-side chart data**: Render tools fetch time-series data (IOPS,
-latency, capacity trends) directly from VictoriaMetrics via `MetricsFetcher`,
-rather than relying on the LLM to pass large arrays through tool arguments.
-The LLM passes only scalar properties (name, size, status, etc.); the Go
-handler queries VictoriaMetrics for chart data and populates the chart
-sections deterministically.
+**The `render/` package is a generic toolkit, not a set of tools.** It exposes the
+Go structs that mirror the TypeScript schema — `ObjectDetail`, `Section`,
+`PropertiesData`, `ActionsData`, `AreaChartData`, etc. — plus
+`(*ObjectDetail).MarshalBlock()` (→ `object-detail` fence) and
+`MarshalCanvasBlock()` (→ `canvas-object-detail` fence, see §4.6). A host builds
+its render tools on top of these structs. The service ships **no** concrete render
+tool of its own.
 
+**Server-side data (host's choice)**: a render tool may fetch its own data
+server-side (e.g. time-series from a metrics store) so the LLM passes only scalar
+properties rather than large arrays through tool arguments. How it does so is
+entirely host code; the service imposes nothing.
+
+```mermaid
+flowchart LR
+    subgraph LLMGen["LLM-Generated Flow — inconsistent"]
+        direction LR
+        A1["Interest"] --> A2["LLM gathers data"] --> A3["LLM builds JSON"]
+    end
+    subgraph RenderTool["Render Tool Flow — deterministic"]
+        direction LR
+        B1["Interest"] --> B2["LLM gathers data"] --> B3["render_*() tool<br/>Go builds JSON"]
+    end
 ```
-┌─────────────────────────────────────────────────────────┐
-│                  LLM-Generated Flow                     │
-│                                                         │
-│  Interest ──→ LLM gathers data ──→ LLM builds JSON     │
-│                                     ↑ inconsistent      │
-└─────────────────────────────────────────────────────────┘
 
-┌─────────────────────────────────────────────────────────┐
-│                  Render Tool Flow                        │
-│                                                         │
-│  Interest ──→ LLM gathers data ──→ render_*() tool      │
-│                                     ↑ deterministic     │
-│                                     Go builds JSON      │
-└─────────────────────────────────────────────────────────┘
-```
+#### Bespoke Interest Inventory (illustrative)
 
-#### Bespoke Interest Inventory
-
-Currently one interest uses the bespoke pattern:
-
-| Interest | Render tool | Output type | Server-side data |
-|----------|-------------|-------------|------------------|
-| `volume-detail` | `render_volume_detail` | `object-detail` (6 sections) | IOPS, latency (24h/5m), capacity trend (30d/1d) via `MetricsFetcher` |
-
-All other built-in interests (`morning-coffee`, `morning-coffee-v2`,
-`resource-status`, `object-list`, `volume-provision`) are LLM-generated —
-the LLM assembles the final JSON output.
+The service ships no bespoke interests. As an illustration, a host might pair a
+`volume-detail` interest with a `render_volume_detail` tool that returns a
+6-section `object-detail` and fetches IOPS/latency/capacity time-series from its
+own metrics store. Everything in this subsection lives in the host's repo.
 
 #### Enforcement Mechanisms
 
 Because LLMs are unreliable at following mandatory tool-call instructions,
-bespoke interests use two enforcement flags on the `InternalTool` registration:
+bespoke interests use two enforcement flags on the `agent.InternalTool` registration
+(both are generic service features, available to any host tool):
 
 | Flag | Purpose |
 |------|---------|
@@ -582,13 +706,14 @@ bypass enforcement.
 
 | Scenario | Approach |
 |----------|----------|
-| Single-object detail views with guaranteed sections (volume, aggregate, alert) | **Render tool** — consistency is critical |
-| Multi-panel dashboards (morning-coffee, resource-status) | **LLM-generated** — layout is simple, variation is acceptable |
+| Single-object detail views with guaranteed sections | **Render tool** — consistency is critical |
+| Multi-panel dashboards | **LLM-generated** — layout is simple, variation is acceptable |
 | User-defined interests | **LLM-generated** — user controls the output shape |
 
-#### Volume Detail Wireframe
+#### Example Wireframe (host's `render_volume_detail`)
 
-The `render_volume_detail` tool produces the following guaranteed layout:
+To make the pattern concrete, a host's `render_volume_detail` tool might produce
+this guaranteed layout (host code — shown for illustration only):
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -643,13 +768,13 @@ The `render_volume_detail` tool produces the following guaranteed layout:
 
 #### Implementation Files
 
-| File | Purpose |
-|------|---------|
-| `render/render.go` | Shared Go types mirroring TypeScript `ObjectDetailData` |
-| `render/volume.go` | `render_volume_detail` tool: `VolumeInput` → `ObjectDetail` |
-| `render/volume_test.go` | 17 tests covering all sections, edge cases, round-trip |
-| `interest/interests/volume-detail.md` | Interest body instructs LLM to call `render_volume_detail` |
-| `server/server.go` | Registers `render_volume_detail` as `InternalTool` |
+| File | Owner | Purpose |
+|------|-------|---------|
+| `render/render.go` | **service** | Generic toolkit: Go structs mirroring the TypeScript `ObjectDetailData` schema + `MarshalBlock` / `MarshalCanvasBlock` |
+| `agent/agent.go` (`InternalTool`) | **service** | `ExtraTools` registration, `RequiredAfterInterest` / `EmitResult` enforcement |
+| host repo (e.g. `render/volume.go`) | host | The concrete `render_volume_detail` tool: `VolumeInput` → `render.ObjectDetail` |
+| host repo (e.g. `interests/volume-detail.md`) | host | Interest body instructing the LLM to call the render tool |
+| host wiring (`ChatDeps.ExtraTools`) | host | Registers the render tool with the service |
 
 ---
 
@@ -663,13 +788,23 @@ Capabilities gate LLM access to MCP tool servers. Each MCP server maps to one ca
 | **Ask** | Tools are visible to the LLM, but each call pauses for user approval before executing. |
 | **Allow** | Tools execute autonomously — no user intervention required. |
 
-### 6.1 Default Capabilities
+### 6.1 Capability Definitions (host-supplied)
 
-| Capability ID | Server | Description | Default State |
+The service defines **no** capabilities of its own — `capability.DefaultCapabilities()`
+returns nil. Each capability is derived from a host-configured MCP server: the host
+lists its servers (in `config.yaml` for the standalone server, or by populating
+`ChatDeps.Capabilities` when embedding) and the service maps each server 1:1 to a
+capability with an `id`, label/description, and an initial state.
+
+As an example, a NetApp host might define:
+
+| Capability ID | Server | Description | Initial State |
 |---------------|--------|-------------|---------------|
 | `harvest` | harvest-mcp | Infrastructure metrics, health monitoring, capacity analysis | Ask |
 | `ontap` | ontap-mcp | Volume lifecycle, snapshots, data protection, multi-cluster management | Ask |
 | `grafana` | grafana-mcp | Dashboard search, Prometheus queries, alert rules, panel images | Ask |
+
+A different host would define an entirely different set; nothing above is built in.
 
 ### 6.2 How Filtering Works
 
@@ -695,20 +830,26 @@ When the agent prepares to call the LLM, `filteredTools()` builds the tool list:
 
 ### 6.3 Ask-Mode Approval Flow
 
-```
-Agent encounters tool call → capability state is Ask
-    │
-    ├── Emit EventToolApprovalRequired (SSE)
-    │     └── approval_id, capability, tool, params
-    │
-    ▼ (agent blocks, waiting)
-    │
-Frontend shows ActionConfirmation inline
-    │
-    ├── User clicks Approve → POST /chat/approve
-    │     └── ApprovalFunc returns true → tool executes
-    └── User clicks Deny → POST /chat/deny
-          └── ApprovalFunc returns false → tool skipped
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant Server as SSE / Server
+    participant UI as Frontend
+    participant User
+    Agent->>Agent: tool call, capability state = Ask
+    Agent->>Server: EventToolApprovalRequired<br/>approval_id, capability, tool, params
+    Server-->>UI: tool_approval_required
+    UI->>User: show ActionConfirmation inline
+    Note over Agent: agent blocks, waiting
+    alt Approve
+        User->>UI: click Approve
+        UI->>Agent: POST /chat/approve
+        Agent->>Agent: ApprovalFunc true → tool executes
+    else Deny
+        User->>UI: click Deny
+        UI->>Agent: POST /chat/deny
+        Agent->>Agent: ApprovalFunc false → tool skipped
+    end
 ```
 
 ### 6.4 Frontend Controls
@@ -777,6 +918,7 @@ Event types:
 | `message` (tool_result) | `tool`, `result` | Tool succeeded |
 | `message` (tool_error) | `tool`, `error` | Tool failed |
 | `tool_approval_required` | `approval_id`, `capability`, `tool`, `params`, `description` | Ask-mode pause |
+| `canvas_open` | `tab_id`, `title`, `kind`, `qualifier`, `content` | Canvas fence interceptor detected a complete `canvas-object-detail` / `canvas-dashboard` block (§4.6) |
 | `error` | `message` | Fatal error |
 | `done` | `session_id` | Stream complete |
 
@@ -807,46 +949,49 @@ This provides lightweight visualization even when the LLM doesn't produce a form
 
 ## 9. Rendering Pipeline — End to End
 
-Three paths exist for rendering LLM output:
+LLM output is rendered through several paths. Most render **inline** in the message
+stream; one renders on the **canvas** side panel (§4.6):
 
-```
-                    ┌─────────────────────────┐
-                    │     ChatMessage          │
-                    │  role: assistant | tool   │
-                    └──────────┬──────────────┘
-                               │
-              ┌────────────────┴─────────────────┐
-              │                                  │
-     role = assistant                     role = tool
-              │                                  │
-     ReactMarkdown                      ToolStatusCard
-     + remarkGfm                               │
-              │                         toolResult has
-     code block lang?                   known data shape?
-     ┌────────┼──────────┐               │          │
-  dashboard  chart      other          YES         NO
-     │        │           │              │          │
- Dashboard  ChartBlock  <code>      Mini chart   Plain text
-  Block     (single)                               (lineClamp 3)
-  (multi-panel,
-   clickable)
+```mermaid
+flowchart TD
+    M["ChatMessage"] --> R{"role?"}
+    R -- assistant --> A["ReactMarkdown + remarkGfm"]
+    R -- tool --> T["ToolStatusCard"]
+    A --> L{"code block lang?"}
+    L -- dashboard --> DB["DashboardBlock<br/>multi-panel, clickable"]
+    L -- chart --> CB["ChartBlock (single)"]
+    L -- object-detail --> OD["ObjectDetailBlock<br/>single-entity detail"]
+    L -- other --> CO["syntax-highlighted code"]
+    T --> TD{"known data shape?"}
+    TD -- yes --> MC["Mini chart (sparkline / gauge)"]
+    TD -- no --> PT["Plain text (lineClamp 3)"]
+    CF["canvas-object-detail /<br/>canvas-dashboard fence"] --> CI["intercepted server-side<br/>(canvasFenceInterceptor)"]
+    CI --> CE["canvas_open SSE event"]
+    CE --> CT["open/update canvas tab<br/>render via DashboardBlock / ObjectDetailBlock"]
 ```
 
-**Path 1 — Dashboard blocks** (interest-driven): Multi-panel grid with clickable elements that inject follow-up chat messages.
+**Inline paths** (rendered in the message stream by the assistant-markdown branch):
 
-**Path 2 — Standalone chart blocks**: Single chart inline in the message.
+- **Dashboard blocks** (interest-driven): Multi-panel grid with clickable elements that inject follow-up chat messages.
+- **Standalone chart blocks**: Single chart inline in the message.
+- **Object-detail blocks**: Single-entity detail page (identity header + sections) via `ObjectDetailBlock`.
+- **ToolStatusCard auto-visualization**: Automatic detection of chartable data in tool results — no LLM formatting needed.
 
-**Path 3 — ToolStatusCard auto-visualization**: Automatic detection of chartable data in tool results — no LLM formatting needed.
+**Canvas path** (§4.6): A `canvas-object-detail` / `canvas-dashboard` fence is not rendered inline. The agent's `canvasFenceInterceptor` intercepts it server-side, suppresses it from the text stream, and emits a `canvas_open` SSE event. The frontend opens (or updates) a canvas tab and renders the payload with the same `DashboardBlock` / `ObjectDetailBlock` components used inline.
 
-Additionally, `wrapInlineChartJson()` preprocesses assistant messages to catch bare JSON that should have been in a code fence, wrapping it so Paths 1 and 2 can handle it.
+Additionally, `wrapInlineChartJson()` preprocesses assistant messages to catch bare JSON that should have been in a code fence, wrapping it so the inline dashboard/chart paths can handle it.
 
 ---
 
 ## 10. Configuration & Environment
 
+> The concrete paths, env vars, and proxy/auth details below reflect one example
+> appliance-style host. Other hosts (e.g. an embedded library consumer) wire the
+> same settings through their own config files or `server.ChatDeps` fields.
+
 ### 10.1 AI Configuration
 
-Stored in `/etc/host application/ai.yaml` (or path from `AI_CONFIG_PATH` env):
+Stored at the host-configured path (e.g. `/etc/<host>/ai.yaml`, or the path from `AI_CONFIG_PATH`):
 
 ```yaml
 provider: openai          # openai | anthropic | bedrock | custom | llm-proxy
@@ -886,7 +1031,7 @@ Tool routing (§2.7) is configured via the `tool_routing` block (off by default)
 tool_routing:
   mode: in-band             # off (default) | in-band | router (rejected until implemented)
   max_tools: 64             # optional cap on the post-routing tool list (0 = no extra cap)
-  group_expand_threshold: 25 # S8: groups larger than this are offered tool-by-tool so the model
+  group_expand_threshold: 25 # groups larger than this are offered tool-by-tool so the model
                              # can load individual tools from a big server (0 = whole-group only)
   always_on:                # group IDs loaded from turn 1 without the model calling load_tools
     - jira
@@ -902,7 +1047,13 @@ mcp_servers:
 
 ## 11. Security Model
 
-host application uses a layered security model with scoped tokens, JWT sessions, and capability-gated tool access. The chatbot inherits the appliance-wide auth infrastructure and adds chatbot-specific controls on top.
+> Sections 11.1–11.4 and 11.7–11.8 describe how one **example appliance-style host**
+> secures the service — scoped tokens, JWT sessions, Caddy forward-auth, appliance
+> filesystem. They are illustrative; another host secures it differently.
+> The chatbot-specific controls (11.5 capability gating, 11.6 read-write mode, 11.9
+> declarative rendering) are provided by the service itself and apply to every host.
+
+An example host application uses a layered security model with scoped tokens, JWT sessions, and capability-gated tool access. The chatbot inherits the host's auth infrastructure and adds chatbot-specific controls on top.
 
 ### 11.1 Authentication Stack
 
@@ -915,7 +1066,7 @@ Request
   ├── JWTAuthMiddleware    — checks X-Token / X-Token-Refresh cookies (HMAC-signed)
   ├── tokens.AuthMiddleware — checks Bearer token against hashed token file
   ├── ConfirmAuthMiddleware — rejects if none of the above succeeded
-  └── RequireScopeMiddleware("host application-API") — enforces scope on Bearer tokens
+  └── RequireScopeMiddleware("chat-service-API") — enforces scope on Bearer tokens
 ```
 
 Three authentication methods, tried in order:
@@ -930,7 +1081,7 @@ JWT tokens are issued after successful Basic Auth and auto-refresh via the `X-To
 
 ### 11.2 Scoped Tokens
 
-host application issues API tokens that are **scoped** to specific services and optionally **restricted to specific clusters**. Token storage is a flat file of SHA-256 hashes with tab-separated metadata:
+The host issues API tokens that are **scoped** to specific services and optionally **restricted to specific clusters**. Token storage is a flat file of SHA-256 hashes with tab-separated metadata:
 
 ```
 <sha256-hash>    <name>    <scopes>    <clusters>
@@ -940,7 +1091,7 @@ host application issues API tokens that are **scoped** to specific services and 
 
 | Scope | Grants Access To |
 |-------|-----------------|
-| `host application-API` | chat-service admin API (all `/` routes) |
+| `chat-service-API` | chat-service admin API (all `/` routes) |
 | `Harvest-MCP` | Harvest MCP server (via Caddy `forward_auth`) |
 | `ONTAP-MCP` | ONTAP MCP server (via Caddy `forward_auth`) |
 | `Grafana-MCP` | Grafana MCP server (via Caddy `forward_auth`) |
@@ -962,7 +1113,7 @@ This token can only query data for `clusterA` and `clusterB` — requests target
 
 ### 11.3 Caddy Forward Auth
 
-host application uses Caddy as its reverse proxy. Each backend service route is protected by Caddy's `forward_auth` directive, which sends a subrequest to chat-service's `/auth` endpoint with:
+The host application uses Caddy as its reverse proxy. Each backend service route is protected by Caddy's `forward_auth` directive, which sends a subrequest to chat-service's `/auth` endpoint with:
 
 - `X-Forwarded-Uri` — the original request path
 - `X-Required-Scope` — the scope tag assigned to that route
@@ -996,7 +1147,7 @@ On top of authentication, the chatbot has its own authorization layer via capabi
 | **Ask** | Tools are visible but each call pauses for explicit user approval before executing. |
 | **Allow** | Tools execute autonomously. |
 
-All capabilities default to **Ask** — the user must explicitly opt into autonomous execution. Capability states are persisted in `/etc/host application/ai.yaml` under the `capabilities` map and survive restarts.
+All capabilities default to **Ask** — the user must explicitly opt into autonomous execution. Capability states are persisted in `/etc/<host>/ai.yaml` under the `capabilities` map and survive restarts.
 
 This gives users fine-grained control: they can allow Harvest (read-only metrics queries) to run freely while keeping ONTAP (which has write operations like volume creation) in Ask mode.
 
@@ -1014,7 +1165,7 @@ These layers stack: a destructive ONTAP operation requires (a) the ONTAP capabil
 
 ### 11.7 LLM API Key Security
 
-- API keys are stored in `/etc/host application/ai.yaml` on the appliance filesystem (root-owned)
+- API keys are stored in `/etc/<host>/ai.yaml` on the appliance filesystem (root-owned)
 - `GET /ai/config` masks the key before returning it to the frontend — the full key is never sent to the browser after initial configuration
 - Keys are never logged (structured logging deliberately excludes credential fields)
 - Keys are sent only to the configured LLM endpoint over HTTPS
@@ -1041,7 +1192,7 @@ Layer                     What It Protects              How
 ─────────────────────     ──────────────────────────    ────────────────────────────
 Caddy forward_auth        External MCP access           Scoped Bearer tokens
 chat-service auth middleware    Admin API + chat endpoints    Basic Auth / JWT / Bearer token
-RequireScopeMiddleware    API route access               host application-API scope check
+RequireScopeMiddleware    API route access               chat-service-API scope check
 Cluster restrictions      Multi-tenant data isolation   Token-level cluster list
 Capability Off/Ask/Allow  LLM tool access               User-controlled per-MCP
 Read-write mode           Destructive operations        Manual toggle + 10min timer
@@ -1061,30 +1212,36 @@ Declarative rendering     Frontend code execution       Type-dispatched JSON, no
 | `cmd/chat-service/main.go` | ~250 | Startup, MCP connections, capability init |
 | `server/server.go` | ~400 | SSE streaming, session management, ask-mode |
 | `config/config.go` | ~300 | LLM config CRUD, model discovery, validation |
-| `agent/agent.go` | ~900 | Agentic tool-use loop, system prompt, tool filtering, tool routing (load_tools, group filtering, RoutingStats) |
+| `agent/agent.go` | ~900 | Agentic tool-use loop, `SystemPromptConfig`, tool filtering, tool routing (load_tools, group filtering, RoutingStats), `InternalTool` enforcement |
+| `agent/canvas.go` | ~220 | Canvas fence interceptor (`canvas-object-detail`/`canvas-dashboard` → `EventCanvasOpen`) |
 | `llm/provider.go` | ~150 | Provider interface, config types |
 | `llm/openai.go` | ~250 | OpenAI/custom provider |
 | `llm/anthropic.go` | ~250 | Anthropic provider |
 | `llm/bedrock.go` | ~200 | AWS Bedrock provider |
 | `mcpclient/router.go` | ~350 | Multi-server MCP routing |
 | `session/session.go` | ~150 | In-memory sessions, sliding window |
-| `capability/capability.go` | ~120 | Off/Ask/Allow state model |
-| `capability/group.go` | ~120 | Tool-routing group registry (`BuildGroups`, `RenderGroupIndex`) |
+| `capability/capability.go` | ~120 | Off/Ask/Allow state model; `DefaultCapabilities()` returns nil (host-supplied) |
+| `capability/group.go` | ~120 | Tool-routing group registry (`BuildGroups`, `BuildGroupsExpanding`, `RenderGroupIndex`) |
 | `interest/interest.go` | ~80 | Interest types, frontmatter parser |
-| `interest/catalog.go` | ~280 | Catalog loading, filtering, indexing |
+| `interest/catalog.go` | ~280 | Catalog loading, filtering, indexing, save/delete |
 | `interest/tool.go` | ~280 | get/save/delete tool handlers |
-| `interest/embed.go` | ~5 | `//go:embed` for built-in interests |
-| `interest/interests/*.md` | — | Built-in interest files |
-| `render/render.go` | ~120 | Shared Go types for deterministic object-detail rendering |
-| `render/volume.go` | ~340 | `render_volume_detail` tool handler |
-| `chat-service/internal/alertmgr/alertmgr.go` | ~250 | Volume monitoring rule builder (enable/disable/status) |
+| `interest/embed.go` | ~30 | `ExtractFS` — materialize a host's embedded interest FS into a directory |
+| `interest/examples/*.md` | — | Generic example interests (reference only; not loaded by default) |
+| `render/render.go` | ~130 | Generic render toolkit: `ObjectDetail`/`Section`/chart structs + `MarshalBlock`/`MarshalCanvasBlock` |
+
+> Concrete render tools (e.g. `render_volume_detail`), product interest files, and
+> data integrations (metrics, alert rules) live in the **host application's** repo,
+> not here.
 
 ### Frontend (TypeScript/React)
+
+Shipped as the `@edjbarron/netapp-chat-component` package under `packages/chat-component/src/`.
 
 | File | Lines | Purpose |
 |------|-------|---------|
 | `ChatPanel.tsx` | ~300 | Main chat drawer, message rendering, markdown integration |
-| `useChatPanel.ts` | ~400 | State management, SSE streaming, mode/approval/capability state |
+| `useChatPanel.ts` | ~400 | State management, SSE streaming (incl. `canvas_open`), mode/approval/capability state |
+| `charts/ObjectDetailBlock.tsx` | ~150 | Single-entity object-detail renderer (inline + canvas) |
 | `CapabilityControls.tsx` | ~90 | Off/Ask/Allow toggles, tool traces toggle |
 | `ModeToggle.tsx` | ~40 | Read-only ↔ read-write with countdown |
 | `ActionConfirmation.tsx` | ~80 | Ask-mode approval inline card |
@@ -1113,4 +1270,4 @@ Declarative rendering     Frontend code execution       Type-dispatched JSON, no
 - **Design Spec**: `docs/chatbot-design-spec.md` — original design covering MCP deployment, BYO LLM, backend API, frontend UI, capability controls, security, and phasing
 - **Graphical UI Enhancements**: `docs/chatbot-graphical-ui-enhancements.md` — interest system design, chart type catalog, rendering architecture, implementation plan with milestones
 - **Object-Detail Design**: `docs/chatbot-object-detail-design.md` — interest/type layering, the `object-detail` code fence type, navigation paradigm (dashboard → drill-down → detail), and the alerts lighthouse use case
-- **High Tool-Count Scaling**: `docs/high-tool-count-scaling.md` — strategies for keeping the per-request tool list under the provider cap as MCP servers grow; the implemented S7a in-band tool-routing supervisor (§2.7), and deferred strategies (S3, S7b)
+- **High Tool-Count Scaling**: `docs/high-tool-count-scaling.md` — strategies for keeping the per-request tool list under the provider cap as MCP servers grow; the implemented in-band supervisor (§2.7), read-only footprint reduction, intra-group tool-level selection (`group_expand_threshold`), and the offline routing-evaluation harness; plus deferred strategies (host-supplied context hints and a dedicated routing model)

@@ -46,15 +46,23 @@ interests:
   dirs:
     - ./interests
 
+# Product identity injected into the system prompt by the host application.
+# These values are examples — set them to your own product's name/description.
 product:
-  name: NABox
-  description: NetApp storage monitoring appliance
+  name: Example Assistant
+  description: An assistant for the host application that embeds this service
   guidelines:
-    - Always verify cluster connectivity before running destructive operations
     - Prefer read-only operations unless the user explicitly requests changes
+    - Confirm destructive operations before executing them
 
 server:
   addr: ":8090"
+
+# Chat UI hint. The UI ships as the @edjbarron/netapp-chat-component React package;
+# the standalone binary does not bundle a UI. Hosts that embed a prebuilt UI dist
+# (via server.ServeUI) can use this flag to gate it.
+# ui:
+#   enabled: true
 
 # Tool routing (S7a in-band supervisor) — strategies for keeping the per-turn
 # tool list small as the number of connected MCP servers grows. See
@@ -76,3 +84,8 @@ server:
 #   # Capability/group IDs loaded from turn 1 without the model calling
 #   # load_tools (a baseline that is always available).
 #   always_on: []
+#   # S8 intra-group selection: capability groups with more tools than this
+#   # threshold are offered tool-by-tool in the routing menu, so the model can
+#   # load a subset of a large server instead of the whole thing. 0 disables
+#   # expansion (pure group-level routing).
+#   group_expand_threshold: 0
