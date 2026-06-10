@@ -161,6 +161,12 @@ export interface ActionFormData {
     label: string;
     tool: string;
     params?: Record<string, unknown>;
+    /** Whether this submit performs a read-write action. Defaults to `true`
+     *  (form submits run a tool, e.g. provisioning), so the button is disabled
+     *  in read-only mode. Set to `false` for read-only-safe submits — e.g. a
+     *  picker that only re-renders a dashboard — so the button stays enabled
+     *  in read-only mode. */
+    requiresReadWrite?: boolean;
   };
   secondary?: {
     label: string;

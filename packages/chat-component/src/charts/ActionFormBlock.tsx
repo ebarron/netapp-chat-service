@@ -21,6 +21,12 @@ export function ActionFormBlock({ data, onAction, readOnly }: ActionFormBlockPro
     (f) => f.required && !values[f.key]?.trim()
   );
 
+  // Form submits run a tool, so they're treated as read-write by default and
+  // disabled in read-only mode. A submit can opt out (requiresReadWrite:false)
+  // when it's read-only-safe — e.g. a picker that only re-renders a dashboard.
+  const writeGated = data.submit.requiresReadWrite ?? true;
+  const lockedReadOnly = !!readOnly && writeGated;
+
   const handleSubmit = () => {
     if (requiredMissing) return;
     const merged: Record<string, unknown> = { ...data.submit.params };
@@ -97,7 +103,7 @@ export function ActionFormBlock({ data, onAction, readOnly }: ActionFormBlockPro
       <Group justify="space-between" align="center" wrap="nowrap">
         <Button
           size="sm"
-          disabled={requiredMissing || readOnly}
+          disabled={requiredMissing || lockedReadOnly}
           onClick={handleSubmit}
         >
           {data.submit.label}

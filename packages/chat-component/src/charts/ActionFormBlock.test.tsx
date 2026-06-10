@@ -202,4 +202,57 @@ describe('ActionFormBlock', () => {
     const btn = screen.getByText('Provision on cluster-east').closest('button')!;
     expect(btn.disabled).toBe(false);
   });
+
+  it('keeps submit enabled in readOnly when submit.requiresReadWrite is false', () => {
+    const data: ActionFormData = {
+      type: 'action-form',
+      fields: [
+        { key: 'cluster', label: 'Cluster', type: 'select', options: ['c1', 'c2'], defaultValue: 'c1' },
+      ],
+      submit: {
+        label: 'View Cluster',
+        tool: 'render_data_protection',
+        params: { output_target: 'canvas' },
+        requiresReadWrite: false,
+      },
+    };
+    render(<ActionFormBlock data={data} readOnly />);
+    const btn = screen.getByText('View Cluster').closest('button')!;
+    expect(btn.disabled).toBe(false);
+  });
+
+  it('still disables submit in readOnly when requiresReadWrite is explicitly true', () => {
+    const data: ActionFormData = {
+      ...baseData,
+      fields: [
+        { key: 'volume_name', label: 'Volume Name', type: 'text', required: true, defaultValue: 'filled' },
+      ],
+      submit: { ...baseData.submit, requiresReadWrite: true },
+    };
+    render(<ActionFormBlock data={data} readOnly />);
+    const btn = screen.getByText('Provision on cluster-east').closest('button')!;
+    expect(btn.disabled).toBe(true);
+  });
+
+  it('fires onAction for a read-only-safe submit clicked in readOnly mode', async () => {
+    const user = userEvent.setup();
+    const onAction = vi.fn();
+    const data: ActionFormData = {
+      type: 'action-form',
+      fields: [
+        { key: 'cluster', label: 'Cluster', type: 'select', options: ['c1', 'c2'], defaultValue: 'c1' },
+      ],
+      submit: {
+        label: 'View Cluster',
+        tool: 'render_data_protection',
+        params: { output_target: 'canvas' },
+        requiresReadWrite: false,
+      },
+    };
+    render(<ActionFormBlock data={data} onAction={onAction} readOnly />);
+    await user.click(screen.getByText('View Cluster'));
+    expect(onAction).toHaveBeenCalledWith(
+      'Run render_data_protection with output_target=canvas, cluster=c1'
+    );
+  });
 });

@@ -1,1 +1,4 @@
 dist/
+
+# npm pack artifacts
+*.tgz
