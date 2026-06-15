@@ -1,16 +1,27 @@
 import { render, screen } from '../test-utils';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { useEffect } from 'react';
 import { CanvasPanel } from './CanvasPanel';
 import type { CanvasTab } from './useChatPanel';
 
+// Spy invoked once per mount of a mocked renderer, so tests can assert that a
+// content change remounts (rather than re-renders) the renderer.
+const mountSpy = vi.hoisted(() => vi.fn());
+
 // Mock the chart components so we don't need full chart rendering.
 vi.mock('./charts', () => ({
-  ObjectDetailBlock: ({ json }: { json: string }) => (
-    <div data-testid="object-detail">{json}</div>
-  ),
-  DashboardBlock: ({ json }: { json: string }) => (
-    <div data-testid="dashboard">{json}</div>
-  ),
+  ObjectDetailBlock: ({ json }: { json: string }) => {
+    useEffect(() => {
+      mountSpy('object-detail');
+    }, []);
+    return <div data-testid="object-detail">{json}</div>;
+  },
+  DashboardBlock: ({ json }: { json: string }) => {
+    useEffect(() => {
+      mountSpy('dashboard');
+    }, []);
+    return <div data-testid="dashboard">{json}</div>;
+  },
 }));
 
 const volumeTab: CanvasTab = {
@@ -106,5 +117,44 @@ describe('CanvasPanel', () => {
     );
     expect(screen.getByLabelText('Close vol1')).toBeDefined();
     expect(screen.getByLabelText('Close cls1')).toBeDefined();
+  });
+
+  it('remounts the renderer when a tab\'s content is replaced (resets form state)', () => {
+    const { rerender } = render(
+      <CanvasPanel
+        tabs={[dashboardTab]}
+        activeTab={dashboardTab.tabId}
+        onTabChange={onTabChange}
+        onTabClose={onTabClose}
+      />
+    );
+    expect(mountSpy).toHaveBeenCalledTimes(1);
+
+    // Same tabId, new content (an in-place re-render after an action).
+    const updated: CanvasTab = {
+      ...dashboardTab,
+      content: { title: 'Provision Plan', panels: [{ type: 'callout', title: 'x', body: 'y' }] },
+    };
+    rerender(
+      <CanvasPanel
+        tabs={[updated]}
+        activeTab={updated.tabId}
+        onTabChange={onTabChange}
+        onTabClose={onTabClose}
+      />
+    );
+    // key={json} changed → renderer remounted (not just re-rendered).
+    expect(mountSpy).toHaveBeenCalledTimes(2);
+
+    // Re-rendering with identical content does NOT remount.
+    rerender(
+      <CanvasPanel
+        tabs={[updated]}
+        activeTab={updated.tabId}
+        onTabChange={onTabChange}
+        onTabClose={onTabClose}
+      />
+    );
+    expect(mountSpy).toHaveBeenCalledTimes(2);
   });
 });

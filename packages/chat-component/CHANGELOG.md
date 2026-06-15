@@ -4,6 +4,17 @@ All notable changes to `@edjbarron/netapp-chat-component` are documented in this
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.16] - 2026-06-15
+
+### Fixed
+- Canvas renderers now **remount when a tab's content is replaced** (keyed by
+  the serialized content). This resets transient form state on an in-place
+  re-render: `action-form` text inputs return to their defaults instead of
+  retaining the previous render's typed text, and index-keyed panel reuse can no
+  longer bleed one form's input into another (e.g. a clone form's text leaking
+  into an edit form after the canvas re-renders). Re-rendering with identical
+  content does not remount.
+
 ## [0.1.15] - 2026-06-15
 
 ### Added

@@ -83,13 +83,19 @@ function CanvasTabContent({
   const content = tab.content;
 
   // Dispatch to the appropriate renderer based on content type.
+  //
+  // `key={json}` remounts the renderer whenever the tab's content is replaced
+  // (e.g. an in-place re-render after an action). This resets transient form
+  // state — action-form text inputs return to their defaults instead of
+  // retaining what the user typed for the previous render, and avoids
+  // index-keyed panel reuse bleeding one form's input into another.
   if (content.type === 'object-detail' || content.kind) {
-    return <ObjectDetailBlock json={json} onAction={onAction} readOnly={readOnly} />;
+    return <ObjectDetailBlock key={json} json={json} onAction={onAction} readOnly={readOnly} />;
   }
   if (Array.isArray(content.panels)) {
-    return <DashboardBlock json={json} onAction={onAction} readOnly={readOnly} />;
+    return <DashboardBlock key={json} json={json} onAction={onAction} readOnly={readOnly} />;
   }
 
   // Fallback: try object-detail first, then dashboard.
-  return <ObjectDetailBlock json={json} onAction={onAction} readOnly={readOnly} />;
+  return <ObjectDetailBlock key={json} json={json} onAction={onAction} readOnly={readOnly} />;
 }
