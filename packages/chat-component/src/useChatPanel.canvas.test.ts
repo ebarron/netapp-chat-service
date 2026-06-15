@@ -194,3 +194,102 @@ describe('useChatPanel canvas tab summary extraction', () => {
     expect(capturedBody!.canvas_tabs).toBeUndefined();
   });
 });
+
+/** Build an SSE response that emits a single canvas_open event then done. */
+function makeCanvasSSEResponse(canvas: Record<string, unknown>): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(
+        encoder.encode('event: canvas_open\ndata: ' + JSON.stringify(canvas) + '\n\n')
+      );
+      controller.enqueue(encoder.encode('event: done\ndata: {"session_id":"s1"}\n\n'));
+      controller.close();
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream' },
+  });
+}
+
+describe('useChatPanel canvas events (onCanvasEvent + close)', () => {
+  // jsdom reports innerWidth 1024 by default in this harness, so the wide-view
+  // path (open a tab) is taken. Guard in case a prior test changed it.
+  beforeEach(() => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1280 });
+  });
+
+  it('opens a tab and notifies onCanvasEvent with action "open"', async () => {
+    const onCanvasEvent = vi.fn();
+    const api = createMockChatAPI({
+      stream: vi.fn().mockResolvedValue(
+        makeCanvasSSEResponse({
+          tab_id: 'dashboard::Item Detail::',
+          title: 'Item Detail',
+          kind: 'dashboard',
+          qualifier: '',
+          content: { type: 'dashboard', title: 'Item Detail', panels: [] },
+        })
+      ),
+    });
+    const { result } = renderHook(() => useChatPanel({ onCanvasEvent }), { api });
+
+    await act(async () => {
+      await result.current.sendMessage('show item detail');
+    });
+
+    expect(result.current.canvasTabs).toHaveLength(1);
+    expect(onCanvasEvent).toHaveBeenCalledWith({
+      action: 'open',
+      tabId: 'dashboard::Item Detail::',
+      title: 'Item Detail',
+      kind: 'dashboard',
+    });
+  });
+
+  it('closes the matching tab when content.close is set, and notifies "close"', async () => {
+    const onCanvasEvent = vi.fn();
+    // First open the tab, then a second turn delivers a close directive.
+    const stream = vi
+      .fn()
+      .mockResolvedValueOnce(
+        makeCanvasSSEResponse({
+          tab_id: 'dashboard::Item Detail::',
+          title: 'Item Detail',
+          kind: 'dashboard',
+          qualifier: '',
+          content: { type: 'dashboard', title: 'Item Detail', panels: [] },
+        })
+      )
+      .mockResolvedValueOnce(
+        makeCanvasSSEResponse({
+          tab_id: 'dashboard::Item Detail::',
+          title: 'Item Detail',
+          kind: 'dashboard',
+          qualifier: '',
+          content: { type: 'dashboard', title: 'Item Detail', close: true },
+        })
+      );
+    const api = createMockChatAPI({ stream });
+    const { result } = renderHook(() => useChatPanel({ onCanvasEvent }), { api });
+
+    await act(async () => {
+      await result.current.sendMessage('show item detail');
+    });
+    expect(result.current.canvasTabs).toHaveLength(1);
+
+    await act(async () => {
+      await result.current.sendMessage('remove the item');
+    });
+
+    // Tab removed by the close directive.
+    expect(result.current.canvasTabs).toHaveLength(0);
+    expect(onCanvasEvent).toHaveBeenLastCalledWith({
+      action: 'close',
+      tabId: 'dashboard::Item Detail::',
+      title: 'Item Detail',
+      kind: 'dashboard',
+    });
+  });
+});

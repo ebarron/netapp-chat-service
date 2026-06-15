@@ -96,6 +96,22 @@ export interface UseChatPanelOptions {
    * existing ModeToggle UI; this only sets the initial value.
    */
   defaultMode?: ChatMode;
+  /**
+   * Called when a canvas tab is opened/updated or closed. Lets the host
+   * react to a specific canvas (e.g. refresh a related page when a matching
+   * canvas changes). A canvas whose content carries `close: true` closes
+   * the matching tab instead of opening it, and is reported with
+   * `action: 'close'`.
+   */
+  onCanvasEvent?: (info: CanvasEventInfo) => void;
+}
+
+/** Describes a canvas open/update or close, for `onCanvasEvent`. */
+export interface CanvasEventInfo {
+  action: 'open' | 'close';
+  tabId: string;
+  title: string;
+  kind: string;
 }
 
 export function useChatPanel(options?: UseChatPanelOptions) {
@@ -126,6 +142,11 @@ export function useChatPanel(options?: UseChatPanelOptions) {
   // Canvas tabs state.
   const [canvasTabs, setCanvasTabs] = useState<CanvasTab[]>([]);
   const [activeCanvasTab, setActiveCanvasTab] = useState<string | null>(null);
+
+  // Keep the latest onCanvasEvent in a ref so the SSE handler (deps: [])
+  // always calls the current callback without being a dependency.
+  const onCanvasEventRef = useRef(options?.onCanvasEvent);
+  onCanvasEventRef.current = options?.onCanvasEvent;
 
   /** Clears the mode auto-disable timer. */
   const clearModeTimer = useCallback(() => {
@@ -546,6 +567,27 @@ export function useChatPanel(options?: UseChatPanelOptions) {
             content: (d.content as Record<string, unknown>) || {},
           };
           if (tab.tabId) {
+            // A canvas whose content carries `close: true` is a directive to
+            // CLOSE the matching tab (e.g. after the underlying object was
+            // deleted) rather than open one. Either way the host is notified
+            // via onCanvasEvent so it can react to the specific canvas.
+            const isClose = !!(tab.content as Record<string, unknown>).close;
+            if (isClose) {
+              closeCanvasTab(tab.tabId);
+              onCanvasEventRef.current?.({
+                action: 'close',
+                tabId: tab.tabId,
+                title: tab.title,
+                kind: tab.kind,
+              });
+              break;
+            }
+            onCanvasEventRef.current?.({
+              action: 'open',
+              tabId: tab.tabId,
+              title: tab.title,
+              kind: tab.kind,
+            });
             // On narrow viewports, render canvas content inline in chat
             // instead of opening a canvas tab (canvas panel is hidden).
             const narrow = typeof window !== 'undefined' && window.innerWidth < 1024;

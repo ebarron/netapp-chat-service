@@ -4,6 +4,19 @@ All notable changes to `@edjbarron/netapp-chat-component` are documented in this
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.17] - 2026-06-15
+
+### Added
+- `<ChatPanel>` gains an optional `onCanvasEvent` callback, fired whenever a
+  canvas tab opens/updates or closes (`{ action: 'open' | 'close', tabId, title,
+  kind }`). Lets a host react to a specific canvas — e.g. refresh a page when a
+  matching canvas changes — instead of polling on every turn.
+- A canvas payload whose `content.close` is truthy now **closes** the matching
+  canvas tab (by `tab_id`) instead of opening one, and is reported via
+  `onCanvasEvent` with `action: 'close'`. A bespoke render tool can use this to
+  tear down a tab after its underlying object is deleted, in the same
+  re-render-after-action flow it already uses.
+
 ## [0.1.16] - 2026-06-15
 
 ### Fixed

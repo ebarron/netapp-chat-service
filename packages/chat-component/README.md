@@ -70,6 +70,7 @@ a question into the assistant. Three optional props support this:
 | `pendingPrompt` | `string` | A prompt to auto-send once. When it changes to a non-empty value while the panel is `opened` and not streaming, it is sent as a user message exactly once. |
 | `onPromptConsumed` | `() => void` | Called after `pendingPrompt` has been submitted. Clear your own state here so the same prompt isn't resent on a later re-render. |
 | `onBusyChange` | `(busy: boolean) => void` | Notifies the host when the assistant's busy (streaming) state changes, so you can disable your trigger control while a turn is in flight. |
+| `onCanvasEvent` | `(info: { action: 'open' \| 'close'; tabId: string; title: string; kind: string }) => void` | Fired when a canvas tab opens/updates or closes. Lets the host react to a specific canvas (e.g. refresh a page when a matching canvas changes). A canvas payload whose `content.close` is truthy closes the matching tab and reports `action: 'close'`. |
 
 ```tsx
 function App() {

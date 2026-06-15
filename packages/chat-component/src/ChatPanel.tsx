@@ -25,7 +25,7 @@ import {
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { useChatPanel, ChatMessage, type ChatMode } from './useChatPanel';
+import { useChatPanel, ChatMessage, type ChatMode, type CanvasEventInfo } from './useChatPanel';
 import { ModeToggle } from './ModeToggle';
 import { CapabilityControls } from './CapabilityControls';
 import { BookmarkPrompts } from './BookmarkPrompts';
@@ -72,6 +72,11 @@ interface ChatPanelProps {
    * can disable a trigger control while a turn is streaming.
    */
   onBusyChange?: (busy: boolean) => void;
+  /**
+   * Called when a canvas tab opens/updates or closes. Lets the host react to
+   * a specific canvas (e.g. refresh a page when a matching canvas changes).
+   */
+  onCanvasEvent?: (info: CanvasEventInfo) => void;
 }
 
 const DEFAULT_SUGGESTED_PROMPTS = [
@@ -96,6 +101,7 @@ export function ChatPanel({
   pendingPrompt,
   onPromptConsumed,
   onBusyChange,
+  onCanvasEvent,
 }: ChatPanelProps) {
   const {
     messages,
@@ -123,7 +129,7 @@ export function ChatPanel({
     activeCanvasTab,
     setActiveCanvasTab,
     closeCanvasTab,
-  } = useChatPanel({ defaultMode });
+  } = useChatPanel({ defaultMode, onCanvasEvent });
 
   const [input, setInput] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);

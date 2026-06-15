@@ -17,7 +17,7 @@ export { ToolStatusCard } from './ToolStatusCard';
 export { useChatPanel } from './useChatPanel';
 
 // Types
-export type { ChatMessage, Capability, PendingApproval, ChatMode, CanvasTab } from './useChatPanel';
+export type { ChatMessage, Capability, PendingApproval, ChatMode, CanvasTab, CanvasEventInfo } from './useChatPanel';
 
 // Charts
 export { ChartBlock, DashboardBlock, ObjectDetailBlock, AutoJsonBlock } from './charts';
