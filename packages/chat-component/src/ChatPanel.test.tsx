@@ -1,4 +1,4 @@
-import { render, screen, createMockChatAPI } from '../test-utils';
+import { render, screen, createMockChatAPI, waitFor } from '../test-utils';
 import { ChatPanel } from './ChatPanel';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
@@ -83,4 +83,147 @@ describe('ChatPanel', () => {
       expect((rw as HTMLInputElement).checked).toBe(true);
     });
   });
-}); 
+});
+
+/** Build a minimal SSE Response that completes immediately, for stream() mocks. */
+function makeSSEResponse(): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode('event: done\ndata: {"session_id":"s1"}\n\n'));
+      controller.close();
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream' },
+  });
+}
+
+const flush = () => new Promise((r) => setTimeout(r, 25));
+
+// Spec: docs/host-prompt-injection.md §6
+describe('host-driven prompt injection', () => {
+  const onClose = vi.fn();
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('1. auto-sends pendingPrompt once when opened + idle', async () => {
+    const stream = vi.fn().mockResolvedValue(makeSSEResponse());
+    const api = createMockChatAPI({ stream });
+    render(
+      <ChatPanel opened={true} onClose={onClose} pendingPrompt="explain rule X" />,
+      { api }
+    );
+    await waitFor(() => expect(stream).toHaveBeenCalledTimes(1));
+    expect((stream.mock.calls[0][1] as { message: string }).message).toBe('explain rule X');
+  });
+
+  it('2. does not resend on an unrelated re-render', async () => {
+    const stream = vi.fn().mockResolvedValue(makeSSEResponse());
+    const api = createMockChatAPI({ stream });
+    const { rerender } = render(
+      <ChatPanel opened={true} onClose={onClose} pendingPrompt="X" />,
+      { api }
+    );
+    await waitFor(() => expect(stream).toHaveBeenCalledTimes(1));
+    rerender(<ChatPanel opened={true} onClose={onClose} pendingPrompt="X" />);
+    await flush();
+    expect(stream).toHaveBeenCalledTimes(1);
+  });
+
+  it('3. calls onPromptConsumed after sending', async () => {
+    const stream = vi.fn().mockResolvedValue(makeSSEResponse());
+    const api = createMockChatAPI({ stream });
+    const onPromptConsumed = vi.fn();
+    render(
+      <ChatPanel
+        opened={true}
+        onClose={onClose}
+        pendingPrompt="X"
+        onPromptConsumed={onPromptConsumed}
+      />,
+      { api }
+    );
+    await waitFor(() => expect(onPromptConsumed).toHaveBeenCalledTimes(1));
+    expect(stream).toHaveBeenCalledTimes(1);
+  });
+
+  it('4. defers the send while streaming, then sends once idle', async () => {
+    let resolveFirst!: (r: Response) => void;
+    const firstStream = new Promise<Response>((r) => {
+      resolveFirst = r;
+    });
+    const stream = vi
+      .fn()
+      .mockReturnValueOnce(firstStream)
+      .mockResolvedValue(makeSSEResponse());
+    const api = createMockChatAPI({ stream });
+
+    const { rerender } = render(
+      <ChatPanel opened={true} onClose={onClose} pendingPrompt="first" />,
+      { api }
+    );
+    await waitFor(() => expect(stream).toHaveBeenCalledTimes(1));
+    expect((stream.mock.calls[0][1] as { message: string }).message).toBe('first');
+
+    // While the first turn is still streaming, change the prompt: must defer.
+    rerender(<ChatPanel opened={true} onClose={onClose} pendingPrompt="second" />);
+    await flush();
+    expect(stream).toHaveBeenCalledTimes(1);
+
+    // Finish the first turn -> idle -> deferred prompt is sent.
+    resolveFirst(makeSSEResponse());
+    await waitFor(() => expect(stream).toHaveBeenCalledTimes(2));
+    expect((stream.mock.calls[1][1] as { message: string }).message).toBe('second');
+  });
+
+  it('5. re-sends identical text after the host clears the prompt', async () => {
+    const stream = vi.fn().mockResolvedValue(makeSSEResponse());
+    const api = createMockChatAPI({ stream });
+    const { rerender } = render(
+      <ChatPanel opened={true} onClose={onClose} pendingPrompt="X" />,
+      { api }
+    );
+    await waitFor(() => expect(stream).toHaveBeenCalledTimes(1));
+    // Host clears its state…
+    rerender(<ChatPanel opened={true} onClose={onClose} pendingPrompt="" />);
+    await flush();
+    // …then deliberately asks the same thing again.
+    rerender(<ChatPanel opened={true} onClose={onClose} pendingPrompt="X" />);
+    await waitFor(() => expect(stream).toHaveBeenCalledTimes(2));
+  });
+
+  it('6. notifies onBusyChange on stream start and end', async () => {
+    let resolveStream!: (r: Response) => void;
+    const pending = new Promise<Response>((r) => {
+      resolveStream = r;
+    });
+    const stream = vi.fn().mockReturnValueOnce(pending);
+    const api = createMockChatAPI({ stream });
+    const onBusyChange = vi.fn();
+
+    render(
+      <ChatPanel
+        opened={true}
+        onClose={onClose}
+        pendingPrompt="X"
+        onBusyChange={onBusyChange}
+      />,
+      { api }
+    );
+    await waitFor(() => expect(onBusyChange).toHaveBeenCalledWith(true));
+    resolveStream(makeSSEResponse());
+    await waitFor(() => expect(onBusyChange.mock.calls.at(-1)?.[0]).toBe(false));
+  });
+
+  it('7. is a no-op when none of the new props are provided', async () => {
+    const stream = vi.fn().mockResolvedValue(makeSSEResponse());
+    const api = createMockChatAPI({ stream });
+    render(<ChatPanel opened={true} onClose={onClose} />, { api });
+    await flush();
+    expect(stream).not.toHaveBeenCalled();
+  });
+});

@@ -4,6 +4,22 @@ All notable changes to `@edjbarron/netapp-chat-component` are documented in this
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.15] - 2026-06-15
+
+### Added
+- `<ChatPanel>` gains three optional props for **host-driven prompt injection**,
+  letting an embedding app open the panel and auto-send a prompt (e.g. an
+  "Explain this" button elsewhere in the product):
+  - `pendingPrompt?: string` — a prompt to auto-send once when the panel is
+    `opened` and idle; sent as a normal user message exactly once.
+  - `onPromptConsumed?: () => void` — called after the pending prompt is sent so
+    the host can clear its own state.
+  - `onBusyChange?: (busy: boolean) => void` — surfaces the assistant's streaming
+    state so the host can disable its trigger control while a turn is in flight.
+  All three are optional and additive; existing embeds are unaffected. The
+  injected prompt is subject to the same mode and action-approval gating as any
+  typed message. See `docs/host-prompt-injection.md`.
+
 ## [0.1.13] - 2026-05-13
 
 ### Changed

@@ -59,6 +59,56 @@ export function App() {
 
 The user can still toggle mode at runtime via the in-panel `ModeToggle`; `defaultMode` only sets the initial value. The backend filters tools by mode based on each MCP tool's `ToolAnnotations.ReadOnlyHint` — if your MCP servers don't yet emit annotations, leave `defaultMode` at its default so all their tools remain available.
 
+### Driving the panel from the host
+
+The host can open the panel and **auto-send a prompt** programmatically — useful
+for "Explain this" / "Ask about this" buttons elsewhere in your app that deep-link
+a question into the assistant. Three optional props support this:
+
+| Prop | Type | Description |
+|------|------|-------------|
+| `pendingPrompt` | `string` | A prompt to auto-send once. When it changes to a non-empty value while the panel is `opened` and not streaming, it is sent as a user message exactly once. |
+| `onPromptConsumed` | `() => void` | Called after `pendingPrompt` has been submitted. Clear your own state here so the same prompt isn't resent on a later re-render. |
+| `onBusyChange` | `(busy: boolean) => void` | Notifies the host when the assistant's busy (streaming) state changes, so you can disable your trigger control while a turn is in flight. |
+
+```tsx
+function App() {
+  const [opened, setOpened] = useState(false);
+  const [pendingPrompt, setPendingPrompt] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const askAssistant = (prompt: string) => {
+    setPendingPrompt(prompt);
+    setOpened(true);
+  };
+
+  return (
+    <>
+      <button disabled={busy} onClick={() => askAssistant('Explain rule X')}>
+        Explain this
+      </button>
+
+      <ChatPanel
+        opened={opened}
+        onClose={() => setOpened(false)}
+        pendingPrompt={pendingPrompt}
+        onPromptConsumed={() => setPendingPrompt('')}
+        onBusyChange={setBusy}
+      />
+    </>
+  );
+}
+```
+
+A common pattern is to expose `askAssistant` and `busy` through a React context so
+any page can request a prompt and grey out its trigger while the assistant is
+busy. If the host opens the panel mid-turn, the prompt is held until the current
+turn finishes, then sent.
+
+The injected prompt is sent as a normal **user** message and is subject to the
+same mode (read-only/read-write), capability filtering, and action-approval
+gating as any typed prompt — the host cannot bypass these.
+
 ### Auth headers and credentials
 
 `createChatAPI` accepts custom `headers` and a `credentials` mode that are applied to **every** request (including the streaming `POST /chat/message`):

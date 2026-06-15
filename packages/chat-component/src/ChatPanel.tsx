@@ -57,6 +57,21 @@ interface ChatPanelProps {
    * sets the initial value.
    */
   defaultMode?: ChatMode;
+  /**
+   * A prompt to auto-send once. When this value changes to a non-empty
+   * string while the panel is `opened` and not streaming, the panel sends
+   * it as a user message exactly once, then calls `onPromptConsumed`.
+   * The host should clear its own state in `onPromptConsumed` so the same
+   * prompt isn't resent on a later re-render.
+   */
+  pendingPrompt?: string;
+  /** Called after `pendingPrompt` has been submitted. */
+  onPromptConsumed?: () => void;
+  /**
+   * Notifies the host when the assistant's busy state changes, so the host
+   * can disable a trigger control while a turn is streaming.
+   */
+  onBusyChange?: (busy: boolean) => void;
 }
 
 const DEFAULT_SUGGESTED_PROMPTS = [
@@ -78,6 +93,9 @@ export function ChatPanel({
   bookmarkPrompts,
   fullPage = false,
   defaultMode,
+  pendingPrompt,
+  onPromptConsumed,
+  onBusyChange,
 }: ChatPanelProps) {
   const {
     messages,
@@ -118,6 +136,31 @@ export function ChatPanel({
       fetchCapabilities();
     }
   }, [opened, checkConfigured, fetchCapabilities]);
+
+  // Host-driven prompt injection: auto-send `pendingPrompt` once when the
+  // panel is open and idle. Guards against double-send on unrelated
+  // re-renders via lastSentRef. See docs/host-prompt-injection.md §4.1.
+  const lastSentRef = useRef<string | null>(null);
+  useEffect(() => {
+    const p = pendingPrompt?.trim();
+    // When the host clears the prompt (to ''), reset the dedup guard so an
+    // intentional re-send of identical text later is honored.
+    if (!p) {
+      lastSentRef.current = null;
+      return;
+    }
+    if (!opened || streaming) return;
+    if (lastSentRef.current === p) return;
+    lastSentRef.current = p;
+    sendMessage(p);
+    onPromptConsumed?.();
+  }, [opened, pendingPrompt, streaming, sendMessage, onPromptConsumed]);
+
+  // Surface busy state to the host so it can disable its trigger control
+  // while a turn is streaming. See docs/host-prompt-injection.md §4.2.
+  useEffect(() => {
+    onBusyChange?.(streaming);
+  }, [streaming, onBusyChange]);
 
   // Auto-scroll on new messages.
   useEffect(() => {
