@@ -4,7 +4,21 @@ All notable changes to `@edjbarron/netapp-chat-component` are documented in this
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.17] - 2026-06-15
+## [0.1.18] - 2026-07-18
+
+### Fixed
+- **Fence-fragmented dashboards/charts now render correctly.** When an LLM
+  emitted a large `dashboard`/`chart` object with an interior ` ```json ` fence
+  wrapped around its `rows`/`data` array, the object was split across the
+  fence: the skeleton showed as raw JSON text and the fragmented rows rendered
+  as stray standalone cards, so no panel appeared. `wrapInlineChartJson` now
+  runs a fence-aware reassembly pre-pass (`reassembleFencedJson`) that stitches
+  such an object back together — but only when the fence-stripped text actually
+  parses as JSON and classifies as structured, so ordinary prose and legitimate
+  code blocks are untouched. As defense-in-depth, the bare-JSON scanner no
+  longer wraps the nested child objects (table rows, series points) of an
+  unbalanced chart/dashboard fragment as separate cards; it emits the remainder
+  verbatim instead.
 
 ### Added
 - `<ChatPanel>` gains an optional `onCanvasEvent` callback, fired whenever a

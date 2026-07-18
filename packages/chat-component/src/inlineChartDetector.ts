@@ -73,6 +73,123 @@ function extractJsonObject(text: string, start: number): string | null {
 }
 
 /**
+ * Fence-aware variant of {@link extractJsonObject}. Starting at `start` (a
+ * '{'), scans for the matching closing brace while treating code-fence
+ * delimiters (``` optionally followed by a language tag) as removable noise
+ * whenever they appear *inside* the object (brace depth > 0, outside strings).
+ *
+ * LLMs sometimes emit a large dashboard/chart object with an interior
+ * ```json fence wrapped around a `rows`/`data` array, which fragments the
+ * JSON: the outer object no longer balances within a single text segment and
+ * the fence-split logic renders the pieces as raw text plus stray child-object
+ * cards. Ignoring interior fences lets us stitch the object back together.
+ *
+ * Returns the reconstructed (fence-stripped) object text, the end index in the
+ * ORIGINAL string, and whether any interior fence was stripped — or null if
+ * the braces never balance.
+ */
+function extractJsonObjectAcrossFences(
+  text: string,
+  start: number,
+): { json: string; end: number; strippedFence: boolean } | null {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let strippedFence = false;
+  const out: string[] = [];
+
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+
+    if (escaped) {
+      escaped = false;
+      out.push(ch);
+      continue;
+    }
+    if (ch === '\\' && inString) {
+      escaped = true;
+      out.push(ch);
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      out.push(ch);
+      continue;
+    }
+    if (inString) {
+      out.push(ch);
+      continue;
+    }
+
+    // Interior code fence — strip the ``` run, an optional language tag, and a
+    // single trailing newline so the surrounding JSON stays clean.
+    if (depth > 0 && ch === '`' && text.startsWith('```', i)) {
+      let j = i + 3;
+      while (j < text.length && /[\w-]/.test(text[j])) j++;
+      if (text[j] === '\n') j++;
+      i = j - 1; // for-loop ++ resumes at j
+      strippedFence = true;
+      continue;
+    }
+
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) {
+        out.push(ch);
+        return { json: out.join(''), end: i + 1, strippedFence };
+      }
+    }
+    out.push(ch);
+  }
+  return null;
+}
+
+/**
+ * Reassemble structured JSON objects that an LLM fragmented with an interior
+ * code fence (e.g. a ```json fence wrapped around a dashboard's `rows` array).
+ * Only rewrites a span when (a) an interior fence was actually stripped, (b)
+ * the fence-stripped text parses as JSON, and (c) it classifies as structured
+ * (chart/dashboard/object-detail/json). This makes the transform a no-op for
+ * ordinary prose and legitimate code blocks, which never balance into a
+ * classifiable object once interior fences are removed.
+ */
+export function reassembleFencedJson(content: string): string {
+  if (!content.includes('```')) return content;
+
+  const parts: string[] = [];
+  let i = 0;
+  while (i < content.length) {
+    const braceIdx = content.indexOf('{', i);
+    if (braceIdx === -1) {
+      parts.push(content.slice(i));
+      break;
+    }
+
+    const across = extractJsonObjectAcrossFences(content, braceIdx);
+    if (across && across.strippedFence) {
+      try {
+        const parsed = JSON.parse(sanitizeJson(across.json));
+        if (classify(parsed) !== null) {
+          parts.push(content.slice(i, braceIdx));
+          parts.push(across.json);
+          i = across.end;
+          continue;
+        }
+      } catch {
+        // Not valid even after reassembly — leave the region untouched.
+      }
+    }
+
+    // Nothing to reassemble here; keep the brace and advance past it.
+    parts.push(content.slice(i, braceIdx + 1));
+    i = braceIdx + 1;
+  }
+
+  return parts.join('');
+}
+
+/**
  * Classify a parsed JSON object into a rendering category.
  * Returns a code-fence language tag, or null for non-structured data.
  * If the object lacks a `type` field, attempts shape-based inference.
@@ -121,6 +238,10 @@ function classify(
  * objects that are NOT already inside fenced code blocks and wrap them.
  */
 export function wrapInlineChartJson(content: string): string {
+  // Stitch back together any structured JSON object that an LLM fragmented
+  // with an interior code fence before splitting on fences below.
+  content = reassembleFencedJson(content);
+
   // Split around existing fenced code blocks to avoid double-wrapping.
   // This regex captures ``` followed by any language tag, content, and closing ```.
   const fencePattern = /```[\s\S]*?```/g;
@@ -212,6 +333,14 @@ function processSegment(text: string): string {
       } catch {
         // Not valid JSON — fall through.
       }
+    } else if (CHART_HINTS.test(text.slice(braceIdx))) {
+      // An unbalanced object whose tail looks like chart/dashboard data —
+      // typically a fragment that reassembly could not repair (e.g. a
+      // truncated or malformed panel). Emit the remainder verbatim rather than
+      // greedily wrapping its nested child objects (table rows, series points)
+      // as separate cards, which produces misleading standalone panels.
+      parts.push(text.slice(braceIdx));
+      break;
     }
 
     // Not a chart JSON — keep the brace literal and advance past it.

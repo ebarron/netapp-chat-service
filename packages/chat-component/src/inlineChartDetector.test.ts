@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { wrapInlineChartJson, hideIncompleteChartJson, sanitizeJson } from './inlineChartDetector';
+import {
+  wrapInlineChartJson,
+  hideIncompleteChartJson,
+  sanitizeJson,
+  reassembleFencedJson,
+} from './inlineChartDetector';
 
 describe('sanitizeJson', () => {
   it('strips trailing commas', () => {
@@ -478,5 +483,99 @@ describe('object-detail detection', () => {
     const result = hideIncompleteChartJson(input);
     expect(result).toContain('*Building dashboard');
     expect(result).not.toContain('"sections"');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fence-fragmented structured JSON (LLM wraps rows/data in an interior fence)
+// ---------------------------------------------------------------------------
+describe('reassembleFencedJson', () => {
+  it('is a no-op when there are no fences', () => {
+    const input = 'Plain text with a { brace } but no fences.';
+    expect(reassembleFencedJson(input)).toBe(input);
+  });
+
+  it('leaves a legitimate code block untouched (does not parse/classify)', () => {
+    const input = 'Here is code:\n\n```js\nconst cfg = { a: 1, b: 2 };\n```\n\nDone.';
+    expect(reassembleFencedJson(input)).toBe(input);
+  });
+
+  it('stitches a dashboard whose rows array is wrapped in an interior ```json fence', () => {
+    const input =
+      'Here are all volumes across both clusters, sorted by snapshot count:\n\n' +
+      '{\n' +
+      '  "title": "All Volumes — Snapshot Count",\n' +
+      '  "panels": [\n' +
+      '    {\n' +
+      '      "type": "resource-table",\n' +
+      '      "title": "Volumes by Snapshot Count",\n' +
+      '      "columns": ["Volume", "Cluster", "Snapshots"],\n' +
+      '      "rows": [\n' +
+      '```json\n' +
+      '{"name":"A1_vault","Volume":"A1_vault","Cluster":"ODIN","Snapshots":1023},\n' +
+      '{"name":"SRC","Volume":"SRC","Cluster":"THOR","Snapshots":1023}\n' +
+      '```\n' +
+      '      ]\n' +
+      '    }\n' +
+      '  ]\n' +
+      '}';
+    const result = reassembleFencedJson(input);
+    // The interior fence is gone and the object is valid, single-piece JSON.
+    expect(result).not.toContain('```json');
+    const brace = result.indexOf('{');
+    const parsed = JSON.parse(result.slice(brace));
+    expect(Array.isArray(parsed.panels)).toBe(true);
+    expect(parsed.panels[0].rows).toHaveLength(2);
+    // Surrounding prose is preserved.
+    expect(result).toContain('sorted by snapshot count:');
+  });
+});
+
+describe('wrapInlineChartJson — fence-fragmented dashboards', () => {
+  it('renders a fence-fragmented dashboard as a single ```dashboard block', () => {
+    const input =
+      'Here are all volumes, sorted by snapshot count:\n\n' +
+      '{\n' +
+      '  "title": "All Volumes — Snapshot Count",\n' +
+      '  "panels": [\n' +
+      '    {\n' +
+      '      "type": "resource-table",\n' +
+      '      "columns": ["Volume", "Cluster", "Snapshots"],\n' +
+      '      "rows": [\n' +
+      '```json\n' +
+      '{"name":"A1","Volume":"A1","Cluster":"THOR","Snapshots":1023},\n' +
+      '{"name":"A2","Volume":"A2","Cluster":"THOR","Snapshots":107}\n' +
+      '```\n' +
+      '      ]\n' +
+      '    }\n' +
+      '  ]\n' +
+      '}';
+    const result = wrapInlineChartJson(input);
+    // Exactly one dashboard fence, and no leftover raw ```json fragment.
+    expect(result).toContain('```dashboard');
+    expect(result).not.toContain('```json');
+    // Rows survive inside the dashboard, not as standalone JSON cards.
+    expect(result).toContain('"panels"');
+    expect(result).toContain('"A2"');
+    // The fragmented rows are NOT wrapped as separate object cards.
+    expect(result).not.toContain('```json\n{"name":"A1"');
+  });
+
+  it('does not fragment a truncated/unrepairable dashboard into per-row cards', () => {
+    // No closing braces or fence — reassembly cannot repair this.
+    const input =
+      'Here you go:\n\n' +
+      '{"title":"T","panels":[{"type":"resource-table","columns":["Volume"],"rows":[' +
+      '{"name":"a","Volume":"a","x":1},{"name":"b","Volume":"b","x":2}';
+    const result = wrapInlineChartJson(input);
+    // The guard must prevent wrapping the nested rows as standalone cards.
+    expect(result).not.toContain('```');
+    expect(result).toContain('"panels"');
+  });
+
+  it('still wraps a clean bare dashboard (no regression)', () => {
+    const json = '{"title":"Dash","panels":[{"type":"stat","title":"A","value":"1"}]}';
+    const result = wrapInlineChartJson(`Dashboard: ${json}`);
+    expect(result).toContain('```dashboard\n' + json + '\n```');
   });
 });
