@@ -22,10 +22,25 @@ import {
   IconBolt,
   IconMessageChatbot,
 } from '@tabler/icons-react';
-import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { useChatPanel, ChatMessage, type ChatMode, type CanvasEventInfo } from './useChatPanel';
+import {
+  useChatPanel,
+  ChatMessage,
+  type ChatMode,
+  type CanvasEventInfo,
+  type CanvasTabSummary,
+  type HostCanvasTabInput,
+} from './useChatPanel';
 import { ModeToggle } from './ModeToggle';
 import { CapabilityControls } from './CapabilityControls';
 import { BookmarkPrompts } from './BookmarkPrompts';
@@ -77,6 +92,49 @@ interface ChatPanelProps {
    * a specific canvas (e.g. refresh a page when a matching canvas changes).
    */
   onCanvasEvent?: (info: CanvasEventInfo) => void;
+  /**
+   * Layout variant (C1). `"drawer"` (default) is today's slide-over Drawer,
+   * byte-for-byte unchanged. `"docked"` renders a persistent, full-height
+   * panel that fills its parent (assistant on the left, canvas filling the
+   * remaining width) — intended for a full-width-header shell. In docked mode
+   * the panel is always present (not gated by `opened`).
+   */
+  variant?: 'drawer' | 'docked';
+  /**
+   * Called when the engine emits an `open_nav` SSE event (C6), typically from
+   * a host-registered `open_nav_view` tool. Receives the opaque destination
+   * string. Absence is a safe no-op.
+   */
+  onOpenNav?: (destination: string) => void;
+  /**
+   * Portal mount callback for host-content canvas tabs (C2–C4). Called with
+   * the mount node when a host tab mounts (`el`) and `null` when it unmounts.
+   * The host renders its own page into `el` via `ReactDOM.createPortal`.
+   */
+  onHostTabPortal?: (tabId: string, el: HTMLElement | null) => void;
+}
+
+/**
+ * Imperative handle for driving host-content canvas tabs (C2–C4/C5). Obtain it
+ * via a ref on `<ChatPanel>`:
+ *
+ * ```tsx
+ * const ref = useRef<ChatPanelHandle>(null);
+ * <ChatPanel ref={ref} variant="docked" onHostTabPortal={...} />
+ * ref.current?.openHostCanvasTab({ tabId: 'nav', title: 'Alerting', evictable: false, summary });
+ * ```
+ */
+export interface ChatPanelHandle {
+  /** Open (or focus/replace) a host-content canvas tab. */
+  openHostCanvasTab(input: HostCanvasTabInput): void;
+  /** Update an open host tab in place (title/summary/…) without refocusing. */
+  updateHostCanvasTab(tabId: string, patch: Partial<Omit<HostCanvasTabInput, 'tabId'>>): void;
+  /** Attach/replace the C5 context summary for any open canvas tab. */
+  setCanvasTabSummary(tabId: string, summary: CanvasTabSummary): void;
+  /** Close any canvas tab by id (also works for the reserved nav tab). */
+  closeCanvasTab(tabId: string): void;
+  /** Focus an open canvas tab by id. */
+  focusCanvasTab(tabId: string): void;
 }
 
 const DEFAULT_SUGGESTED_PROMPTS = [
@@ -89,7 +147,7 @@ const DEFAULT_SUGGESTED_PROMPTS = [
  * ChatPanel is the main AI assistant side panel.
  * Design ref: docs/chatbot-design-spec.md §6.1
  */
-export function ChatPanel({
+export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function ChatPanel({
   opened,
   onClose,
   title = 'AI Assistant',
@@ -102,7 +160,10 @@ export function ChatPanel({
   onPromptConsumed,
   onBusyChange,
   onCanvasEvent,
-}: ChatPanelProps) {
+  variant = 'drawer',
+  onOpenNav,
+  onHostTabPortal,
+}: ChatPanelProps, ref) {
   const {
     messages,
     streaming,
@@ -129,19 +190,39 @@ export function ChatPanel({
     activeCanvasTab,
     setActiveCanvasTab,
     closeCanvasTab,
-  } = useChatPanel({ defaultMode, onCanvasEvent });
+    openHostCanvasTab,
+    updateHostCanvasTab,
+    setCanvasTabSummary,
+  } = useChatPanel({ defaultMode, onCanvasEvent, onOpenNav });
+
+  const docked = variant === 'docked';
+
+  // Expose the host-content canvas tab API (C2–C4/C5) imperatively.
+  useImperativeHandle(
+    ref,
+    () => ({
+      openHostCanvasTab,
+      updateHostCanvasTab,
+      setCanvasTabSummary,
+      closeCanvasTab,
+      focusCanvasTab: setActiveCanvasTab,
+    }),
+    [openHostCanvasTab, updateHostCanvasTab, setCanvasTabSummary, closeCanvasTab, setActiveCanvasTab],
+  );
 
   const [input, setInput] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  // Check config and fetch capabilities on open.
+  // Check config and fetch capabilities on open. In docked mode the panel is
+  // persistent (not gated by `opened`), so treat it as always active.
+  const active = docked || opened;
   useEffect(() => {
-    if (opened) {
+    if (active) {
       checkConfigured();
       fetchCapabilities();
     }
-  }, [opened, checkConfigured, fetchCapabilities]);
+  }, [active, checkConfigured, fetchCapabilities]);
 
   // Host-driven prompt injection: auto-send `pendingPrompt` once when the
   // panel is open and idle. Guards against double-send on unrelated
@@ -155,12 +236,12 @@ export function ChatPanel({
       lastSentRef.current = null;
       return;
     }
-    if (!opened || streaming) return;
+    if (!active || streaming) return;
     if (lastSentRef.current === p) return;
     lastSentRef.current = p;
     sendMessage(p);
     onPromptConsumed?.();
-  }, [opened, pendingPrompt, streaming, sendMessage, onPromptConsumed]);
+  }, [active, pendingPrompt, streaming, sendMessage, onPromptConsumed]);
 
   // Surface busy state to the host so it can disable its trigger control
   // while a turn is streaming. See docs/host-prompt-injection.md §4.2.
@@ -446,6 +527,7 @@ export function ChatPanel({
             onTabClose={closeCanvasTab}
             onAction={sendMessage}
             readOnly={mode === 'read-only'}
+            onHostTabPortal={onHostTabPortal}
           />
         )}
       </div>
@@ -458,6 +540,19 @@ export function ChatPanel({
       />
     </>
   );
+
+  if (docked) {
+    // Persistent, full-height panel that fills its parent. The host provides
+    // the surrounding full-width-header shell (C1). Always rendered.
+    return (
+      <div className={classes.docked}>
+        {headerBar}
+        <div className={classes.dockedBody}>
+          {chatContent}
+        </div>
+      </div>
+    );
+  }
 
   if (fullPage) {
     if (!opened) return null;
@@ -502,7 +597,7 @@ export function ChatPanel({
       {chatContent}
     </Drawer>
   );
-}
+});
 
 interface MessageBubbleProps {
   message: ChatMessage;

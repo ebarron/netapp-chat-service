@@ -106,6 +106,61 @@ any page can request a prompt and grey out its trigger while the assistant is
 busy. If the host opens the panel mid-turn, the prompt is held until the current
 turn finishes, then sent.
 
+### Agentic-forward UI seams (opt-in)
+
+These additive, opt-in features let you build a persistent docked assistant beside
+a canvas that also hosts your own pages, with everything on screen exposed to the
+assistant. All default to today's behavior — see
+[docs/agentic-forward-seams.md](https://github.com/ebarron/netapp-chat-service/blob/main/docs/agentic-forward-seams.md)
+for the full reference.
+
+| Prop | Type | Description |
+|------|------|-------------|
+| `variant` | `'drawer' \| 'docked'` | **C1.** `'drawer'` (default) is today's slide-over. `'docked'` renders a persistent full-height panel (assistant + canvas) that fills its parent, for a full-width-header shell. Always present (not gated by `opened`). |
+| `onHostTabPortal` | `(tabId: string, el: HTMLElement \| null) => void` | **C2–C4.** Portal mount callback for host-content canvas tabs. `el` is the mount node when a host tab mounts, `null` when it unmounts. Render your page into `el` via `ReactDOM.createPortal`. |
+| `onOpenNav` | `(destination: string) => void` | **C6.** Called when the engine emits an `open_nav` SSE event (from a host-registered `open_nav_view` tool). Absence is a safe no-op. |
+
+**Host content in a canvas tab (C2–C4/C5).** Obtain the imperative handle via a
+ref and drive host tabs. The component renders an empty mount node and exposes it
+via `onHostTabPortal`; it never imports host pages.
+
+```tsx
+import { createPortal } from 'react-dom';
+import type { ChatPanelHandle, CanvasTabSummary } from '@edjbarron/netapp-chat-component';
+
+const chat = useRef<ChatPanelHandle>(null);
+const [navMount, setNavMount] = useState<HTMLElement | null>(null);
+
+<ChatPanel
+  ref={chat}
+  variant="docked"
+  opened
+  onClose={() => {}}
+  onHostTabPortal={(tabId, el) => { if (tabId === 'nav') setNavMount(el); }}
+/>
+
+// Open the single reused, eviction-exempt nav tab and attach a context summary:
+chat.current?.openHostCanvasTab({
+  tabId: 'nav',
+  title: 'Alerting',
+  kind: 'nav-view',
+  qualifier: '/alerting',
+  evictable: false, // exempt from max-tab eviction, still user-closable
+  summary: { status: 'warning', digest: '3 rules enabled, 1 disabled.' } satisfies CanvasTabSummary,
+});
+
+{navMount && createPortal(<AlertingPage />, navMount)}
+```
+
+`ChatPanelHandle` also exposes `updateHostCanvasTab`, `setCanvasTabSummary`,
+`closeCanvasTab`, and `focusCanvasTab`.
+
+**Canvas context provider (C5).** Attach a `CanvasTabSummary`
+(`kind`/`name`/`qualifier`/`status`/`key_properties` + free-text `digest`) to any
+tab; the component forwards it in the existing `canvas_tabs` field of
+`/chat/message` so the assistant can answer questions about on-screen content.
+Empty fields are omitted cleanly. **Exclude secrets** from summaries/digests.
+
 The injected prompt is sent as a normal **user** message and is subject to the
 same mode (read-only/read-write), capability filtering, and action-approval
 gating as any typed prompt — the host cannot bypass these.
@@ -136,7 +191,7 @@ This component talks to the `netapp-chat-service` Go backend. See the [main repo
 - Charts: `ChartBlock`, `DashboardBlock`, `ObjectDetailBlock`, `AutoJsonBlock`
 - API: `createChatAPI`, `ChatAPIProvider`, `useChatAPI`
 - Hook: `useChatPanel`
-- Types: `ChatMessage`, `Capability`, `PendingApproval`, `ChatMode`, `CanvasTab`, `PanelData`, `DashboardData`, `ChartData`, `PanelWidth`, `ObjectDetailData`
+- Types: `ChatMessage`, `Capability`, `PendingApproval`, `ChatMode`, `CanvasTab`, `CanvasEventInfo`, `CanvasTabSummary`, `HostCanvasTabInput`, `ChatPanelHandle`, `PanelData`, `DashboardData`, `ChartData`, `PanelWidth`, `ObjectDetailData`
 
 ## License
 

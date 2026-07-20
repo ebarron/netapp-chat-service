@@ -1,4 +1,5 @@
 import { Tabs, CloseButton, ScrollArea, Text } from '@mantine/core';
+import { useEffect, useRef } from 'react';
 import { DashboardBlock, ObjectDetailBlock } from './charts';
 import type { CanvasTab } from './useChatPanel';
 import classes from './ChatPanel.module.css';
@@ -10,6 +11,13 @@ interface CanvasPanelProps {
   onTabClose: (tabId: string) => void;
   onAction?: (message: string) => void;
   readOnly?: boolean;
+  /**
+   * Called with the portal mount node for a host-content tab (C2–C4) when it
+   * mounts (`el`) and unmounts (`null`). The host renders its own page into
+   * `el` via `ReactDOM.createPortal`. The component never imports host pages —
+   * it only exposes this hole.
+   */
+  onHostTabPortal?: (tabId: string, el: HTMLElement | null) => void;
 }
 
 export function CanvasPanel({
@@ -19,6 +27,7 @@ export function CanvasPanel({
   onTabClose,
   onAction,
   readOnly,
+  onHostTabPortal,
 }: CanvasPanelProps) {
   if (tabs.length === 0) return null;
 
@@ -58,16 +67,47 @@ export function CanvasPanel({
           ))}
         </Tabs.List>
 
-        {uniqueTabs.map((tab) => (
-          <Tabs.Panel key={tab.tabId} value={tab.tabId} style={{ flex: 1, minHeight: 0 }}>
-            <ScrollArea style={{ height: '100%' }} p="sm">
-              <CanvasTabContent tab={tab} onAction={onAction} readOnly={readOnly} />
-            </ScrollArea>
-          </Tabs.Panel>
-        ))}
+        {uniqueTabs.map((tab) =>
+          tab.host ? (
+            // Host-content tab (C2–C4): the component renders an empty mount
+            // node and hands it to the host, which portals its own React tree
+            // in. No ScrollArea wrapper — the host owns the body's layout.
+            <Tabs.Panel key={tab.tabId} value={tab.tabId} style={{ flex: 1, minHeight: 0 }}>
+              <HostTabMount tabId={tab.tabId} onHostTabPortal={onHostTabPortal} />
+            </Tabs.Panel>
+          ) : (
+            <Tabs.Panel key={tab.tabId} value={tab.tabId} style={{ flex: 1, minHeight: 0 }}>
+              <ScrollArea style={{ height: '100%' }} p="sm">
+                <CanvasTabContent tab={tab} onAction={onAction} readOnly={readOnly} />
+              </ScrollArea>
+            </Tabs.Panel>
+          ),
+        )}
       </Tabs>
     </div>
   );
+}
+
+/**
+ * Empty mount node for a host-content tab. Reports its DOM element to the host
+ * via `onHostTabPortal` on mount and `null` on unmount, so the host can
+ * `createPortal` its page into it. The component never renders host content
+ * itself.
+ */
+function HostTabMount({
+  tabId,
+  onHostTabPortal,
+}: {
+  tabId: string;
+  onHostTabPortal?: (tabId: string, el: HTMLElement | null) => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    onHostTabPortal?.(tabId, ref.current);
+    return () => onHostTabPortal?.(tabId, null);
+    // Re-run only if the tab identity or callback changes.
+  }, [tabId, onHostTabPortal]);
+  return <div ref={ref} data-canvas-host-tab={tabId} style={{ height: '100%', minHeight: 0 }} />;
 }
 
 function CanvasTabContent({

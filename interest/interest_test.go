@@ -54,10 +54,17 @@ func TestParse_MissingName(t *testing.T) {
 	}
 }
 
-func TestParse_MissingRequires(t *testing.T) {
+func TestParse_MissingRequires_Ungated(t *testing.T) {
+	// 'requires' is optional: an interest with no requirements is ungated
+	// (always available). This supports capability-independent interests such
+	// as the parameterized navigation interest (C6).
 	input := "---\nid: test\nname: Test\nsource: user\ntriggers:\n  - hello\n---\nbody\n"
-	if _, err := Parse([]byte(input)); err == nil {
-		t.Fatal("expected error for missing requires")
+	got, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatalf("Parse() error = %v, want nil for ungated interest", err)
+	}
+	if len(got.Meta.Requires) != 0 {
+		t.Errorf("Requires = %v, want empty", got.Meta.Requires)
 	}
 }
 

@@ -107,6 +107,16 @@ type InternalTool struct {
 	// tool, the agent injects a system message and forces a retry. This
 	// prevents LLMs from skipping render tools.
 	RequiredAfterInterest string
+	// Emit is an optional side-channel hook. When non-nil it is called with
+	// the tool-call input after the Handler succeeds, and any Events it
+	// returns are emitted to the caller (SSE) stream in addition to the
+	// normal tool_result. This lets a host-registered tool surface a
+	// lightweight UI signal — e.g. an open_nav_view tool emitting an
+	// EventOpenNav — without routing content through the text/canvas-fence
+	// path. Backward compatible: nil means no extra events (today's
+	// behavior). The engine never interprets the returned events' payloads;
+	// it is a dumb relay.
+	Emit func(input json.RawMessage) []Event
 }
 
 // Event is emitted by the agent loop to inform the caller about progress.
@@ -118,9 +128,10 @@ type Event struct {
 	ToolName   string         `json:"tool_name,omitempty"`   // for EventToolResult / EventToolError
 	ToolResult string         `json:"tool_result,omitempty"` // for EventToolResult
 	Error      string         `json:"error,omitempty"`       // for EventToolError, EventError
-	Capability string         `json:"capability,omitempty"`  // MCP capability ID (Phase 2)
-	ApprovalID string         `json:"approval_id,omitempty"` // for EventToolApprovalRequired (Phase 2)
-	Canvas     *CanvasPayload `json:"canvas,omitempty"`      // for EventCanvasOpen
+	Capability string          `json:"capability,omitempty"`  // MCP capability ID (Phase 2)
+	ApprovalID string          `json:"approval_id,omitempty"` // for EventToolApprovalRequired (Phase 2)
+	Canvas     *CanvasPayload  `json:"canvas,omitempty"`      // for EventCanvasOpen
+	OpenNav    *OpenNavPayload `json:"open_nav,omitempty"`    // for EventOpenNav
 }
 
 // CanvasPayload holds the data for a canvas_open SSE event.
@@ -130,6 +141,14 @@ type CanvasPayload struct {
 	Kind      string          `json:"kind"`
 	Qualifier string          `json:"qualifier"`
 	Content   json.RawMessage `json:"content"`
+}
+
+// OpenNavPayload holds the data for an open_nav SSE event (C6). Destination
+// is an opaque, host-defined string (e.g. a route or a stable screen id); the
+// engine never interprets it — it merely relays the value the host tool
+// resolved from the LLM's argument so the frontend can drive navigation.
+type OpenNavPayload struct {
+	Destination string `json:"destination"`
 }
 
 // EventType enumerates agent-level event kinds.
@@ -159,6 +178,11 @@ const (
 	// Emitted when the LLM uses a canvas-object-detail or canvas-dashboard
 	// code fence, signaling the content should be pinned rather than inline.
 	EventCanvasOpen
+	// EventOpenNav tells the host to open a navigation destination (C6).
+	// Emitted by a host-registered open_nav_view tool (via InternalTool.Emit)
+	// so navigation-by-prompt drives the same host machinery as a manual nav
+	// selection. The destination is an opaque, host-defined string.
+	EventOpenNav
 )
 
 // Agent runs the tool-use loop. It holds the LLM provider and MCP router.
@@ -602,6 +626,12 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 							ToolName:   tc.Name,
 							ToolResult: result,
 						})
+						// Side-channel events (e.g. open_nav_view emitting an
+						// EventOpenNav). Relayed verbatim; the engine does not
+						// interpret them.
+						if it.Emit != nil {
+							tr.events = append(tr.events, it.Emit(tc.Input)...)
+						}
 						tr.message = llm.Message{
 							Role:       llm.RoleTool,
 							Content:    result,
@@ -825,6 +855,12 @@ type CanvasTabSummary struct {
 	Qualifier     string            `json:"qualifier"`
 	Status        string            `json:"status,omitempty"`
 	KeyProperties map[string]string `json:"key_properties,omitempty"`
+	// Digest is an optional free-text summary of the tab's visible content
+	// (C5). Host-rendered (portal) canvas tabs are opaque to the LLM, so the
+	// host publishes a short natural-language description here for pages that
+	// don't decompose neatly into key/value KeyProperties. Omitted when empty.
+	// Secrets must be excluded by the host before sending.
+	Digest string `json:"digest,omitempty"`
 }
 
 // SystemPromptConfig configures the identity and domain context injected into
@@ -1010,6 +1046,32 @@ Guidelines:
 		prompt += "consider whether they're referring to a canvas item.\n\n"
 		prompt += "When the user closes a canvas tab, it will no longer appear here. "
 		prompt += "Do not reference closed tabs.\n"
+
+		// Free-text digests (C5) for tabs whose content doesn't decompose into
+		// key/values — typically host-rendered (portal) tabs opaque to the LLM.
+		// Only appended when at least one tab supplies a digest, so the output
+		// is byte-for-byte identical to today when no digests are present.
+		hasDigest := false
+		for _, tab := range canvasTabs {
+			if strings.TrimSpace(tab.Digest) != "" {
+				hasDigest = true
+				break
+			}
+		}
+		if hasDigest {
+			prompt += "\nAdditional detail for what is currently shown in these tabs:\n\n"
+			for _, tab := range canvasTabs {
+				d := strings.TrimSpace(tab.Digest)
+				if d == "" {
+					continue
+				}
+				name := tab.Name
+				if name == "" {
+					name = tab.TabID
+				}
+				prompt += fmt.Sprintf("- **%s**: %s\n", name, d)
+			}
+		}
 	}
 
 	return prompt

@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.1.20
+
+Agentic-forward UI seams (C5/C6 engine halves). All additive and **opt-in**:
+with none of the new APIs used, behavior is byte-for-byte identical to v0.1.19.
+See [docs/agentic-forward-seams.md](docs/agentic-forward-seams.md).
+
+### Added
+
+- **Open-nav-view seam (C6).** A generic, host-registered navigation tool:
+  `agent.NewOpenNavTool()` returns an `InternalTool` named `open_nav_view` that
+  takes a required, opaque `destination` string. When the model calls it, the
+  agent emits a new `EventOpenNav`, relayed by the server as an `open_nav` SSE
+  event (`{"destination":"…"}`) alongside existing events without changing any
+  existing event shape. The engine hardcodes no destinations.
+- **`InternalTool.Emit` hook.** An optional `Emit func(input json.RawMessage)
+  []Event` field lets any host-registered tool surface lightweight side-channel
+  agent events (e.g. `EventOpenNav`) in addition to its tool result. `nil` = no
+  extra events (today's behavior).
+- **`CanvasTabSummary.Digest` (C5).** The `canvas_tabs` context now accepts an
+  optional free-text `digest` field for tabs whose content doesn't decompose
+  into `key_properties` (e.g. host-rendered portal tabs). When present, an
+  "Additional detail" block is appended after the Canvas Context table; when
+  absent, the system prompt is byte-for-byte unchanged.
+- **Ungated interests.** `requires` is now **optional** in an interest file. An
+  interest with no `requires` is always available (capability-independent) —
+  used by the parameterized navigation interest. Gated interests (non-empty
+  `requires`) are unaffected.
+
 ## v0.1.19
 
 All three additions are inert by default: with `tool_routing.mode` at its

@@ -37,6 +37,13 @@ text, interests, and any custom render tools via config (standalone) or
   relying on the LLM to assemble JSON.
 - **Canvas rendering** — `canvas-object-detail` / `canvas-dashboard` fences are
   converted to `canvas_open` SSE events so content opens in a pinned side panel.
+- **Agentic-forward UI seams (opt-in, additive)** — a set of generic seams for
+  building a docked assistant + canvas workspace: host-rendered content in a
+  canvas tab (portal slot), a canvas **context provider** (`CanvasTabSummary`
+  incl. a free-text `digest`) that keeps the LLM aware of on-screen content, and
+  an **open-nav-view** seam (`agent.NewOpenNavTool()` + `open_nav` SSE event) for
+  navigation-by-prompt. All default to today's behavior. See
+  [docs/agentic-forward-seams.md](docs/agentic-forward-seams.md).
 - **SSE streaming** — real-time token/tool-call/tool-result streaming for chat
   responses.
 - **Embeddable** — run as a standalone binary or embed as a Go library
@@ -121,7 +128,10 @@ Top-level config blocks:
 
 `POST /chat/message` returns `text/event-stream`. Event names include `message`
 (text / tool_call / tool_result / tool_error), `tool_approval_required`,
-`canvas_open`, `error`, and `done`.
+`canvas_open`, `open_nav` (navigation-by-prompt; opt-in via the `open_nav_view`
+ExtraTool), `error`, and `done`. The request body accepts an optional
+`canvas_tabs` array of `CanvasTabSummary` (identity + optional `status` /
+`key_properties` / `digest`) so the assistant stays aware of on-screen content.
 
 ## Docker
 
@@ -153,3 +163,7 @@ packages/chat-component/   Embeddable React chat UI (@edjbarron/netapp-chat-comp
 
 - [docs/chatbot-architecture.md](docs/chatbot-architecture.md) — full architecture:
   agent loop, prompt, tool routing, interests, rendering, capabilities, security.
+- [docs/agentic-forward-seams.md](docs/agentic-forward-seams.md) — opt-in seams
+  for a docked assistant + canvas workspace: docked mode (C1), host content
+  portal slot (C2–C4), canvas context provider incl. `digest` (C5), and the
+  open-nav-view / navigation-by-prompt seam (C6).

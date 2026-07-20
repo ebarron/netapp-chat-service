@@ -5,6 +5,7 @@ export { ChatAPIProvider, useChatAPI } from './ChatAPIContext';
 
 // Components
 export { ChatPanel } from './ChatPanel';
+export type { ChatPanelHandle } from './ChatPanel';
 export { CanvasPanel } from './CanvasPanel';
 export { ModeToggle } from './ModeToggle';
 export { CapabilityControls } from './CapabilityControls';
@@ -17,7 +18,16 @@ export { ToolStatusCard } from './ToolStatusCard';
 export { useChatPanel } from './useChatPanel';
 
 // Types
-export type { ChatMessage, Capability, PendingApproval, ChatMode, CanvasTab, CanvasEventInfo } from './useChatPanel';
+export type {
+  ChatMessage,
+  Capability,
+  PendingApproval,
+  ChatMode,
+  CanvasTab,
+  CanvasEventInfo,
+  CanvasTabSummary,
+  HostCanvasTabInput,
+} from './useChatPanel';
 
 // Charts
 export { ChartBlock, DashboardBlock, ObjectDetailBlock, AutoJsonBlock } from './charts';

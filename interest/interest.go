@@ -14,7 +14,7 @@ type InterestMeta struct {
 	Name         string   `yaml:"name"`
 	Source       string   `yaml:"source"`        // "builtin" or "user"
 	Triggers     []string `yaml:"triggers"`      // phrases that signal this interest
-	Requires     []string `yaml:"requires"`      // capability IDs
+	Requires     []string `yaml:"requires"`      // capability IDs (optional; empty = ungated/always available)
 	OutputTarget string   `yaml:"output_target"` // "canvas" or "chat" (default: "chat")
 }
 
@@ -54,9 +54,12 @@ func Parse(data []byte) (*Interest, error) {
 	if m.Name == "" {
 		return nil, fmt.Errorf("interest: missing required field 'name'")
 	}
-	if len(m.Requires) == 0 {
-		return nil, fmt.Errorf("interest: missing required field 'requires'")
-	}
+	// 'requires' is optional. An interest with no requirements is "ungated" —
+	// it is always available regardless of which capabilities/MCP servers are
+	// connected. This supports capability-independent interests such as the
+	// parameterized navigation interest (C6), which routes to host screens
+	// rather than MCP-backed data. Gated interests (with a non-empty requires)
+	// behave exactly as before.
 
 	return &Interest{
 		Meta: m,

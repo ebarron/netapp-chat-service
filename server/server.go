@@ -750,6 +750,11 @@ func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit C
 				emit("canvas_open", evt.Canvas)
 			}
 
+		case agent.EventOpenNav:
+			if evt.OpenNav != nil {
+				emit("open_nav", evt.OpenNav)
+			}
+
 		case agent.EventError:
 			emit("error", map[string]string{
 				"type":    "error",

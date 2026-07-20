@@ -4,6 +4,35 @@ All notable changes to `@edjbarron/netapp-chat-component` are documented in this
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.20] - 2026-07-20
+
+Agentic-forward UI seams (C1, C2–C4, C5, C6). All additive and **opt-in**: with
+none of the new APIs used, the component behaves byte-for-byte as 0.1.18. See
+[docs/agentic-forward-seams.md](https://github.com/ebarron/netapp-chat-service/blob/main/docs/agentic-forward-seams.md).
+
+### Added
+- **`<ChatPanel variant="docked">` (C1).** A persistent, full-height layout
+  (assistant + canvas) that fills its parent, for a full-width-header shell. The
+  default `variant="drawer"` is today's slide-over, unchanged. In docked mode the
+  panel is always present (not gated by `opened`).
+- **Host content in a canvas tab via portal (C2–C4).** A new imperative
+  `ChatPanelHandle` (via `ref`) exposes `openHostCanvasTab` / `updateHostCanvasTab`
+  / `setCanvasTabSummary` / `closeCanvasTab` / `focusCanvasTab`. The component
+  renders an empty mount node for a host tab and reports it via the new
+  `onHostTabPortal(tabId, el)` prop; the host portals its own React tree in. The
+  component never imports host pages. Host tabs support a reserved,
+  **eviction-exempt-but-user-closable** tab via `evictable: false` (e.g. the
+  single reused `nav` tab); the canvas still hides at zero tabs.
+- **Canvas context provider (C5).** A per-tab `CanvasTabSummary`
+  (`kind`/`name`/`qualifier`/`status`/`key_properties` plus a new free-text
+  `digest`) can be attached to any canvas tab; it is forwarded in the existing
+  `canvas_tabs` field of `/chat/message`. Empty fields are omitted cleanly.
+  Legacy declarative tabs keep their exact prior wire shape.
+- **Open-nav handling (C6).** The new `open_nav` SSE event is parsed and surfaced
+  to the new `onOpenNav(destination)` prop; with no handler it is a safe no-op.
+- New exported types: `CanvasTabSummary`, `HostCanvasTabInput`, `ChatPanelHandle`,
+  `CanvasEventInfo`.
+
 ## [0.1.18] - 2026-07-18
 
 ### Fixed

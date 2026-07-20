@@ -50,6 +50,25 @@ export interface PendingApproval {
 /** Chat mode: read-only or read-write. */
 export type ChatMode = 'read-only' | 'read-write';
 
+/**
+ * A per-tab context summary the host attaches so the LLM stays aware of what
+ * is shown in a canvas tab (C5). It mirrors the engine's `CanvasTabSummary`
+ * and is forwarded verbatim in the `canvas_tabs` field of `/chat/message`.
+ *
+ * All fields are optional: absent/empty fields are omitted from the wire so
+ * there is no empty/`null` noise. `digest` is a free-text description for
+ * pages that don't decompose neatly into `key_properties`. Secrets must be
+ * excluded by the host before attaching.
+ */
+export interface CanvasTabSummary {
+  kind?: string;
+  name?: string;
+  qualifier?: string;
+  status?: string;
+  key_properties?: Record<string, string>;
+  digest?: string;
+}
+
 /** A canvas tab holding pinned content (object-detail or dashboard). */
 export interface CanvasTab {
   tabId: string;
@@ -57,6 +76,37 @@ export interface CanvasTab {
   kind: string;
   qualifier: string;
   content: Record<string, unknown>;
+  /**
+   * True when this tab's body is host-provided React content rendered via a
+   * portal target the component exposes (C2–C4), rather than declarative
+   * engine-driven JSON. The component never imports host pages — it renders an
+   * empty mount node and the host portals its own tree in.
+   */
+  host?: boolean;
+  /**
+   * When `false`, this tab is exempt from the max-tab FIFO auto-eviction (the
+   * reserved "nav" tab, §8). It can still be closed manually. Defaults to
+   * evictable (undefined/true) so existing engine tabs behave as today.
+   */
+  evictable?: boolean;
+  /** Host-attached context summary forwarded to the LLM (C5). */
+  summary?: CanvasTabSummary;
+}
+
+/**
+ * Input for opening/updating a host-content canvas tab (C2–C4). The body is
+ * rendered by the host via a portal into the mount node the component exposes
+ * (see `onHostTabPortal`), so no React node is passed here.
+ */
+export interface HostCanvasTabInput {
+  tabId: string;
+  title: string;
+  kind?: string;
+  qualifier?: string;
+  /** false = exempt from max-tab FIFO eviction (the reserved nav tab). */
+  evictable?: boolean;
+  /** C5 context summary attached to this tab. */
+  summary?: CanvasTabSummary;
 }
 
 /** Maximum number of canvas tabs before oldest auto-closes. */
@@ -75,6 +125,7 @@ interface SSEData {
   capability?: string;
   approval_id?: string;
   description?: string;
+  destination?: string;
 }
 
 let msgCounter = 0;
@@ -104,6 +155,13 @@ export interface UseChatPanelOptions {
    * `action: 'close'`.
    */
   onCanvasEvent?: (info: CanvasEventInfo) => void;
+  /**
+   * Called when the engine emits an `open_nav` SSE event (C6) — typically from
+   * a host-registered `open_nav_view` tool. The host acts on the opaque
+   * `destination` (e.g. routes to a screen / opens the nav canvas tab). When
+   * omitted, the event is a safe no-op.
+   */
+  onOpenNav?: (destination: string) => void;
 }
 
 /** Describes a canvas open/update or close, for `onCanvasEvent`. */
@@ -147,6 +205,10 @@ export function useChatPanel(options?: UseChatPanelOptions) {
   // always calls the current callback without being a dependency.
   const onCanvasEventRef = useRef(options?.onCanvasEvent);
   onCanvasEventRef.current = options?.onCanvasEvent;
+
+  // Same pattern for the C6 open-nav handler.
+  const onOpenNavRef = useRef(options?.onOpenNav);
+  onOpenNavRef.current = options?.onOpenNav;
 
   /** Clears the mode auto-disable timer. */
   const clearModeTimer = useCallback(() => {
@@ -320,11 +382,67 @@ export function useChatPanel(options?: UseChatPanelOptions) {
         updated[existing] = tab;
         return updated;
       }
-      // Evict oldest if at capacity.
-      const base = prev.length >= MAX_CANVAS_TABS ? prev.slice(1) : prev;
+      // Evict the oldest EVICTABLE tab if at capacity. Tabs marked
+      // `evictable: false` (the reserved nav tab, §8) are skipped so they are
+      // never auto-evicted to make room — though the user can still close them
+      // manually. If nothing is evictable we allow a temporary over-cap append.
+      let base = prev;
+      if (prev.length >= MAX_CANVAS_TABS) {
+        const victim = prev.findIndex((t) => t.evictable !== false);
+        if (victim >= 0) {
+          base = [...prev.slice(0, victim), ...prev.slice(victim + 1)];
+        }
+      }
       return [...base, tab];
     });
     setActiveCanvasTab(tab.tabId);
+  }, []);
+
+  /**
+   * Open (or focus/replace) a host-content canvas tab (C2–C4). The tab's body
+   * is rendered by the host via a portal into the mount node the component
+   * exposes; only identity + optional summary flow through here.
+   */
+  const openHostCanvasTab = useCallback((input: HostCanvasTabInput) => {
+    addOrFocusCanvasTab({
+      tabId: input.tabId,
+      title: input.title,
+      kind: input.kind ?? 'host',
+      qualifier: input.qualifier ?? '',
+      content: {},
+      host: true,
+      evictable: input.evictable,
+      summary: input.summary,
+    });
+  }, [addOrFocusCanvasTab]);
+
+  /**
+   * Update an existing host-content tab in place (title/summary/etc.) without
+   * changing which tab is focused. No-op if the tab isn't open.
+   */
+  const updateHostCanvasTab = useCallback(
+    (tabId: string, patch: Partial<Omit<HostCanvasTabInput, 'tabId'>>) => {
+      setCanvasTabs((prev) =>
+        prev.map((t) =>
+          t.tabId === tabId
+            ? {
+                ...t,
+                ...(patch.title !== undefined ? { title: patch.title } : {}),
+                ...(patch.kind !== undefined ? { kind: patch.kind } : {}),
+                ...(patch.qualifier !== undefined ? { qualifier: patch.qualifier } : {}),
+                ...(patch.evictable !== undefined ? { evictable: patch.evictable } : {}),
+                ...(patch.summary !== undefined ? { summary: patch.summary } : {}),
+              }
+            : t,
+        ),
+      );
+    },
+    [],
+  );
+
+  /** Attach/replace the C5 context summary for any open canvas tab. */
+  const setCanvasTabSummary = useCallback((tabId: string, summary: CanvasTabSummary) => {
+    setCanvasTabs((prev) => prev.map((t) => (t.tabId === tabId ? { ...t, summary } : t)));
   }, []);
 
   /** Close a canvas tab. */
@@ -368,7 +486,29 @@ export function useChatPanel(options?: UseChatPanelOptions) {
 
       try {
         // Build canvas tab summaries for LLM context.
+        //
+        // Tabs WITHOUT a host-attached summary keep the exact legacy shape
+        // (`tab_id`/`kind`/`name`/`qualifier`/`status` derived from declarative
+        // content) — byte-for-byte unchanged for existing consumers. Tabs WITH
+        // an attached summary (C5) contribute their host-computed fields, with
+        // optional `status`/`key_properties`/`digest` omitted cleanly when
+        // empty so there is no null/empty noise on the wire.
         const canvasTabSummaries = canvasTabs.map((tab) => {
+          if (tab.summary) {
+            const s = tab.summary;
+            const out: Record<string, unknown> = {
+              tab_id: tab.tabId,
+              kind: s.kind ?? tab.kind,
+              name: s.name ?? tab.title,
+              qualifier: s.qualifier ?? tab.qualifier,
+            };
+            if (s.status) out.status = s.status;
+            if (s.key_properties && Object.keys(s.key_properties).length > 0) {
+              out.key_properties = s.key_properties;
+            }
+            if (s.digest && s.digest.trim()) out.digest = s.digest.trim();
+            return out;
+          }
           const c = tab.content;
           return {
             tab_id: tab.tabId,
@@ -607,6 +747,16 @@ export function useChatPanel(options?: UseChatPanelOptions) {
           }
           break;
         }
+
+        case 'open_nav': {
+          // C6: lightweight navigation signal. Surface the opaque destination
+          // to the host-registered handler. With no handler it's a safe no-op.
+          const dest = data.destination;
+          if (typeof dest === 'string' && dest) {
+            onOpenNavRef.current?.(dest);
+          }
+          break;
+        }
       }
     },
     []
@@ -679,5 +829,8 @@ export function useChatPanel(options?: UseChatPanelOptions) {
     setActiveCanvasTab,
     addOrFocusCanvasTab,
     closeCanvasTab,
+    openHostCanvasTab,
+    updateHostCanvasTab,
+    setCanvasTabSummary,
   };
 }
