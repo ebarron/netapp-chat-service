@@ -6,6 +6,14 @@ export { ChatAPIProvider, useChatAPI } from './ChatAPIContext';
 // Components
 export { ChatPanel } from './ChatPanel';
 export type { ChatPanelHandle } from './ChatPanel';
+export { ChatAppShell } from './ChatAppShell';
+export type {
+  ChatAppShellProps,
+  ChatAppShellDestination,
+  ChatAppShellHeaderApi,
+  ChatAppShellNavApi,
+  ChatAppShellDestinationApi,
+} from './ChatAppShell';
 export { CanvasPanel } from './CanvasPanel';
 export { ModeToggle } from './ModeToggle';
 export { CapabilityControls } from './CapabilityControls';
@@ -26,6 +34,7 @@ export type {
   CanvasTab,
   CanvasEventInfo,
   CanvasTabSummary,
+  CanvasControlOptions,
   HostCanvasTabInput,
 } from './useChatPanel';
 

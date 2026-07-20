@@ -89,3 +89,17 @@ server:
 #   # load a subset of a large server instead of the whole thing. 0 disables
 #   # expansion (pure group-level routing).
 #   group_expand_threshold: 0
+
+# Navigation-by-prompt (C6) — the generic open_nav_view seam. When enabled, the
+# binary registers agent.NewOpenNavTool() so the model can call
+# open_nav_view(destination); the resulting "open_nav" SSE event is relayed to
+# the frontend, which drives its own navigation. Pair it with an (ungated)
+# navigation interest whose body enumerates your destination catalog. Omitting
+# this block (or enabled: false) registers no tool — behavior is unchanged.
+#
+# open_nav:
+#   enabled: true
+#   # Optional: force the model to call open_nav_view when the named interest was
+#   # loaded (mirrors how render tools are forced). Set to your navigation
+#   # interest's id. Empty = no forcing.
+#   required_after_interest: navigation

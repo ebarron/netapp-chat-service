@@ -88,6 +88,14 @@ func main() {
 		ToolRoutingExpandThreshold: cfg.ToolRouting.GroupExpandThreshold,
 	}
 
+	// Navigation-by-prompt (C6): when configured, register the generic
+	// open_nav_view tool so binary consumers (e.g. RTB) get navigation-by-
+	// prompt without writing Go. Not configured ⇒ no tool ⇒ behavior unchanged.
+	if applyOpenNavTool(cfg.OpenNav, deps) {
+		logger.Info("registered open_nav_view tool (navigation-by-prompt)",
+			"required_after_interest", cfg.OpenNav.RequiredAfterInterest)
+	}
+
 	srv := server.New(deps)
 
 	logger.Info("starting chat service", "addr", cfg.Server.Addr)
@@ -102,4 +110,28 @@ func firstDir(dirs []string) string {
 		return dirs[0]
 	}
 	return ""
+}
+
+// applyOpenNavTool registers the generic open_nav_view tool (C6) on deps when
+// navigation-by-prompt is enabled in config. It is the config-driven form of
+// what a Go consumer would do manually:
+//
+//	deps.ExtraTools[agent.OpenNavToolName] = agent.NewOpenNavTool()
+//
+// Returns true when a tool was registered (so the caller can log it), false
+// when navigation-by-prompt is disabled (no tool, behavior unchanged).
+// Extracted from main for testability.
+func applyOpenNavTool(cfg config.OpenNavConfig, deps *server.ChatDeps) bool {
+	if !cfg.Enabled {
+		return false
+	}
+	navTool := agent.NewOpenNavTool()
+	if cfg.RequiredAfterInterest != "" {
+		navTool.RequiredAfterInterest = cfg.RequiredAfterInterest
+	}
+	if deps.ExtraTools == nil {
+		deps.ExtraTools = make(map[string]agent.InternalTool)
+	}
+	deps.ExtraTools[agent.OpenNavToolName] = navTool
+	return true
 }

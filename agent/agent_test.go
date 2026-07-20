@@ -537,6 +537,78 @@ func TestBuildSystemPrompt(t *testing.T) {
 	})
 }
 
+// TestBuildSystemPrompt_CanvasGrounding covers the C1 structured options field
+// and the C2 grounding guardrail.
+func TestBuildSystemPrompt_CanvasGrounding(t *testing.T) {
+	cfg := SystemPromptConfig{ProductName: "Test Assistant"}
+	router := mcpclient.NewMockRouter(nil)
+
+	t.Run("guardrail only appears with canvas tabs", func(t *testing.T) {
+		// Legacy add-on mode: no canvas summary ⇒ no guardrail (byte-for-byte).
+		bare := BuildSystemPrompt(cfg, router, "")
+		if strings.Contains(bare, "**Grounding:**") {
+			t.Error("guardrail must NOT appear when no canvas tabs are sent")
+		}
+		withTab := BuildSystemPrompt(cfg, router, "",
+			CanvasTabSummary{TabID: "nav", Kind: "nav-view", Name: "AI Settings", Qualifier: "/settings/ai"})
+		if !strings.Contains(withTab, "**Grounding:**") {
+			t.Error("guardrail should appear when a canvas tab is present")
+		}
+		if !strings.Contains(withTab, "do not invent") && !strings.Contains(withTab, "Do NOT invent") {
+			t.Error("guardrail should instruct the model not to invent option values")
+		}
+	})
+
+	t.Run("structured options render and list only supplied choices", func(t *testing.T) {
+		prompt := BuildSystemPrompt(cfg, router, "",
+			CanvasTabSummary{
+				TabID: "nav", Kind: "nav-view", Name: "AI Settings", Qualifier: "/settings/ai",
+				Options: []CanvasControlOptions{
+					{Label: "Provider", Choices: []string{"OpenAI", "Anthropic", "LLM Proxy"}},
+					{Label: "Model", Choices: []string{"gpt-4.1", "claude-sonnet-4"}},
+				},
+			})
+		if !strings.Contains(prompt, "Selectable options currently available") {
+			t.Error("options block header missing")
+		}
+		for _, want := range []string{"Provider: OpenAI, Anthropic, LLM Proxy", "Model: gpt-4.1, claude-sonnet-4"} {
+			if !strings.Contains(prompt, want) {
+				t.Errorf("options block missing %q\n%s", want, prompt)
+			}
+		}
+		// The model must not be able to derive "Azure OpenAI"/"Ollama" — they
+		// are simply not present, and the guardrail forbids inventing them.
+		if strings.Contains(prompt, "Azure OpenAI") || strings.Contains(prompt, "Ollama") {
+			t.Error("options block leaked values that were never supplied")
+		}
+	})
+
+	t.Run("no options block when none supplied", func(t *testing.T) {
+		prompt := BuildSystemPrompt(cfg, router, "",
+			CanvasTabSummary{TabID: "nav", Kind: "nav-view", Name: "Home", Qualifier: "/home"})
+		if strings.Contains(prompt, "Selectable options currently available") {
+			t.Error("options block should be omitted when no tab supplies options")
+		}
+	})
+
+	t.Run("empty choices are dropped", func(t *testing.T) {
+		prompt := BuildSystemPrompt(cfg, router, "",
+			CanvasTabSummary{
+				TabID: "nav", Name: "X",
+				Options: []CanvasControlOptions{
+					{Label: "Empty", Choices: []string{"", "  "}},
+					{Label: "Real", Choices: []string{"a", "", "a", "b"}},
+				},
+			})
+		if strings.Contains(prompt, "Empty:") {
+			t.Error("control with only blank choices should be dropped")
+		}
+		if !strings.Contains(prompt, "Real: a, b") {
+			t.Errorf("de-duplicated, trimmed choices expected; got:\n%s", prompt)
+		}
+	})
+}
+
 // TestBuildSystemPromptWithRouting covers the Layer 2 group-index section of
 // the in-band supervisor (S7a).
 func TestBuildSystemPromptWithRouting(t *testing.T) {

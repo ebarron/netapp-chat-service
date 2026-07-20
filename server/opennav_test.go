@@ -144,3 +144,52 @@ func TestRunChat_CanvasDigestRelay(t *testing.T) {
 		t.Error("system prompt should not contain the digest block when absent")
 	}
 }
+
+// TestRunChat_CanvasOptionsRelay verifies the C1 structured `options` field on
+// a canvas_tabs summary flows through the engine's canvas relay into the system
+// prompt when present, and that the grounding guardrail rides along.
+func TestRunChat_CanvasOptionsRelay(t *testing.T) {
+	newDeps := func(provider llm.Provider) *ChatDeps {
+		return &ChatDeps{
+			Sessions: session.NewManager(10),
+			Provider: provider,
+			Router:   mcpclient.NewMockRouter(nil),
+			Logger:   slogDiscard(),
+		}
+	}
+
+	p := &llm.MockProvider{ProviderName: "mock", Responses: [][]llm.StreamEvent{llm.MockTextResponse("ok")}}
+	RunChat(context.Background(), newDeps(p), ChatMessageRequest{
+		Message: "what providers can I pick?",
+		CanvasTabs: []agent.CanvasTabSummary{
+			{
+				TabID: "nav", Kind: "nav-view", Name: "AI Settings", Qualifier: "/settings/ai",
+				Options: []agent.CanvasControlOptions{
+					{Label: "Provider", Choices: []string{"OpenAI", "Anthropic", "LLM Proxy"}},
+				},
+			},
+		},
+	}, func(string, any) {}, nil)
+	if len(p.Calls) == 0 {
+		t.Fatal("provider never called")
+	}
+	sys := p.Calls[0].System
+	if !strings.Contains(sys, "Provider: OpenAI, Anthropic, LLM Proxy") {
+		t.Errorf("system prompt should contain the structured options; got:\n%s", sys)
+	}
+	if !strings.Contains(sys, "**Grounding:**") {
+		t.Error("grounding guardrail should be present when a canvas summary is sent")
+	}
+
+	// Backward compat: a summary without Options omits the options block.
+	p2 := &llm.MockProvider{ProviderName: "mock", Responses: [][]llm.StreamEvent{llm.MockTextResponse("ok")}}
+	RunChat(context.Background(), newDeps(p2), ChatMessageRequest{
+		Message: "what's on screen?",
+		CanvasTabs: []agent.CanvasTabSummary{
+			{TabID: "nav", Kind: "nav-view", Name: "Alerting", Qualifier: "/alerting"},
+		},
+	}, func(string, any) {}, nil)
+	if strings.Contains(p2.Calls[0].System, "Selectable options currently available") {
+		t.Error("options block should be omitted when no tab supplies options")
+	}
+}

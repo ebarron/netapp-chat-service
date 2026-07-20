@@ -67,6 +67,26 @@ export interface CanvasTabSummary {
   status?: string;
   key_properties?: Record<string, string>;
   digest?: string;
+  /**
+   * First-class structured option sets (C1 grounding): the AVAILABLE choices
+   * for the on-screen controls (dropdowns, picklists, segmented controls, mode
+   * toggles). Advertising the real choice set lets the assistant answer "what
+   * options are there?" from fact instead of inventing plausible-but-wrong
+   * values. Absent/empty ⇒ today's behavior (nothing added to the wire).
+   * Secrets must never be placed in a choice set.
+   */
+  options?: CanvasControlOptions[];
+}
+
+/**
+ * The available choices for a single on-screen control. `label` is the
+ * human-readable control label (e.g. "Provider", "Preferred ONTAP API");
+ * `choices` is the list of selectable option labels. Empty choices are dropped
+ * before being sent.
+ */
+export interface CanvasControlOptions {
+  label: string;
+  choices: string[];
 }
 
 /** A canvas tab holding pinned content (object-detail or dashboard). */
@@ -507,6 +527,18 @@ export function useChatPanel(options?: UseChatPanelOptions) {
               out.key_properties = s.key_properties;
             }
             if (s.digest && s.digest.trim()) out.digest = s.digest.trim();
+            // C1 structured options: keep only controls that carry at least one
+            // non-empty choice, so absent/empty option sets stay off the wire
+            // (byte-for-byte unchanged for summaries without options).
+            if (s.options && s.options.length > 0) {
+              const options = s.options
+                .map((o) => ({
+                  label: o.label,
+                  choices: (o.choices ?? []).map((c) => c?.trim()).filter((c): c is string => !!c),
+                }))
+                .filter((o) => o.choices.length > 0);
+              if (options.length > 0) out.options = options;
+            }
             return out;
           }
           const c = tab.content;

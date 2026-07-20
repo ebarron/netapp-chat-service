@@ -845,6 +845,22 @@ func (a *Agent) missingRequiredTool(loadedInterests, calledTools map[string]bool
 	return ""
 }
 
+// CanvasControlOptions describes the available choices for a single on-screen
+// control (e.g. a dropdown, picklist, segmented control, or a checkbox that
+// toggles between named modes). It is the first-class, structured form of "what
+// choices can I pick here?" grounding (C1): the host advertises the AVAILABLE
+// option set for a control so the model answers choice questions from fact
+// rather than inventing plausible-but-wrong values.
+//
+// Label is the human-readable control label (e.g. "Provider",
+// "Preferred ONTAP API"); Choices is the list of selectable option labels.
+// Empty choices are ignored by the prompt builder. Secrets must never be
+// placed in a choice set.
+type CanvasControlOptions struct {
+	Label   string   `json:"label"`
+	Choices []string `json:"choices"`
+}
+
 // CanvasTabSummary is a compact description of an open canvas tab,
 // sent from the frontend to give the LLM context about what the user
 // can currently see pinned in the canvas.
@@ -861,6 +877,12 @@ type CanvasTabSummary struct {
 	// don't decompose neatly into key/value KeyProperties. Omitted when empty.
 	// Secrets must be excluded by the host before sending.
 	Digest string `json:"digest,omitempty"`
+	// Options is an optional list of the selectable option sets exposed by the
+	// controls on this tab (C1 grounding). Each entry names a control and its
+	// available choices. Absent/empty ⇒ today's behavior (no options block in
+	// the prompt). Backward compatible: a summary without Options renders
+	// byte-for-byte as before.
+	Options []CanvasControlOptions `json:"options,omitempty"`
 }
 
 // SystemPromptConfig configures the identity and domain context injected into
@@ -1047,6 +1069,22 @@ Guidelines:
 		prompt += "When the user closes a canvas tab, it will no longer appear here. "
 		prompt += "Do not reference closed tabs.\n"
 
+		// Grounding guardrail (C2). Instruct the model to answer on-screen and
+		// options/choices questions ONLY from the canvas context provided here,
+		// and to admit it doesn't know rather than invent picklist values when
+		// a choice set isn't listed. This block is inside the canvas section, so
+		// it is only emitted when the host attached at least one canvas summary
+		// — legacy add-on consumers that send no canvas tabs get the prior
+		// prompt byte-for-byte.
+		prompt += "\n**Grounding:** When the user asks what is shown on screen, or what "
+		prompt += "options, choices, or values are available for a control (a dropdown, "
+		prompt += "picklist, setting, or mode), answer ONLY from the canvas context provided "
+		prompt += "here — the tab list above, any additional detail, and the selectable "
+		prompt += "options listed below. Do NOT invent, guess, or extrapolate option values "
+		prompt += "from general knowledge. If the choices for what the user asked about are "
+		prompt += "not listed here, say you don't have that information (and suggest they "
+		prompt += "open the relevant screen) rather than making up plausible values.\n"
+
 		// Free-text digests (C5) for tabs whose content doesn't decompose into
 		// key/values — typically host-rendered (portal) tabs opaque to the LLM.
 		// Only appended when at least one tab supplies a digest, so the output
@@ -1072,9 +1110,80 @@ Guidelines:
 				prompt += fmt.Sprintf("- **%s**: %s\n", name, d)
 			}
 		}
+
+		// Structured per-control option sets (C1 grounding). When any tab
+		// advertises the available choices for an on-screen control, list them
+		// explicitly so the model can answer "what options are there?" from the
+		// authoritative set instead of inventing values. Only appended when at
+		// least one tab supplies a non-empty option set, so a summary without
+		// Options renders byte-for-byte as the prior release.
+		hasOptions := false
+		for _, tab := range canvasTabs {
+			for _, o := range tab.Options {
+				if len(nonEmptyChoices(o.Choices)) > 0 {
+					hasOptions = true
+					break
+				}
+			}
+			if hasOptions {
+				break
+			}
+		}
+		if hasOptions {
+			prompt += "\nSelectable options currently available on these tabs "
+			prompt += "(these are the ONLY valid choices — do not invent others):\n\n"
+			for _, tab := range canvasTabs {
+				// Collect this tab's non-empty controls first so tabs with no
+				// options contribute nothing (no dangling header).
+				type control struct {
+					label   string
+					choices []string
+				}
+				var controls []control
+				for _, o := range tab.Options {
+					choices := nonEmptyChoices(o.Choices)
+					if len(choices) == 0 {
+						continue
+					}
+					controls = append(controls, control{label: strings.TrimSpace(o.Label), choices: choices})
+				}
+				if len(controls) == 0 {
+					continue
+				}
+				name := tab.Name
+				if name == "" {
+					name = tab.TabID
+				}
+				prompt += fmt.Sprintf("- **%s**:\n", name)
+				for _, c := range controls {
+					label := c.label
+					if label == "" {
+						label = "options"
+					}
+					prompt += fmt.Sprintf("  - %s: %s\n", label, strings.Join(c.choices, ", "))
+				}
+			}
+		}
 	}
 
 	return prompt
+}
+
+// nonEmptyChoices returns the trimmed, de-duplicated, non-empty entries of a
+// choice list, preserving order. Used so an advertised option set is
+// deterministic regardless of how the host sourced it.
+func nonEmptyChoices(choices []string) []string {
+	seen := make(map[string]bool, len(choices))
+	out := make([]string, 0, len(choices))
+	for _, c := range choices {
+		t := strings.TrimSpace(c)
+		if t == "" || seen[t] {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
+	}
+	return out
 }
 
 // chartFormatSpec is a condensed version of the visualization data contract

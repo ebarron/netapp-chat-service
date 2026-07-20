@@ -24,6 +24,28 @@ type Config struct {
 	Server       ServerConfig       `yaml:"server"`        // HTTP server settings.
 	UI           UIConfig           `yaml:"ui"`            // Built-in chat UI settings.
 	ToolRouting  ToolRoutingConfig  `yaml:"tool_routing"`  // High-tool-count scaling supervisor (S7).
+	OpenNav      OpenNavConfig      `yaml:"open_nav"`      // Navigation-by-prompt seam (C6).
+}
+
+// OpenNavConfig controls the generic navigation-by-prompt seam (C6) in the
+// standalone binary. When Enabled is true the binary auto-registers
+// agent.NewOpenNavTool() as an ExtraTool, so a navigation interest can drive
+// open_nav_view(destination) → an "open_nav" SSE event the frontend acts on.
+// The zero value (Enabled:false) registers no tool and reproduces today's
+// behavior exactly — binary consumers that don't want navigation-by-prompt are
+// unaffected.
+//
+// The tool itself is generic: destinations are opaque, host-defined strings the
+// engine never interprets. A consumer typically pairs this with an ungated
+// navigation interest whose body enumerates its destination catalog.
+type OpenNavConfig struct {
+	// Enabled turns on registration of the open_nav_view tool.
+	Enabled bool `yaml:"enabled"`
+	// RequiredAfterInterest optionally forces the model to call open_nav_view
+	// when the named interest was loaded via get_interest (mirrors how render
+	// tools are forced). Empty ⇒ no forcing. Typically set to the ID of the
+	// consumer's navigation interest (e.g. "navigation").
+	RequiredAfterInterest string `yaml:"required_after_interest"`
 }
 
 // MCPServer defines an MCP server connection.
