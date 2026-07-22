@@ -169,6 +169,24 @@ export interface ChatAppShellProps {
 
   /** Optional style overrides merged onto the shell root (default height 100vh). */
   style?: CSSProperties;
+
+  /**
+   * Assistant column width in the docked split (pixels or CSS length). Controlled
+   * counterpart to drag-resize; default `"40%"` when omitted.
+   */
+  assistantWidth?: number | string;
+  /** Uncontrolled initial assistant width (pixels or CSS length). */
+  defaultAssistantWidth?: number | string;
+  /** Minimum assistant column width in pixels. Defaults to `320`. */
+  assistantMinWidth?: number;
+  /** Optional maximum assistant column width in pixels. */
+  assistantMaxWidth?: number;
+  /** Render a draggable divider between assistant and canvas. Defaults to `false`. */
+  resizableAssistant?: boolean;
+  /** Fired with the clamped assistant width in pixels while resizing and on release. */
+  onAssistantWidthChange?: (width: number) => void;
+  /** Persist user-resized assistant width (px) under this localStorage key. */
+  persistAssistantWidthKey?: string;
 }
 
 /**
@@ -208,6 +226,13 @@ export function ChatAppShell({
   navTabId = 'nav',
   navTabKind = 'nav-view',
   style,
+  assistantWidth,
+  defaultAssistantWidth,
+  assistantMinWidth,
+  assistantMaxWidth,
+  resizableAssistant,
+  onAssistantWidthChange,
+  persistAssistantWidthKey,
 }: ChatAppShellProps) {
   const chatRef = useRef<ChatPanelHandle>(null);
   const [navOpened, { toggle: toggleNav, close: closeNav }] = useDisclosure(false);
@@ -366,6 +391,13 @@ export function ChatAppShell({
           onOpenNav={onOpenNav}
           onHostTabPortal={onHostTabPortal}
           onCanvasEvent={handleCanvasEvent}
+          assistantWidth={assistantWidth}
+          defaultAssistantWidth={defaultAssistantWidth}
+          assistantMinWidth={assistantMinWidth}
+          assistantMaxWidth={assistantMaxWidth}
+          resizableAssistant={resizableAssistant}
+          onAssistantWidthChange={onAssistantWidthChange}
+          persistAssistantWidthKey={persistAssistantWidthKey}
         />
 
         {/* Live host page rendered into the reserved nav canvas tab. */}

@@ -138,4 +138,39 @@ describe('ChatAppShell (generic docked shell)', () => {
     // Page still present after publishing a live summary.
     expect(screen.getByTestId('page-label').textContent).toBe('Alerting');
   });
+
+  it('forwards resizableAssistant to the docked split handle', async () => {
+    render(
+      <ChatAppShell
+        destinations={DESTS}
+        activeDestinationId="alerting"
+        renderHeader={() => <div>header</div>}
+        renderNavMenu={() => null}
+        renderDestination={({ destination }) => (
+          <div data-testid="page">{destination.label}</div>
+        )}
+        resizableAssistant
+      />,
+    );
+    await waitFor(() => expect(screen.getByTestId('page')).toBeDefined());
+    expect(screen.getByTestId('assistant-split-handle')).toBeDefined();
+  });
+
+  it('forwards assistantWidth to the split row CSS variable', async () => {
+    const { container } = render(
+      <ChatAppShell
+        destinations={DESTS}
+        activeDestinationId="alerting"
+        assistantWidth={512}
+        renderHeader={() => <div>header</div>}
+        renderNavMenu={() => null}
+        renderDestination={({ destination }) => (
+          <div data-testid="page">{destination.label}</div>
+        )}
+      />,
+    );
+    await waitFor(() => expect(screen.getByTestId('page')).toBeDefined());
+    const row = container.querySelector('[class*="drawerBody"]') as HTMLElement;
+    expect(row.style.getPropertyValue('--chat-assistant-width').trim()).toBe('512px');
+  });
 });

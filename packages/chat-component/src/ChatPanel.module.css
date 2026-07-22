@@ -38,13 +38,37 @@
 }
 
 .drawerBody .panel {
-  flex: 0 0 40%;
+  flex: 0 0 var(--chat-assistant-width, 40%);
   min-width: 320px;
+}
+
+/* Opt-in min/max sizing for ChatAppShell + docked hosts. The width property is
+   always readable so hosts can override --chat-assistant-width directly. */
+.assistantSized.drawerBody .panel {
+  min-width: var(--chat-assistant-min-width, 320px);
+  max-width: var(--chat-assistant-max-width, none);
+}
+
+.assistantSplitHandle {
+  flex: 0 0 6px;
+  width: 6px;
+  align-self: stretch;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 2;
+  transition: background-color 150ms ease;
+}
+
+.assistantSplitHandle:hover,
+.assistantSplitHandle:active,
+.assistantSplitHandle:focus-visible {
+  background-color: light-dark(var(--mantine-color-blue-2), var(--mantine-color-blue-8));
+  outline: none;
 }
 
 /* Canvas region */
 .canvasRegion {
-  flex: 0 0 60%;
+  flex: 1 1 auto;
   border-left: 1px solid light-dark(var(--mantine-color-gray-3), var(--mantine-color-dark-4));
   display: flex;
   flex-direction: column;

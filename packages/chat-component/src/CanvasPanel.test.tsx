@@ -1,4 +1,5 @@
 import { render, screen } from '../test-utils';
+import userEvent from '@testing-library/user-event';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { useEffect } from 'react';
 import { CanvasPanel } from './CanvasPanel';
@@ -117,6 +118,47 @@ describe('CanvasPanel', () => {
     );
     expect(screen.getByLabelText('Close vol1')).toBeDefined();
     expect(screen.getByLabelText('Close cls1')).toBeDefined();
+  });
+
+  it('does not nest native buttons inside tab buttons', () => {
+    render(
+      <CanvasPanel
+        tabs={[volumeTab, clusterTab]}
+        activeTab={volumeTab.tabId}
+        onTabChange={onTabChange}
+        onTabClose={onTabClose}
+      />
+    );
+
+    for (const tab of screen.getAllByRole('tab')) {
+      expect(tab.tagName).toBe('BUTTON');
+      expect(tab.querySelectorAll('button')).toHaveLength(0);
+    }
+
+    const closeVol1 = screen.getByLabelText('Close vol1');
+    expect(closeVol1.tagName).toBe('SPAN');
+    expect(closeVol1).toHaveAttribute('role', 'button');
+  });
+
+  it('keeps tab close separate from tab activation', async () => {
+    const user = userEvent.setup();
+    render(
+      <CanvasPanel
+        tabs={[volumeTab, clusterTab]}
+        activeTab={volumeTab.tabId}
+        onTabChange={onTabChange}
+        onTabClose={onTabClose}
+      />
+    );
+
+    await user.click(screen.getByLabelText('Close vol1'));
+    expect(onTabClose).toHaveBeenCalledWith(volumeTab.tabId);
+    expect(onTabChange).not.toHaveBeenCalled();
+
+    onTabClose.mockClear();
+    await user.click(screen.getByRole('tab', { name: /cls1/i }));
+    expect(onTabChange).toHaveBeenCalledWith(clusterTab.tabId);
+    expect(onTabClose).not.toHaveBeenCalled();
   });
 
   it('remounts the renderer when a tab\'s content is replaced (resets form state)', () => {

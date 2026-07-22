@@ -51,8 +51,17 @@ export function CanvasPanel({
               value={tab.tabId}
               rightSection={
                 <CloseButton
+                  component="span"
+                  role="button"
+                  tabIndex={0}
                   size="xs"
                   onClick={(e) => {
+                    e.stopPropagation();
+                    onTabClose(tab.tabId);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key !== 'Enter' && e.key !== ' ') return;
+                    e.preventDefault();
                     e.stopPropagation();
                     onTabClose(tab.tabId);
                   }}

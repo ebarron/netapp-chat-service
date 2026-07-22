@@ -49,6 +49,37 @@ Everything else (messages, mode toggle, capabilities, canvas split, narrow-
 viewport behavior) is identical across variants. The empty canvas stays hidden
 until a tab opens.
 
+### Configurable and resizable split
+
+`ChatAppShell` forwards these optional props to its docked `ChatPanel`:
+
+```ts
+assistantWidth?: number | string;       // controlled; number = px
+defaultAssistantWidth?: number | string; // uncontrolled initial width
+assistantMinWidth?: number;             // default 320px
+assistantMaxWidth?: number;
+resizableAssistant?: boolean;           // default false
+onAssistantWidthChange?: (px: number) => void;
+persistAssistantWidthKey?: string;
+```
+
+`assistantWidth` accepts pixels as a number or any CSS length/percentage as a
+string. It is applied through the inherited `--chat-assistant-width` custom
+property; the canvas flexes into the remaining space. Hosts may set that custom
+property directly in CSS instead of overriding hashed CSS-module class names.
+
+With `resizableAssistant`, a focusable vertical separator supports mouse/touch
+Pointer Events, Left/Right arrow nudging (16px, or 64px with Shift), and
+double-click reset. Dragged widths are clamped to the configured pixel limits and
+15%–60% of the split container so the canvas remains visible.
+`onAssistantWidthChange` fires with the clamped pixel width during resizing and
+again at drag end. When `persistAssistantWidthKey` is present, user sizing is
+stored under that exact `localStorage` key and restored in an effect, making the
+read SSR-safe.
+
+Omitting every split prop preserves the original DOM behavior: no separator and
+the same 40% assistant / 60% canvas split.
+
 ---
 
 ## C2–C4 — Host content in a canvas tab (portal slot)

@@ -4,6 +4,22 @@ All notable changes to `@edjbarron/netapp-chat-component` are documented in this
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-07-22
+
+### Added
+- **`ChatAppShell` / docked split sizing.** Opt-in props to control the assistant/canvas
+  column split in the docked shell: `assistantWidth`, `defaultAssistantWidth`,
+  `assistantMinWidth` (default `320`), `assistantMaxWidth`, `resizableAssistant`,
+  `onAssistantWidthChange`, and `persistAssistantWidthKey`. Width is applied via
+  the `--chat-assistant-width` CSS custom property; the canvas takes the remainder
+  (`flex: 1 1 auto`). When `resizableAssistant` is true, a focusable vertical
+  separator supports pointer drag, arrow-key nudging (±16px, Shift for ±64px),
+  and double-click reset. `onAssistantWidthChange` receives the clamped pixel
+  width during resize and again on release. All additive: omitting the new props
+  preserves the legacy fixed `40%` / `60%` split with no handle.
+- Hosts may also set the inherited `--chat-assistant-width` custom property
+  directly, avoiding overrides against generated CSS-module class names.
+
 ## [0.1.20] - 2026-07-20
 
 Agentic-forward UI seams (C1, C2–C4, C5, C6). All additive and **opt-in**: with

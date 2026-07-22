@@ -120,6 +120,38 @@ for the full reference.
 | `onHostTabPortal` | `(tabId: string, el: HTMLElement \| null) => void` | **C2–C4.** Portal mount callback for host-content canvas tabs. `el` is the mount node when a host tab mounts, `null` when it unmounts. Render your page into `el` via `ReactDOM.createPortal`. |
 | `onOpenNav` | `(destination: string) => void` | **C6.** Called when the engine emits an `open_nav` SSE event (from a host-registered `open_nav_view` tool). Absence is a safe no-op. |
 
+**Configuring the docked assistant/canvas split.** `ChatAppShell` supports a
+host-controlled assistant width and an optional built-in resize handle:
+
+```tsx
+<ChatAppShell
+  assistantWidth="32%"            // controlled; numbers are pixels
+  assistantMinWidth={320}
+  assistantMaxWidth={720}
+  resizableAssistant
+  onAssistantWidthChange={(px) => setAssistantWidth(px)}
+  persistAssistantWidthKey="planning-console-assistant-width"
+  // ...existing shell props
+/>
+```
+
+Use `defaultAssistantWidth` instead of `assistantWidth` for uncontrolled usage.
+When resizing is enabled, pointer dragging and Left/Right arrow keys report a
+clamped pixel width through `onAssistantWidthChange`; Shift changes the keyboard
+step from 16px to 64px, and double-click resets the width. Persistence is
+SSR-safe and restores the last user width from `localStorage` after mount.
+
+All split props are optional. Omitting them preserves the existing 40% assistant /
+60% canvas layout and renders no separator. Hosts can also set
+`--chat-assistant-width` on the split layout from CSS without targeting hashed
+module class names:
+
+```css
+.my-chat-shell {
+  --chat-assistant-width: 32%;
+}
+```
+
 **Host content in a canvas tab (C2–C4/C5).** Obtain the imperative handle via a
 ref and drive host tabs. The component renders an empty mount node and exposes it
 via `onHostTabPortal`; it never imports host pages.

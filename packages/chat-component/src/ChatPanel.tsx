@@ -27,8 +27,11 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
 import ReactMarkdown from 'react-markdown';
@@ -51,6 +54,14 @@ import { CanvasPanel } from './CanvasPanel';
 import { ChartBlock, DashboardBlock, ObjectDetailBlock, AutoJsonBlock } from './charts';
 import { wrapInlineChartJson, hideIncompleteChartJson, sanitizeJson } from './inlineChartDetector';
 import { parseChart, parseObjectDetail } from './charts/chartTypes';
+import {
+  clampAssistantWidthPx,
+  formatAssistantWidth,
+  getAssistantWidthBounds,
+  isAssistantSizingActive,
+  resolveAssistantWidthPx,
+  resolveDefaultAssistantWidth,
+} from './assistantSplit';
 import classes from './ChatPanel.module.css';
 
 interface ChatPanelProps {
@@ -112,6 +123,32 @@ interface ChatPanelProps {
    * The host renders its own page into `el` via `ReactDOM.createPortal`.
    */
   onHostTabPortal?: (tabId: string, el: HTMLElement | null) => void;
+  /**
+   * Assistant column width when the canvas split is active (docked shell and
+   * drawer-with-canvas). Numbers are pixels; strings are any CSS length
+   * (e.g. `"24%"`, `"480px"`). Sets `--chat-assistant-width` on the split row.
+   * Default (when omitted) preserves the legacy `40%` / `60%` split.
+   */
+  assistantWidth?: number | string;
+  /** Uncontrolled initial assistant width (pixels or CSS length). */
+  defaultAssistantWidth?: number | string;
+  /** Minimum assistant column width in pixels. Defaults to `320`. */
+  assistantMinWidth?: number;
+  /** Optional maximum assistant column width in pixels. */
+  assistantMaxWidth?: number;
+  /**
+   * When true, renders a draggable divider between the assistant and canvas.
+   * Drag/keyboard updates `--chat-assistant-width`; `onAssistantWidthChange`
+   * receives the clamped pixel width during the gesture and again on release.
+   */
+  resizableAssistant?: boolean;
+  /** Fired with the clamped assistant width in pixels while resizing and on release. */
+  onAssistantWidthChange?: (width: number) => void;
+  /**
+   * When set, persist the user-resized assistant width (px) to `localStorage`
+   * under this key and restore it on mount (SSR-safe: read in an effect).
+   */
+  persistAssistantWidthKey?: string;
 }
 
 /**
@@ -163,6 +200,13 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
   variant = 'drawer',
   onOpenNav,
   onHostTabPortal,
+  assistantWidth,
+  defaultAssistantWidth,
+  assistantMinWidth = 320,
+  assistantMaxWidth,
+  resizableAssistant = false,
+  onAssistantWidthChange,
+  persistAssistantWidthKey,
 }: ChatPanelProps, ref) {
   const {
     messages,
@@ -303,6 +347,267 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
     ? Math.max(drawerWidth * 2.5, typeof window !== 'undefined' ? window.innerWidth * 0.8 : 1200)
     : drawerWidth;
 
+  const isAssistantWidthControlled = assistantWidth !== undefined;
+  const assistantSizingActive = isAssistantSizingActive({
+    assistantWidth,
+    defaultAssistantWidth,
+    resizableAssistant,
+    assistantMinWidth,
+    assistantMaxWidth,
+  });
+  const showAssistantSplitHandle = resizableAssistant && hasCanvas && assistantSizingActive;
+
+  const splitRowRef = useRef<HTMLDivElement>(null);
+  const assistantPanelRef = useRef<HTMLDivElement>(null);
+  const splitHandleRef = useRef<HTMLDivElement>(null);
+  const dragAssistantWidthPxRef = useRef<number | null>(null);
+  const dragStartXRef = useRef(0);
+  const dragStartWidthPxRef = useRef(0);
+  const draggingAssistantSplitRef = useRef(false);
+  const [storedAssistantWidthPx, setStoredAssistantWidthPx] = useState<number | null>(null);
+
+  const assistantWidthCss = useMemo(() => {
+    if (isAssistantWidthControlled) {
+      return formatAssistantWidth(assistantWidth!);
+    }
+    if (storedAssistantWidthPx !== null) {
+      return `${storedAssistantWidthPx}px`;
+    }
+    if (defaultAssistantWidth !== undefined) {
+      return formatAssistantWidth(defaultAssistantWidth);
+    }
+    return undefined;
+  }, [
+    isAssistantWidthControlled,
+    assistantWidth,
+    storedAssistantWidthPx,
+    defaultAssistantWidth,
+  ]);
+
+  const splitRowStyle = useMemo((): CSSProperties | undefined => {
+    if (!assistantSizingActive || !hasCanvas) return undefined;
+    const style: CSSProperties & Record<string, string> = {};
+    if (assistantWidthCss) {
+      style['--chat-assistant-width'] = assistantWidthCss;
+    }
+    if (assistantMinWidth !== 320) {
+      style['--chat-assistant-min-width'] = `${assistantMinWidth}px`;
+    }
+    if (assistantMaxWidth !== undefined) {
+      style['--chat-assistant-max-width'] = `${assistantMaxWidth}px`;
+    }
+    return Object.keys(style).length > 0 ? style : undefined;
+  }, [assistantSizingActive, hasCanvas, assistantWidthCss, assistantMinWidth, assistantMaxWidth]);
+
+  const getSplitContainerWidth = useCallback(() => {
+    return splitRowRef.current?.getBoundingClientRect().width ?? 0;
+  }, []);
+
+  const getCurrentAssistantWidthPx = useCallback(() => {
+    if (dragAssistantWidthPxRef.current !== null) {
+      return dragAssistantWidthPxRef.current;
+    }
+    const panelWidth = assistantPanelRef.current?.getBoundingClientRect().width;
+    if (panelWidth) return Math.round(panelWidth);
+    const containerWidth = getSplitContainerWidth();
+    if (!containerWidth) return assistantMinWidth;
+    return resolveAssistantWidthPx(
+      isAssistantWidthControlled ? assistantWidth : defaultAssistantWidth,
+      containerWidth,
+      assistantMinWidth,
+      assistantMaxWidth,
+    );
+  }, [
+    assistantMaxWidth,
+    assistantMinWidth,
+    assistantWidth,
+    defaultAssistantWidth,
+    getSplitContainerWidth,
+    isAssistantWidthControlled,
+  ]);
+
+  const updateSplitHandleAria = useCallback(
+    (widthPx: number) => {
+      const handle = splitHandleRef.current;
+      const containerWidth = getSplitContainerWidth();
+      if (!handle || !containerWidth) return;
+      const { minPx, maxPx } = getAssistantWidthBounds(
+        containerWidth,
+        assistantMinWidth,
+        assistantMaxWidth,
+      );
+      handle.setAttribute('aria-valuenow', String(widthPx));
+      handle.setAttribute('aria-valuemin', String(minPx));
+      handle.setAttribute('aria-valuemax', String(maxPx));
+    },
+    [assistantMaxWidth, assistantMinWidth, getSplitContainerWidth],
+  );
+
+  const applyAssistantWidthPx = useCallback(
+    (nextPx: number, notify = false) => {
+      const containerWidth = getSplitContainerWidth();
+      if (!containerWidth) return nextPx;
+      const clamped = clampAssistantWidthPx(
+        nextPx,
+        containerWidth,
+        assistantMinWidth,
+        assistantMaxWidth,
+      );
+      splitRowRef.current?.style.setProperty('--chat-assistant-width', `${clamped}px`);
+      dragAssistantWidthPxRef.current = clamped;
+      updateSplitHandleAria(clamped);
+      if (notify) {
+        onAssistantWidthChange?.(clamped);
+      }
+      return clamped;
+    },
+    [
+      assistantMaxWidth,
+      assistantMinWidth,
+      getSplitContainerWidth,
+      onAssistantWidthChange,
+      updateSplitHandleAria,
+    ],
+  );
+
+  const commitAssistantWidthPx = useCallback(
+    (nextPx: number) => {
+      const clamped = applyAssistantWidthPx(nextPx, true);
+      if (!isAssistantWidthControlled) {
+        setStoredAssistantWidthPx(clamped);
+      }
+      if (persistAssistantWidthKey) {
+        try {
+          localStorage.setItem(persistAssistantWidthKey, String(clamped));
+        } catch {
+          // Private mode / quota — ignore.
+        }
+      }
+      return clamped;
+    },
+    [
+      applyAssistantWidthPx,
+      isAssistantWidthControlled,
+      persistAssistantWidthKey,
+    ],
+  );
+
+  const resetAssistantWidth = useCallback(() => {
+    const containerWidth = getSplitContainerWidth();
+    if (!containerWidth) return;
+    const resetCss = resolveDefaultAssistantWidth(defaultAssistantWidth);
+    if (resetCss.endsWith('%')) {
+      splitRowRef.current?.style.removeProperty('--chat-assistant-width');
+    } else {
+      const resetPx = resolveAssistantWidthPx(
+        defaultAssistantWidth,
+        containerWidth,
+        assistantMinWidth,
+        assistantMaxWidth,
+      );
+      splitRowRef.current?.style.setProperty('--chat-assistant-width', `${resetPx}px`);
+      dragAssistantWidthPxRef.current = resetPx;
+      updateSplitHandleAria(resetPx);
+    }
+    dragAssistantWidthPxRef.current = null;
+    if (!isAssistantWidthControlled) {
+      setStoredAssistantWidthPx(null);
+    }
+    if (persistAssistantWidthKey) {
+      try {
+        localStorage.removeItem(persistAssistantWidthKey);
+      } catch {
+        // Ignore storage failures.
+      }
+    }
+    const resetPx = resolveAssistantWidthPx(
+      defaultAssistantWidth,
+      containerWidth,
+      assistantMinWidth,
+      assistantMaxWidth,
+    );
+    onAssistantWidthChange?.(resetPx);
+  }, [
+    assistantMaxWidth,
+    assistantMinWidth,
+    defaultAssistantWidth,
+    getSplitContainerWidth,
+    isAssistantWidthControlled,
+    onAssistantWidthChange,
+    persistAssistantWidthKey,
+    updateSplitHandleAria,
+  ]);
+
+  useEffect(() => {
+    if (!persistAssistantWidthKey || isAssistantWidthControlled) return;
+    try {
+      const stored = localStorage.getItem(persistAssistantWidthKey);
+      const parsed = stored ? Number(stored) : NaN;
+      if (Number.isFinite(parsed)) {
+        setStoredAssistantWidthPx(parsed);
+      }
+    } catch {
+      // SSR / private mode — ignore.
+    }
+  }, [persistAssistantWidthKey, isAssistantWidthControlled]);
+
+  useEffect(() => {
+    dragAssistantWidthPxRef.current = null;
+    if (!showAssistantSplitHandle) return;
+    updateSplitHandleAria(getCurrentAssistantWidthPx());
+  }, [
+    showAssistantSplitHandle,
+    assistantWidthCss,
+    storedAssistantWidthPx,
+    getCurrentAssistantWidthPx,
+    updateSplitHandleAria,
+  ]);
+
+  const onAssistantSplitPointerDown = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      draggingAssistantSplitRef.current = true;
+      e.currentTarget.setPointerCapture(e.pointerId);
+      dragStartXRef.current = e.clientX;
+      dragStartWidthPxRef.current = getCurrentAssistantWidthPx();
+    },
+    [getCurrentAssistantWidthPx],
+  );
+
+  const onAssistantSplitPointerMove = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>) => {
+      if (!draggingAssistantSplitRef.current) return;
+      const delta = e.clientX - dragStartXRef.current;
+      applyAssistantWidthPx(dragStartWidthPxRef.current + delta, true);
+    },
+    [applyAssistantWidthPx],
+  );
+
+  const onAssistantSplitPointerUp = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>) => {
+      if (!draggingAssistantSplitRef.current) return;
+      draggingAssistantSplitRef.current = false;
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
+      commitAssistantWidthPx(getCurrentAssistantWidthPx());
+      dragAssistantWidthPxRef.current = null;
+    },
+    [commitAssistantWidthPx, getCurrentAssistantWidthPx],
+  );
+
+  const onAssistantSplitKeyDown = useCallback(
+    (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      e.preventDefault();
+      const delta = (e.shiftKey ? 64 : 16) * (e.key === 'ArrowRight' ? 1 : -1);
+      const next = commitAssistantWidthPx(getCurrentAssistantWidthPx() + delta);
+      dragAssistantWidthPxRef.current = null;
+      splitRowRef.current?.style.setProperty('--chat-assistant-width', `${next}px`);
+    },
+    [commitAssistantWidthPx, getCurrentAssistantWidthPx],
+  );
+
   const onResizeStart = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
     e.preventDefault();
     dragging.current = true;
@@ -339,8 +644,17 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
 
   const chatContent = (
     <>
-      <div className={hasCanvas ? classes.drawerBody : classes.panelWrapper}>
-        <div className={classes.panel}>
+      <div
+        ref={splitRowRef}
+        className={[
+          hasCanvas ? classes.drawerBody : classes.panelWrapper,
+          assistantSizingActive && hasCanvas ? classes.assistantSized : '',
+        ]
+          .filter(Boolean)
+          .join(' ')}
+        style={splitRowStyle}
+      >
+        <div ref={assistantPanelRef} className={classes.panel}>
         {/* Mode toggle + Capability controls */}
         {configured && (
           <>
@@ -518,6 +832,23 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
           </Group>
         </div>
         </div>
+        {showAssistantSplitHandle && (
+          <div
+            ref={splitHandleRef}
+            className={classes.assistantSplitHandle}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize assistant panel"
+            tabIndex={0}
+            data-testid="assistant-split-handle"
+            onPointerDown={onAssistantSplitPointerDown}
+            onPointerMove={onAssistantSplitPointerMove}
+            onPointerUp={onAssistantSplitPointerUp}
+            onPointerCancel={onAssistantSplitPointerUp}
+            onDoubleClick={resetAssistantWidth}
+            onKeyDown={onAssistantSplitKeyDown}
+          />
+        )}
         {/* Canvas region — only rendered when tabs are present */}
         {hasCanvas && (
           <CanvasPanel
