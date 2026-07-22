@@ -4,7 +4,7 @@ All notable changes to `@edjbarron/netapp-chat-component` are documented in this
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.0] - 2026-07-22
+## [0.2.1] - 2026-07-22
 
 ### Added
 - **`ChatAppShell` / docked split sizing.** Opt-in props to control the assistant/canvas
