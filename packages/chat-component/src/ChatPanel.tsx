@@ -21,6 +21,8 @@ import {
   IconRobot,
   IconBolt,
   IconMessageChatbot,
+  IconChevronLeft,
+  IconChevronRight,
 } from '@tabler/icons-react';
 import {
   forwardRef,
@@ -149,6 +151,27 @@ interface ChatPanelProps {
    * under this key and restore it on mount (SSR-safe: read in an effect).
    */
   persistAssistantWidthKey?: string;
+  /**
+   * Which side of the canvas the assistant column sits on in the docked split
+   * (C8a). `'start'` (default) is left; `'end'` is right. Order-only — width,
+   * min/max, resizing, and persistence are placement-agnostic.
+   */
+  assistantPlacement?: 'start' | 'end';
+  /**
+   * Controlled collapsed state for the assistant column (C8b). When collapsed the
+   * column is hidden (via CSS, not unmounted — chat state and in-flight streams
+   * survive) and a focusable reveal rail is shown on the assistant's side.
+   */
+  assistantCollapsed?: boolean;
+  /** Uncontrolled initial collapsed state (C8b). */
+  defaultAssistantCollapsed?: boolean;
+  /** Fired whenever the collapsed state toggles (C8b). */
+  onAssistantCollapsedChange?: (collapsed: boolean) => void;
+  /**
+   * When set, persist the collapsed state to `localStorage` under this key and
+   * restore it on mount (SSR-safe: read in an effect).
+   */
+  persistAssistantCollapsedKey?: string;
 }
 
 /**
@@ -207,6 +230,11 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
   resizableAssistant = false,
   onAssistantWidthChange,
   persistAssistantWidthKey,
+  assistantPlacement = 'start',
+  assistantCollapsed,
+  defaultAssistantCollapsed,
+  onAssistantCollapsedChange,
+  persistAssistantCollapsedKey,
 }: ChatPanelProps, ref) {
   const {
     messages,
@@ -355,7 +383,57 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
     assistantMinWidth,
     assistantMaxWidth,
   });
-  const showAssistantSplitHandle = resizableAssistant && hasCanvas && assistantSizingActive;
+
+  // C8a — assistant placement (order-only). Default 'start' adds no class so the
+  // DOM is byte-for-byte unchanged.
+  const placementEnd = assistantPlacement === 'end';
+  const placementEndRef = useRef(placementEnd);
+  placementEndRef.current = placementEnd;
+
+  // C8b — collapsible assistant (controlled / uncontrolled + persistence). The
+  // feature is inert unless the host opts in via one of the collapse props.
+  const isCollapsedControlled = assistantCollapsed !== undefined;
+  const collapsibleActive =
+    isCollapsedControlled ||
+    defaultAssistantCollapsed !== undefined ||
+    onAssistantCollapsedChange !== undefined ||
+    persistAssistantCollapsedKey !== undefined;
+  const [uncontrolledCollapsed, setUncontrolledCollapsed] = useState<boolean>(
+    defaultAssistantCollapsed ?? false,
+  );
+  const collapsed = isCollapsedControlled ? !!assistantCollapsed : uncontrolledCollapsed;
+
+  useEffect(() => {
+    if (isCollapsedControlled || !persistAssistantCollapsedKey) return;
+    try {
+      const stored = localStorage.getItem(persistAssistantCollapsedKey);
+      if (stored === '0' || stored === '1') {
+        setUncontrolledCollapsed(stored === '1');
+      }
+    } catch {
+      // SSR / private mode — ignore.
+    }
+  }, [persistAssistantCollapsedKey, isCollapsedControlled]);
+
+  const setAssistantCollapsed = useCallback(
+    (next: boolean) => {
+      if (!isCollapsedControlled) {
+        setUncontrolledCollapsed(next);
+      }
+      if (persistAssistantCollapsedKey) {
+        try {
+          localStorage.setItem(persistAssistantCollapsedKey, next ? '1' : '0');
+        } catch {
+          // Private mode / quota — ignore.
+        }
+      }
+      onAssistantCollapsedChange?.(next);
+    },
+    [isCollapsedControlled, persistAssistantCollapsedKey, onAssistantCollapsedChange],
+  );
+
+  const showAssistantSplitHandle =
+    resizableAssistant && hasCanvas && assistantSizingActive && !collapsed;
 
   const splitRowRef = useRef<HTMLDivElement>(null);
   const assistantPanelRef = useRef<HTMLDivElement>(null);
@@ -577,7 +655,10 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
   const onAssistantSplitPointerMove = useCallback(
     (e: ReactPointerEvent<HTMLDivElement>) => {
       if (!draggingAssistantSplitRef.current) return;
-      const delta = e.clientX - dragStartXRef.current;
+      // When the assistant is on the right (placement="end"), dragging left must
+      // grow it — invert the delta so the handle feels natural on both sides.
+      const dir = placementEndRef.current ? -1 : 1;
+      const delta = (e.clientX - dragStartXRef.current) * dir;
       applyAssistantWidthPx(dragStartWidthPxRef.current + delta, true);
     },
     [applyAssistantWidthPx],
@@ -600,7 +681,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
       if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
       e.preventDefault();
-      const delta = (e.shiftKey ? 64 : 16) * (e.key === 'ArrowRight' ? 1 : -1);
+      const dir = placementEndRef.current ? -1 : 1;
+      const delta = (e.shiftKey ? 64 : 16) * (e.key === 'ArrowRight' ? 1 : -1) * dir;
       const next = commitAssistantWidthPx(getCurrentAssistantWidthPx() + delta);
       dragAssistantWidthPxRef.current = null;
       splitRowRef.current?.style.setProperty('--chat-assistant-width', `${next}px`);
@@ -649,12 +731,34 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
         className={[
           hasCanvas ? classes.drawerBody : classes.panelWrapper,
           assistantSizingActive && hasCanvas ? classes.assistantSized : '',
+          placementEnd ? classes.assistantPlacementEnd : '',
+          collapsibleActive && collapsed ? classes.assistantCollapsed : '',
         ]
           .filter(Boolean)
           .join(' ')}
         style={splitRowStyle}
       >
         <div ref={assistantPanelRef} className={classes.panel}>
+        {/* Collapse affordance (C8b) — only when the host opts into collapse. */}
+        {collapsibleActive && (
+          <div
+            className={classes.assistantCollapseHeader}
+            style={{ justifyContent: placementEnd ? 'flex-start' : 'flex-end' }}
+          >
+            <Tooltip label="Hide assistant">
+              <ActionIcon
+                variant="subtle"
+                size="sm"
+                aria-label="Hide assistant"
+                aria-expanded
+                data-testid="assistant-hide-button"
+                onClick={() => setAssistantCollapsed(true)}
+              >
+                {placementEnd ? <IconChevronRight size={16} /> : <IconChevronLeft size={16} />}
+              </ActionIcon>
+            </Tooltip>
+          </div>
+        )}
         {/* Mode toggle + Capability controls */}
         {configured && (
           <>
@@ -860,6 +964,19 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
             readOnly={mode === 'read-only'}
             onHostTabPortal={onHostTabPortal}
           />
+        )}
+        {/* Reveal rail (C8b) — pinned to the assistant's side while collapsed. */}
+        {collapsibleActive && collapsed && (
+          <button
+            type="button"
+            className={classes.assistantRevealRail}
+            aria-label="Show assistant"
+            aria-expanded={false}
+            data-testid="assistant-reveal-rail"
+            onClick={() => setAssistantCollapsed(false)}
+          >
+            <IconMessageChatbot size={18} />
+          </button>
         )}
       </div>
 

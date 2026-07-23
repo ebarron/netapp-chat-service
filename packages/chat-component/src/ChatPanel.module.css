@@ -66,6 +66,66 @@
   outline: none;
 }
 
+/* C8a — assistant placement="end": order-only reflection of the split row so the
+   assistant sits after the canvas. Default ("start") adds no class. */
+.assistantPlacementEnd .canvasRegion {
+  order: 1;
+  border-left: none;
+  border-right: 1px solid light-dark(var(--mantine-color-gray-3), var(--mantine-color-dark-4));
+}
+.assistantPlacementEnd .assistantSplitHandle {
+  order: 2;
+}
+.assistantPlacementEnd .panel {
+  order: 3;
+}
+.assistantPlacementEnd .assistantRevealRail {
+  order: 4;
+}
+
+/* C8b — collapsed assistant: hide the column (do NOT unmount) and its handle so
+   the canvas takes the full width; the reveal rail stays visible. */
+.assistantCollapsed .panel,
+.assistantCollapsed .assistantSplitHandle {
+  display: none;
+}
+
+/* C8b — collapse affordance row at the top of the assistant column. */
+.assistantCollapseHeader {
+  display: flex;
+  align-items: center;
+  padding: 2px var(--mantine-spacing-xs);
+  flex-shrink: 0;
+}
+
+/* C8b — reveal rail shown while the assistant is collapsed. Slim, focusable,
+   pinned to the assistant's side (order flips with placement). */
+.assistantRevealRail {
+  order: -1;
+  flex: 0 0 32px;
+  width: 32px;
+  align-self: stretch;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: var(--mantine-spacing-sm);
+  border: none;
+  border-right: 1px solid light-dark(var(--mantine-color-gray-3), var(--mantine-color-dark-4));
+  background-color: light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-6));
+  color: light-dark(var(--mantine-color-gray-7), var(--mantine-color-gray-3));
+  cursor: pointer;
+  transition: background-color 150ms ease;
+}
+.assistantPlacementEnd .assistantRevealRail {
+  border-right: none;
+  border-left: 1px solid light-dark(var(--mantine-color-gray-3), var(--mantine-color-dark-4));
+}
+.assistantRevealRail:hover,
+.assistantRevealRail:focus-visible {
+  background-color: light-dark(var(--mantine-color-gray-1), var(--mantine-color-dark-5));
+  outline: none;
+}
+
 /* Canvas region */
 .canvasRegion {
   flex: 1 1 auto;

@@ -137,6 +137,16 @@ export interface ChatAppShellProps {
   navOverlayTitle?: string;
   /** Width (px) of the nav overlay drawer. Defaults to 260. */
   navOverlayWidth?: number;
+  /**
+   * How the nav menu is presented (C7). `'overlay'` (default) is today's
+   * hamburger-driven `Drawer`. `'docked'` renders `renderNavMenu` as a
+   * persistent left column and mounts no `Drawer`; the header hamburger's
+   * `toggleNav` collapses/expands the column and `navOpened` reflects its
+   * expanded (`true`) / collapsed (`false`) state.
+   */
+  navMode?: 'overlay' | 'docked';
+  /** Width (px) of the docked nav column. Defaults to `navOverlayWidth` (260). */
+  navDockedWidth?: number;
 
   // --- Route-sync contract (routing stays host-side) ---
   /**
@@ -187,6 +197,20 @@ export interface ChatAppShellProps {
   onAssistantWidthChange?: (width: number) => void;
   /** Persist user-resized assistant width (px) under this localStorage key. */
   persistAssistantWidthKey?: string;
+
+  /**
+   * Which side of the canvas the assistant column sits on (C8a). `'start'`
+   * (default) is left; `'end'` is right. Order-only.
+   */
+  assistantPlacement?: 'start' | 'end';
+  /** Controlled collapsed state for the assistant column (C8b). */
+  assistantCollapsed?: boolean;
+  /** Uncontrolled initial collapsed state (C8b). */
+  defaultAssistantCollapsed?: boolean;
+  /** Fired whenever the collapsed state toggles (C8b). */
+  onAssistantCollapsedChange?: (collapsed: boolean) => void;
+  /** Persist collapsed state under this localStorage key (C8b, SSR-safe restore). */
+  persistAssistantCollapsedKey?: string;
 }
 
 /**
@@ -220,6 +244,8 @@ export function ChatAppShell({
   renderNavMenu,
   navOverlayTitle = 'Navigation',
   navOverlayWidth = 260,
+  navMode = 'overlay',
+  navDockedWidth,
   activeDestinationId = null,
   onActiveDestinationChange,
   resolveDestination,
@@ -233,10 +259,18 @@ export function ChatAppShell({
   resizableAssistant,
   onAssistantWidthChange,
   persistAssistantWidthKey,
+  assistantPlacement,
+  assistantCollapsed,
+  defaultAssistantCollapsed,
+  onAssistantCollapsedChange,
+  persistAssistantCollapsedKey,
 }: ChatAppShellProps) {
   const chatRef = useRef<ChatPanelHandle>(null);
-  const [navOpened, { toggle: toggleNav, close: closeNav }] = useDisclosure(false);
+  // In docked nav mode the column starts expanded (navOpened=true); in overlay
+  // mode the Drawer starts closed (navOpened=false) exactly as before.
+  const [navOpened, { toggle: toggleNav, close: closeNav }] = useDisclosure(navMode === 'docked');
   const [portalEl, setPortalEl] = useState<HTMLElement | null>(null);
+  const navDockedWidthResolved = navDockedWidth ?? navOverlayWidth;
 
   // The id currently shown in the reserved nav tab (null = closed/greeting).
   // Kept as BOTH state (so the portal re-renders the right page) and a ref (so
@@ -299,9 +333,11 @@ export function ChatAppShell({
       if (!dest) return;
       openDestinationTab(dest);
       onActiveChangeRef.current?.(dest);
-      closeNav();
+      // Overlay mode closes the Drawer after a selection (as before). In docked
+      // mode the persistent column stays put — there is nothing to close.
+      if (navMode === 'overlay') closeNav();
     },
-    [resolve, openDestinationTab, closeNav],
+    [resolve, openDestinationTab, closeNav, navMode],
   );
 
   const publishSummary = useCallback(
@@ -359,54 +395,81 @@ export function ChatAppShell({
 
   const activeDest = findById(openedDestId);
 
-  const shell = (
-    <Box style={{ display: 'flex', flexDirection: 'column', height: '100vh', ...style }}>
-      {/* Full-width app header (host-provided contents). */}
-      <Box
-        component="header"
-        style={{
-          flex: `0 0 ${headerHeight}px`,
-          height: headerHeight,
-          borderBottom: '1px solid var(--mantine-color-default-border)',
-        }}
-      >
-        {renderHeader(headerApi)}
-      </Box>
+  // Shared assistant/canvas panel + reserved-nav-tab portal, placed into either
+  // the overlay-nav body (unchanged) or the docked-nav body.
+  const chatPanelEl = (
+    <ChatPanel
+      ref={chatRef}
+      variant="docked"
+      opened
+      onClose={() => {}}
+      title={title}
+      subtitle={subtitle}
+      defaultMode={defaultMode}
+      suggestedPrompts={suggestedPrompts}
+      bookmarkPrompts={bookmarkPrompts}
+      pendingPrompt={pendingPrompt}
+      onPromptConsumed={onPromptConsumed}
+      onBusyChange={onBusyChange}
+      onOpenNav={onOpenNav}
+      onHostTabPortal={onHostTabPortal}
+      onCanvasEvent={handleCanvasEvent}
+      assistantWidth={assistantWidth}
+      defaultAssistantWidth={defaultAssistantWidth}
+      assistantMinWidth={assistantMinWidth}
+      assistantMaxWidth={assistantMaxWidth}
+      resizableAssistant={resizableAssistant}
+      onAssistantWidthChange={onAssistantWidthChange}
+      persistAssistantWidthKey={persistAssistantWidthKey}
+      assistantPlacement={assistantPlacement}
+      assistantCollapsed={assistantCollapsed}
+      defaultAssistantCollapsed={defaultAssistantCollapsed}
+      onAssistantCollapsedChange={onAssistantCollapsedChange}
+      persistAssistantCollapsedKey={persistAssistantCollapsedKey}
+    />
+  );
 
-      {/* Body: docked assistant (left) + canvas (right), nav overlay on top. */}
+  const portalNode =
+    portalEl && activeDest
+      ? createPortal(
+          renderDestination({ destination: activeDest, publishSummary, openNav }),
+          portalEl,
+        )
+      : null;
+
+  const body =
+    navMode === 'docked' ? (
+      // C7 — persistent nav column (left) · assistant/canvas area. No Drawer.
+      <Box
+        style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'row' }}
+      >
+        {navOpened && (
+          <Box
+            component="nav"
+            data-testid="nav-docked-column"
+            style={{
+              flex: `0 0 ${navDockedWidthResolved}px`,
+              height: '100%',
+              minHeight: 0,
+              overflow: 'auto',
+              borderRight: '1px solid var(--mantine-color-default-border)',
+            }}
+          >
+            {renderNavMenu(navApi)}
+          </Box>
+        )}
+        <Box style={{ flex: '1 1 auto', minWidth: 0, minHeight: 0, position: 'relative' }}>
+          {chatPanelEl}
+          {portalNode}
+        </Box>
+      </Box>
+    ) : (
+      // Body: docked assistant (left) + canvas (right), nav overlay on top.
       <Box style={{ flex: 1, minHeight: 0, position: 'relative' }}>
-        <ChatPanel
-          ref={chatRef}
-          variant="docked"
-          opened
-          onClose={() => {}}
-          title={title}
-          subtitle={subtitle}
-          defaultMode={defaultMode}
-          suggestedPrompts={suggestedPrompts}
-          bookmarkPrompts={bookmarkPrompts}
-          pendingPrompt={pendingPrompt}
-          onPromptConsumed={onPromptConsumed}
-          onBusyChange={onBusyChange}
-          onOpenNav={onOpenNav}
-          onHostTabPortal={onHostTabPortal}
-          onCanvasEvent={handleCanvasEvent}
-          assistantWidth={assistantWidth}
-          defaultAssistantWidth={defaultAssistantWidth}
-          assistantMinWidth={assistantMinWidth}
-          assistantMaxWidth={assistantMaxWidth}
-          resizableAssistant={resizableAssistant}
-          onAssistantWidthChange={onAssistantWidthChange}
-          persistAssistantWidthKey={persistAssistantWidthKey}
-        />
+        {chatPanelEl}
 
         {/* Live host page rendered into the reserved nav canvas tab. */}
-        {portalEl &&
-          activeDest &&
-          createPortal(
-            renderDestination({ destination: activeDest, publishSummary, openNav }),
-            portalEl,
-          )}
+        {portalNode}
 
         {/* Hamburger-driven navigation overlay (host supplies the menu tree). */}
         <Drawer
@@ -421,6 +484,23 @@ export function ChatAppShell({
           {renderNavMenu(navApi)}
         </Drawer>
       </Box>
+    );
+
+  const shell = (
+    <Box style={{ display: 'flex', flexDirection: 'column', height: '100vh', ...style }}>
+      {/* Full-width app header (host-provided contents). */}
+      <Box
+        component="header"
+        style={{
+          flex: `0 0 ${headerHeight}px`,
+          height: headerHeight,
+          borderBottom: '1px solid var(--mantine-color-default-border)',
+        }}
+      >
+        {renderHeader(headerApi)}
+      </Box>
+
+      {body}
     </Box>
   );
 

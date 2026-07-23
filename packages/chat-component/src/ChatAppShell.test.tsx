@@ -15,6 +15,7 @@ beforeEach(() => {
   // Canvas region only renders on wide viewports (>=1024px).
   Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1280 });
   vi.clearAllMocks();
+  localStorage.clear();
 });
 
 function Harness({
@@ -172,5 +173,168 @@ describe('ChatAppShell (generic docked shell)', () => {
     await waitFor(() => expect(screen.getByTestId('page')).toBeDefined());
     const row = container.querySelector('[class*="drawerBody"]') as HTMLElement;
     expect(row.style.getPropertyValue('--chat-assistant-width').trim()).toBe('512px');
+  });
+});
+
+/** Shell with a hamburger + nav menu marker, used by C7/C8 layout-mode tests. */
+function LayoutShell(
+  props: Partial<Parameters<typeof ChatAppShell>[0]> = {},
+) {
+  return (
+    <ChatAppShell
+      destinations={DESTS}
+      renderHeader={({ toggleNav }) => (
+        <button type="button" data-testid="hamburger" onClick={toggleNav}>
+          menu
+        </button>
+      )}
+      renderNavMenu={() => <div data-testid="nav-menu">menu-tree</div>}
+      renderDestination={({ destination }) => (
+        <div data-testid="page">{destination.label}</div>
+      )}
+      {...props}
+    />
+  );
+}
+
+describe('ChatAppShell C7–C8 layout modes', () => {
+  it('default path (no new props): overlay nav + assistant-left, no docked/collapse DOM', async () => {
+    const { container } = render(<LayoutShell />);
+    expect(await screen.findByTestId('hamburger')).toBeDefined();
+
+    // No docked nav column, no placement reordering, no collapse affordances.
+    expect(screen.queryByTestId('nav-docked-column')).toBeNull();
+    expect(container.querySelector('[class*="assistantPlacementEnd"]')).toBeNull();
+    expect(screen.queryByTestId('assistant-reveal-rail')).toBeNull();
+    expect(screen.queryByTestId('assistant-hide-button')).toBeNull();
+
+    // Overlay nav is closed until the hamburger opens the Drawer.
+    expect(screen.queryByTestId('nav-menu')).toBeNull();
+    await userEvent.click(screen.getByTestId('hamburger'));
+    expect(await screen.findByTestId('nav-menu')).toBeDefined();
+  });
+
+  it('C7 docked nav renders a persistent column and mounts no Drawer', async () => {
+    render(<LayoutShell navMode="docked" />);
+    // Column is present (expanded) on mount; menu lives inside it.
+    const column = await screen.findByTestId('nav-docked-column');
+    expect(column.contains(screen.getByTestId('nav-menu'))).toBe(true);
+    // No overlay Drawer dialog is ever mounted in docked mode.
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('C7 hamburger toggleNav collapses/expands the docked column', async () => {
+    render(<LayoutShell navMode="docked" />);
+    expect(await screen.findByTestId('nav-docked-column')).toBeDefined();
+
+    await userEvent.click(screen.getByTestId('hamburger'));
+    expect(screen.queryByTestId('nav-docked-column')).toBeNull();
+
+    await userEvent.click(screen.getByTestId('hamburger'));
+    expect(await screen.findByTestId('nav-docked-column')).toBeDefined();
+  });
+
+  it('C7 docked openNav keeps the column open (does not force-close)', async () => {
+    render(
+      <LayoutShell
+        navMode="docked"
+        activeDestinationId="alerting"
+        renderNavMenu={({ openNav }) => (
+          <button type="button" data-testid="nav-alerting" onClick={() => openNav('overview')}>
+            go
+          </button>
+        )}
+      />,
+    );
+    const column = await screen.findByTestId('nav-docked-column');
+    await userEvent.click(screen.getByTestId('nav-alerting'));
+    // Column still present after a selection.
+    expect(column.isConnected).toBe(true);
+    expect(screen.getByTestId('nav-docked-column')).toBeDefined();
+  });
+
+  it('C7 navDockedWidth sizes the column (defaults to navOverlayWidth)', async () => {
+    const { rerender } = render(<LayoutShell navMode="docked" />);
+    let column = await screen.findByTestId('nav-docked-column');
+    expect(column.style.flex).toContain('260px');
+
+    rerender(<LayoutShell navMode="docked" navDockedWidth={320} />);
+    column = await screen.findByTestId('nav-docked-column');
+    expect(column.style.flex).toContain('320px');
+  });
+
+  it('C8a assistantPlacement="end" reorders the split; width stays applied', async () => {
+    const { container } = render(
+      <LayoutShell activeDestinationId="alerting" assistantPlacement="end" assistantWidth={400} />,
+    );
+    await waitFor(() => expect(screen.getByTestId('page')).toBeDefined());
+    expect(container.querySelector('[class*="assistantPlacementEnd"]')).not.toBeNull();
+    const row = container.querySelector('[class*="drawerBody"]') as HTMLElement;
+    expect(row.style.getPropertyValue('--chat-assistant-width').trim()).toBe('400px');
+  });
+
+  it('C8b uncontrolled collapse shows a reveal rail with documented roles', async () => {
+    render(<LayoutShell activeDestinationId="alerting" defaultAssistantCollapsed />);
+    await waitFor(() => expect(screen.getByTestId('page')).toBeDefined());
+
+    const rail = screen.getByRole('button', { name: 'Show assistant' });
+    expect(rail.getAttribute('aria-expanded')).toBe('false');
+
+    // Reveal expands (uncontrolled): rail disappears.
+    await userEvent.click(rail);
+    expect(screen.queryByTestId('assistant-reveal-rail')).toBeNull();
+
+    // Hide affordance collapses again.
+    await userEvent.click(screen.getByRole('button', { name: 'Hide assistant' }));
+    expect(screen.getByTestId('assistant-reveal-rail')).toBeDefined();
+  });
+
+  it('C8b controlled collapse fires onAssistantCollapsedChange without self-updating', async () => {
+    const onChange = vi.fn();
+    render(
+      <LayoutShell
+        activeDestinationId="alerting"
+        assistantCollapsed
+        onAssistantCollapsedChange={onChange}
+      />,
+    );
+    await waitFor(() => expect(screen.getByTestId('page')).toBeDefined());
+
+    await userEvent.click(screen.getByRole('button', { name: 'Show assistant' }));
+    expect(onChange).toHaveBeenCalledWith(false);
+    // Controlled: still collapsed because the parent didn't change the prop.
+    expect(screen.getByTestId('assistant-reveal-rail')).toBeDefined();
+  });
+
+  it('C8b persistAssistantCollapsedKey round-trips through localStorage', async () => {
+    localStorage.setItem('shell.collapsed', '1');
+    const { unmount } = render(
+      <LayoutShell activeDestinationId="alerting" persistAssistantCollapsedKey="shell.collapsed" />,
+    );
+    await waitFor(() => expect(screen.getByTestId('page')).toBeDefined());
+    // Restored collapsed from storage.
+    expect(await screen.findByTestId('assistant-reveal-rail')).toBeDefined();
+
+    // Expanding writes the new value back.
+    await userEvent.click(screen.getByRole('button', { name: 'Show assistant' }));
+    expect(localStorage.getItem('shell.collapsed')).toBe('0');
+    unmount();
+    localStorage.removeItem('shell.collapsed');
+  });
+
+  it('C8b collapse preserves chat state (ChatPanel is not unmounted)', async () => {
+    render(<LayoutShell activeDestinationId="alerting" defaultAssistantCollapsed={false} />);
+    await waitFor(() => expect(screen.getByTestId('page')).toBeDefined());
+
+    const input = screen.getByPlaceholderText('Type a message...') as HTMLTextAreaElement;
+    await userEvent.type(input, 'draft in flight');
+    expect(input.value).toBe('draft in flight');
+
+    // Collapse, then expand — the same input keeps its draft (no remount).
+    await userEvent.click(screen.getByRole('button', { name: 'Hide assistant' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Show assistant' }));
+    expect((screen.getByPlaceholderText('Type a message...') as HTMLTextAreaElement).value).toBe(
+      'draft in flight',
+    );
   });
 });

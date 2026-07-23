@@ -182,4 +182,51 @@ describe('ChatPanel assistant/canvas split', () => {
     });
     expect(onAssistantWidthChange).toHaveBeenCalledWith(416);
   });
+
+  it('no placement/collapse DOM when those props are omitted', async () => {
+    const { container } = render(<DockedWithCanvas />);
+    await screen.findByRole('tab', { name: /Nav/i });
+
+    expect(container.querySelector('[class*="assistantPlacementEnd"]')).toBeNull();
+    expect(container.querySelector('[class*="assistantCollapsed"]')).toBeNull();
+    expect(screen.queryByTestId('assistant-reveal-rail')).toBeNull();
+    expect(screen.queryByTestId('assistant-hide-button')).toBeNull();
+  });
+
+  it('C8a placement="end" adds the ordering class and inverts drag direction', async () => {
+    const onAssistantWidthChange = vi.fn();
+    const { container } = render(
+      <DockedWithCanvas
+        resizableAssistant
+        assistantPlacement="end"
+        onAssistantWidthChange={onAssistantWidthChange}
+      />,
+    );
+    await screen.findByRole('tab', { name: /Nav/i });
+    expect(container.querySelector('[class*="assistantPlacementEnd"]')).not.toBeNull();
+    mockSplitRowLayout(container);
+
+    // Assistant is on the right: dragging LEFT (negative delta) grows it.
+    const handle = screen.getByTestId('assistant-split-handle');
+    fireEvent.pointerDown(handle, { clientX: 200, pointerId: 1, buttons: 1 });
+    fireEvent.pointerMove(handle, { clientX: 160, pointerId: 1, buttons: 1 });
+    fireEvent.pointerUp(handle, { clientX: 160, pointerId: 1 });
+
+    const row = container.querySelector('[class*="drawerBody"]') as HTMLElement;
+    await waitFor(() => {
+      // startWidth 400 + (-40 * -1) = 440.
+      expect(row.style.getPropertyValue('--chat-assistant-width').trim()).toBe('440px');
+    });
+    expect(onAssistantWidthChange.mock.calls.at(-1)?.[0]).toBe(440);
+  });
+
+  it('C8b collapsed hides the resize handle and shows the reveal rail', async () => {
+    render(<DockedWithCanvas resizableAssistant defaultAssistantCollapsed />);
+    await screen.findByRole('tab', { name: /Nav/i });
+
+    // No drag handle while collapsed; reveal rail present with documented roles.
+    expect(screen.queryByTestId('assistant-split-handle')).toBeNull();
+    const rail = screen.getByRole('button', { name: 'Show assistant' });
+    expect(rail.getAttribute('aria-expanded')).toBe('false');
+  });
 });

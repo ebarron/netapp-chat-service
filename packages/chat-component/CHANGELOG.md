@@ -4,6 +4,33 @@ All notable changes to `@edjbarron/netapp-chat-component` are documented in this
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-07-23
+
+Agentic-forward layout modes (C7–C8). All additive and **opt-in**: with none of
+the new props used, `ChatAppShell` renders byte-for-byte as `0.2.1`. Component-only
+— no engine, `/chat/*`, or binary changes. See
+[docs/agentic-forward-layout-modes.md](https://github.com/ebarron/netapp-chat-service/blob/main/docs/agentic-forward-layout-modes.md).
+
+### Added
+- **Docked navigation (C7).** `ChatAppShell` gains `navMode?: 'overlay' | 'docked'`
+  (default `'overlay'`) and `navDockedWidth?: number` (default = `navOverlayWidth`,
+  260). In `'docked'`, `renderNavMenu` renders as a persistent left column and no
+  `Drawer` is mounted; the header hamburger's `toggleNav` collapses/expands the
+  column and `navOpened` reflects its expanded/collapsed state. The
+  `ChatAppShellHeaderApi` is unchanged, and in docked mode `openNav` no longer
+  force-closes the column.
+- **Assistant placement (C8a).** `assistantPlacement?: 'start' | 'end'`
+  (default `'start'`) flips the assistant↔canvas flex order. Width, min/max,
+  resize, and persistence are placement-agnostic; the drag separator inverts its
+  direction so it stays natural on either side.
+- **Collapsible assistant (C8b).** `assistantCollapsed` (controlled),
+  `defaultAssistantCollapsed` (uncontrolled), `onAssistantCollapsedChange`, and
+  `persistAssistantCollapsedKey`. Collapsing hides the assistant column via CSS
+  (it does **not** unmount `ChatPanel`, so conversation, mode, and in-flight
+  streams are preserved) and shows a focusable reveal rail
+  (`aria-label="Show assistant"`, `aria-expanded={false}`) on the assistant's
+  side; expanded mode shows a "Hide assistant" affordance.
+
 ## [0.2.1] - 2026-07-22
 
 ### Added
