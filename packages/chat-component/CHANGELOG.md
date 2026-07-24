@@ -4,6 +4,29 @@ All notable changes to `@edjbarron/netapp-chat-component` are documented in this
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-07-24
+
+Docked/full-page shell layout polish. Component-only — no engine, `/chat/*`, or
+binary changes. See
+[docs/agentic-forward-layout-modes.md](https://github.com/ebarron/netapp-chat-service/blob/main/docs/agentic-forward-layout-modes.md).
+
+### Changed
+- **Optional assistant header title (no default).** `ChatPanel` / `ChatAppShell`
+  `title` no longer defaults to `"AI Assistant"`. In the docked and full-page
+  variants the `fullPageHeader` bar (icon + title + optional subtitle) renders
+  **only** when `title` and/or `subtitle` is provided; when neither is set the
+  assistant+canvas region fills the full height with nothing spanning above the
+  canvas. Drawer variant omits the title/icon group when unset but keeps the
+  close button. Hosts that relied on the implicit default must pass `title`
+  explicitly.
+
+### Added
+- **`hideSingleTab`.** Opt-in boolean (default `false`) on `CanvasPanel`,
+  `ChatPanel`, and `ChatAppShell`. When true, the canvas tab strip (`Tabs.List`)
+  is hidden while exactly one tab is open — the tab's panel content still
+  renders — and shown again once there are two or more tabs. Omitting the prop
+  preserves today's always-visible strip.
+
 ## [0.2.2] - 2026-07-23
 
 Agentic-forward layout modes (C7–C8). All additive and **opt-in**: with none of

@@ -9,14 +9,20 @@ describe('ChatPanel', () => {
     vi.clearAllMocks();
   });
 
-  it('renders when opened', () => {
+  it('renders when opened with no default title', () => {
     render(<ChatPanel opened={true} onClose={onClose} />);
-    expect(screen.getByText('AI Assistant')).toBeDefined();
+    expect(screen.queryByText('AI Assistant')).toBeNull();
+    expect(screen.getByLabelText('Send')).toBeDefined();
   });
 
   it('renders custom title', () => {
     render(<ChatPanel opened={true} onClose={onClose} title="NAbox Assistant" />);
     expect(screen.getByText('NAbox Assistant')).toBeDefined();
+  });
+
+  it('renders subtitle when provided without a title', () => {
+    render(<ChatPanel opened={true} onClose={onClose} subtitle="Beta" />);
+    expect(screen.getByText('Beta')).toBeDefined();
   });
 
   it('shows suggested prompts when empty', async () => {
@@ -45,7 +51,8 @@ describe('ChatPanel', () => {
 
   it('does not render content when closed', () => {
     render(<ChatPanel opened={false} onClose={onClose} />);
-    expect(screen.queryByText('AI Assistant')).toBeNull();
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.queryByLabelText('Send')).toBeNull();
   });
 
   it('shows not configured alert when AI is not set up', async () => {
@@ -55,7 +62,7 @@ describe('ChatPanel', () => {
 
     render(<ChatPanel opened={true} onClose={onClose} />, { api });
 
-    expect(screen.getByText('AI Assistant')).toBeDefined();
+    expect(await screen.findByText('AI Not Configured')).toBeDefined();
   });
 
   it('does not render CanvasPanel on narrow viewports (jsdom default width is 0)', () => {

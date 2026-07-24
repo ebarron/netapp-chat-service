@@ -1,10 +1,12 @@
 # Agentic-Forward UI layout modes (C7–C8)
 
-> **Status:** implemented in `@edjbarron/netapp-chat-component` `0.2.2`, additive,
-> opt-in. Every seam below defaults to the prior behavior, so existing consumers
-> are byte-for-byte unaffected until they opt in. **Component-only** — the Go
-> engine, the `/chat/*` HTTP surface, and the `chat-service` binary are not
-> touched.
+> **Status:** implemented in `@edjbarron/netapp-chat-component` `0.3.0`
+> (C7–C8 landed in `0.2.2`; `0.3.0` adds optional header title + `hideSingleTab`).
+> C7–C8 and `hideSingleTab` are additive/opt-in. **Header title is a behavior
+> change:** `title` no longer defaults to `"AI Assistant"` — hosts that want a
+> title bar must pass `title` (and/or `subtitle`) explicitly. **Component-only**
+> — the Go engine, the `/chat/*` HTTP surface, and the `chat-service` binary are
+> not touched.
 >
 > Extends [`agentic-forward-seams.md`](./agentic-forward-seams.md) (C1–C6).
 > Companion host spec: `RTB-Platform/specs/rtb/rtb-108-agentic-shell-layout-control.md`.
@@ -33,9 +35,44 @@ component hosts a hole, not app knowledge* — the component exposes three small
 | C7 | Docked navigation column (vs. overlay) | component | `navMode="docked"` |
 | C8a | Assistant placement (left/right of canvas) | component | `assistantPlacement="end"` |
 | C8b | Collapsible assistant + reveal rail | component | `assistantCollapsed` / `defaultAssistantCollapsed` |
+| — | Hide canvas tab strip when only one tab is open | component | `hideSingleTab` |
 
-All three are independent; any combination is valid. The host's presets are
-just points in this 3-axis space.
+All three C7/C8 seams are independent; any combination is valid. The host's
+presets are just points in this 3-axis space. `hideSingleTab` is orthogonal to
+placement/collapse/nav mode.
+
+---
+
+## Header title (docked / full-page)
+
+`ChatPanel` / `ChatAppShell` `title?: string` is truly optional — **there is no
+default**. In docked and full-page variants the full-width header bar
+(`fullPageHeader`: chatbot icon + title + optional subtitle) renders **only**
+when `title` and/or `subtitle` is provided. When neither is set, the
+assistant+canvas region fills the full height and nothing spans above the
+canvas tabs. Panel controls (mode, bookmarks, settings, clear, hide-assistant)
+live in the assistant column and are unaffected.
+
+Drawer variant: when `title`/`subtitle` are absent the title/icon group is
+omitted, but the Drawer's close button remains.
+
+> **Migration from ≤0.2.x:** hosts that relied on the implicit `"AI Assistant"`
+> default must pass `title` explicitly if they still want a header bar.
+
+---
+
+## Hide single-tab strip (`hideSingleTab`)
+
+```ts
+hideSingleTab?: boolean; // default: false
+```
+
+Threaded `ChatAppShell` → `ChatPanel` → `CanvasPanel`. When `true` and exactly
+one canvas tab is open, the Mantine `Tabs.List` (the tab chrome) is not
+rendered — there is no `[role="tablist"]` — but the tab's `Tabs.Panel` content
+still shows. With two or more tabs the strip appears as usual; dropping back to
+one tab hides it again. Works for the reserved nav tab and engine tabs alike.
+Default `false` preserves today's always-visible strip.
 
 ---
 
@@ -172,10 +209,12 @@ hamburger overlay nav — byte-for-byte identical DOM and behavior.
 
 ### Release
 
-- Component: patch bump `0.2.1` → **`0.2.2`** (additive, optional props only).
-- Consumers pinning `^0.2.0` already satisfy `0.2.2` — no pin change is needed;
-  a lockfile refresh (`npm update @edjbarron/netapp-chat-component`) picks it up,
-  and current behavior is unchanged until the new props are used.
+- Component: minor bump `0.2.2` → **`0.3.0`** (`hideSingleTab` additive;
+  removing the default `"AI Assistant"` title is a behavior change).
+- Consumers on `^0.2.0` will not auto-pick `0.3.0`; bump the pin (or widen the
+  range) and refresh the lockfile. Hosts that want the old title bar must pass
+  `title` explicitly; hosts that want a clean single-tab canvas pass
+  `hideSingleTab`.
 
 ### Test plan (mirrors C1–C6 discipline)
 

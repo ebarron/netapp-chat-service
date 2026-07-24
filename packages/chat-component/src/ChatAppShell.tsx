@@ -77,9 +77,9 @@ export interface ChatAppShellProps {
    * ChatAPIProvider. Omit it if the host already provides one higher up.
    */
   chatAPI?: ChatAPI;
-  /** Assistant title (ChatPanel). Defaults to "AI Assistant". */
+  /** Optional assistant title (ChatPanel). No default — omit for no header bar. */
   title?: string;
-  /** Assistant subtitle badge (ChatPanel). */
+  /** Optional assistant subtitle badge (ChatPanel). */
   subtitle?: string;
   /** Initial chat mode. */
   defaultMode?: ChatMode;
@@ -211,6 +211,11 @@ export interface ChatAppShellProps {
   onAssistantCollapsedChange?: (collapsed: boolean) => void;
   /** Persist collapsed state under this localStorage key (C8b, SSR-safe restore). */
   persistAssistantCollapsedKey?: string;
+  /**
+   * When true, hide the canvas tab strip while exactly one tab is open.
+   * Forwarded to the docked `ChatPanel` / `CanvasPanel`. Defaults to `false`.
+   */
+  hideSingleTab?: boolean;
 }
 
 /**
@@ -264,6 +269,7 @@ export function ChatAppShell({
   defaultAssistantCollapsed,
   onAssistantCollapsedChange,
   persistAssistantCollapsedKey,
+  hideSingleTab,
 }: ChatAppShellProps) {
   const chatRef = useRef<ChatPanelHandle>(null);
   // In docked nav mode the column starts expanded (navOpened=true); in overlay
@@ -426,6 +432,7 @@ export function ChatAppShell({
       defaultAssistantCollapsed={defaultAssistantCollapsed}
       onAssistantCollapsedChange={onAssistantCollapsedChange}
       persistAssistantCollapsedKey={persistAssistantCollapsedKey}
+      hideSingleTab={hideSingleTab}
     />
   );
 

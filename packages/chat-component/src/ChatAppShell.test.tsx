@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { render, screen, waitFor, act } from '../test-utils';
+import { render, screen, waitFor, act, createMockChatAPI } from '../test-utils';
 import userEvent from '@testing-library/user-event';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { ChatAppShell, type ChatAppShellDestination } from './ChatAppShell';
@@ -336,5 +336,68 @@ describe('ChatAppShell C7–C8 layout modes', () => {
     expect((screen.getByPlaceholderText('Type a message...') as HTMLTextAreaElement).value).toBe(
       'draft in flight',
     );
+  });
+});
+
+/** SSE response that opens a canvas tab, used to exercise hideSingleTab with 2 tabs. */
+function makeCanvasSSEResponse(canvas: Record<string, unknown>): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(
+        encoder.encode('event: canvas_open\ndata: ' + JSON.stringify(canvas) + '\n\n'),
+      );
+      controller.enqueue(encoder.encode('event: done\ndata: {"session_id":"s1"}\n\n'));
+      controller.close();
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream' },
+  });
+}
+
+describe('ChatAppShell hideSingleTab', () => {
+  it('hides the strip for the lone reserved nav tab; a second tab reveals it', async () => {
+    const api = createMockChatAPI({
+      stream: vi.fn().mockResolvedValue(
+        makeCanvasSSEResponse({
+          tab_id: 'volume::vol1::',
+          title: 'vol1',
+          kind: 'volume',
+          qualifier: '',
+          content: { type: 'object-detail', kind: 'volume', name: 'vol1', sections: [] },
+        }),
+      ),
+    });
+
+    render(
+      <ChatAppShell
+        chatAPI={api}
+        destinations={DESTS}
+        activeDestinationId="alerting"
+        hideSingleTab
+        renderHeader={() => <div>header</div>}
+        renderNavMenu={() => null}
+        renderDestination={({ destination }) => (
+          <div data-testid="page">{destination.label}</div>
+        )}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByTestId('page').textContent).toBe('Alerting'));
+    // Exactly one reserved nav tab — strip hidden.
+    expect(screen.queryByRole('tablist')).toBeNull();
+    expect(screen.getByTestId('page')).toBeDefined();
+
+    // Open a second (engine) tab via a streamed canvas_open.
+    const input = screen.getByPlaceholderText('Type a message...');
+    await userEvent.type(input, 'show volume');
+    await userEvent.click(screen.getByLabelText('Send'));
+
+    await waitFor(() => {
+      expect(screen.getByRole('tablist')).toBeDefined();
+      expect(screen.getAllByRole('tab')).toHaveLength(2);
+    });
   });
 });

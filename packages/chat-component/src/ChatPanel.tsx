@@ -69,9 +69,13 @@ import classes from './ChatPanel.module.css';
 interface ChatPanelProps {
   opened: boolean;
   onClose: () => void;
-  /** Title displayed in the drawer header. Defaults to "AI Assistant". */
+  /**
+   * Optional title for the docked/full-page header bar or Drawer title.
+   * When omitted (and `subtitle` is also omitted), no header bar is rendered
+   * in docked/full-page variants. There is no default title.
+   */
   title?: string;
-  /** Subtitle badge text. Defaults to none. */
+  /** Optional subtitle badge text. With `title`, forms the header bar when set. */
   subtitle?: string;
   /** Suggested prompts shown when the conversation is empty. */
   suggestedPrompts?: string[];
@@ -172,6 +176,11 @@ interface ChatPanelProps {
    * restore it on mount (SSR-safe: read in an effect).
    */
   persistAssistantCollapsedKey?: string;
+  /**
+   * When true, hide the canvas tab strip while exactly one tab is open.
+   * Forwarded to `CanvasPanel`. Defaults to `false`.
+   */
+  hideSingleTab?: boolean;
 }
 
 /**
@@ -210,7 +219,7 @@ const DEFAULT_SUGGESTED_PROMPTS = [
 export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function ChatPanel({
   opened,
   onClose,
-  title = 'AI Assistant',
+  title,
   subtitle,
   suggestedPrompts = DEFAULT_SUGGESTED_PROMPTS,
   bookmarkPrompts,
@@ -235,6 +244,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
   defaultAssistantCollapsed,
   onAssistantCollapsedChange,
   persistAssistantCollapsedKey,
+  hideSingleTab = false,
 }: ChatPanelProps, ref) {
   const {
     messages,
@@ -714,15 +724,16 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
     document.addEventListener('pointerup', onUp);
   }, [drawerWidth]);
 
-  const headerBar = (
+  const showHeaderBar = Boolean(title || subtitle);
+  const headerBar = showHeaderBar ? (
     <Group gap="xs" className={classes.fullPageHeader}>
       <IconMessageChatbot size={20} />
       <Group align="baseline" gap="xs">
-        <Text fw={600}>{title}</Text>
+        {title && <Text fw={600}>{title}</Text>}
         {subtitle && <Text size="xs" c="red" fw={500}>{subtitle}</Text>}
       </Group>
     </Group>
-  );
+  ) : null;
 
   const chatContent = (
     <>
@@ -963,6 +974,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
             onAction={sendMessage}
             readOnly={mode === 'read-only'}
             onHostTabPortal={onHostTabPortal}
+            hideSingleTab={hideSingleTab}
           />
         )}
         {/* Reveal rail (C8b) — pinned to the assistant's side while collapsed. */}
@@ -1021,14 +1033,17 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
       position="left"
       size={effectiveWidth}
       title={
-        <Group gap="xs">
-          <IconMessageChatbot size={20} />
-          <Group align="baseline" gap="xs">
-            <Text fw={600}>{title}</Text>
-            {subtitle && <Text size="xs" c="red" fw={500}>{subtitle}</Text>}
+        showHeaderBar ? (
+          <Group gap="xs">
+            <IconMessageChatbot size={20} />
+            <Group align="baseline" gap="xs">
+              {title && <Text fw={600}>{title}</Text>}
+              {subtitle && <Text size="xs" c="red" fw={500}>{subtitle}</Text>}
+            </Group>
           </Group>
-        </Group>
+        ) : undefined
       }
+      withCloseButton
       styles={{
         body: { height: 'calc(100% - 60px)', display: 'flex', flexDirection: 'column' },
         content: { overflow: 'visible' },

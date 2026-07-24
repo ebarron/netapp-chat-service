@@ -18,6 +18,12 @@ interface CanvasPanelProps {
    * it only exposes this hole.
    */
   onHostTabPortal?: (tabId: string, el: HTMLElement | null) => void;
+  /**
+   * When true, hide the canvas tab strip (`Tabs.List`) while exactly one tab is
+   * open. The tab's panel content still renders. With two or more tabs the strip
+   * is shown as usual. Defaults to `false` (strip always shown when ≥1 tab).
+   */
+  hideSingleTab?: boolean;
 }
 
 export function CanvasPanel({
@@ -28,6 +34,7 @@ export function CanvasPanel({
   onAction,
   readOnly,
   onHostTabPortal,
+  hideSingleTab = false,
 }: CanvasPanelProps) {
   if (tabs.length === 0) return null;
 
@@ -35,6 +42,8 @@ export function CanvasPanel({
   const uniqueTabs = tabs.filter(
     (tab, i, arr) => arr.findIndex((t) => t.tabId === tab.tabId) === i,
   );
+
+  const showTabList = !(hideSingleTab && uniqueTabs.length === 1);
 
   return (
     <div className={classes.canvasRegion}>
@@ -44,37 +53,39 @@ export function CanvasPanel({
         variant="outline"
         classNames={{ root: classes.canvasTabs }}
       >
-        <Tabs.List>
-          {uniqueTabs.map((tab) => (
-            <Tabs.Tab
-              key={tab.tabId}
-              value={tab.tabId}
-              rightSection={
-                <CloseButton
-                  component="span"
-                  role="button"
-                  tabIndex={0}
-                  size="xs"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onTabClose(tab.tabId);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key !== 'Enter' && e.key !== ' ') return;
-                    e.preventDefault();
-                    e.stopPropagation();
-                    onTabClose(tab.tabId);
-                  }}
-                  aria-label={`Close ${tab.title}`}
-                />
-              }
-            >
-              <Text size="xs" truncate maw={120}>
-                {tab.title}
-              </Text>
-            </Tabs.Tab>
-          ))}
-        </Tabs.List>
+        {showTabList && (
+          <Tabs.List>
+            {uniqueTabs.map((tab) => (
+              <Tabs.Tab
+                key={tab.tabId}
+                value={tab.tabId}
+                rightSection={
+                  <CloseButton
+                    component="span"
+                    role="button"
+                    tabIndex={0}
+                    size="xs"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onTabClose(tab.tabId);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key !== 'Enter' && e.key !== ' ') return;
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onTabClose(tab.tabId);
+                    }}
+                    aria-label={`Close ${tab.title}`}
+                  />
+                }
+              >
+                <Text size="xs" truncate maw={120}>
+                  {tab.title}
+                </Text>
+              </Tabs.Tab>
+            ))}
+          </Tabs.List>
+        )}
 
         {uniqueTabs.map((tab) =>
           tab.host ? (

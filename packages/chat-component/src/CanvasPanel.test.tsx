@@ -199,4 +199,50 @@ describe('CanvasPanel', () => {
     );
     expect(mountSpy).toHaveBeenCalledTimes(2);
   });
+
+  describe('hideSingleTab', () => {
+    it('default (prop off) + 1 tab still shows the tablist', () => {
+      render(
+        <CanvasPanel
+          tabs={[volumeTab]}
+          activeTab={volumeTab.tabId}
+          onTabChange={onTabChange}
+          onTabClose={onTabClose}
+        />,
+      );
+      expect(screen.getByRole('tablist')).toBeDefined();
+      expect(screen.getByRole('tab', { name: /vol1/i })).toBeDefined();
+      expect(screen.getByTestId('object-detail')).toBeDefined();
+    });
+
+    it('hides the tablist with exactly one tab but still shows content', () => {
+      render(
+        <CanvasPanel
+          tabs={[volumeTab]}
+          activeTab={volumeTab.tabId}
+          onTabChange={onTabChange}
+          onTabClose={onTabClose}
+          hideSingleTab
+        />,
+      );
+      expect(screen.queryByRole('tablist')).toBeNull();
+      expect(screen.queryByRole('tab')).toBeNull();
+      expect(screen.getByTestId('object-detail')).toBeDefined();
+    });
+
+    it('shows the tablist once two tabs are open', () => {
+      render(
+        <CanvasPanel
+          tabs={[volumeTab, clusterTab]}
+          activeTab={volumeTab.tabId}
+          onTabChange={onTabChange}
+          onTabClose={onTabClose}
+          hideSingleTab
+        />,
+      );
+      expect(screen.getByRole('tablist')).toBeDefined();
+      expect(screen.getByRole('tab', { name: /vol1/i })).toBeDefined();
+      expect(screen.getByRole('tab', { name: /cls1/i })).toBeDefined();
+    });
+  });
 });
