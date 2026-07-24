@@ -4,6 +4,17 @@ All notable changes to `@edjbarron/netapp-chat-component` are documented in this
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-07-24
+
+### Fixed
+- **Ordinary fenced code blocks render as real code boxes.** `MessageBubble`'s
+  markdown `code` handler previously stripped `<pre>` and fell through to inline
+  `<code>` for every fence that wasn't a dashboard/object-detail/chart/JSON
+  auto-detect, which collapsed newlines in CLI/how-to content (e.g. ` ```bash `).
+  Non-special fences (and any multi-line code) now render via a new `CodeBlock`
+  (Mantine `Code` block + `CopyButton`). Special-case chart/dashboard/JSON
+  handling and the `pre` pass-through are unchanged.
+
 ## [0.3.0] - 2026-07-24
 
 Docked/full-page shell layout polish. Component-only — no engine, `/chat/*`, or

@@ -7,12 +7,14 @@
  * structured JSON via the AutoJsonBlock generic fallback.
  */
 import { render, screen } from '../test-utils';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import userEvent from '@testing-library/user-event';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { wrapInlineChartJson, sanitizeJson } from './inlineChartDetector';
 import { ChartBlock, DashboardBlock, ObjectDetailBlock, AutoJsonBlock } from './charts';
 import { parseChart, parseObjectDetail } from './charts/chartTypes';
+import { CodeBlock } from './CodeBlock';
 
 /**
  * Renders content through the same pipeline as MessageBubble:
@@ -51,6 +53,15 @@ function renderAssistantMessage(rawContent: string) {
               return <AutoJsonBlock json={content} />;
             }
           } catch { /* not valid JSON */ }
+          const isBlock =
+            (typeof className === 'string' && className.startsWith('language-')) ||
+            content.includes('\n');
+          if (isBlock) {
+            const language = className?.startsWith('language-')
+              ? className.slice('language-'.length)
+              : undefined;
+            return <CodeBlock code={content} language={language} />;
+          }
           return <code className={className} {...props}>{children}</code>;
         },
         pre: ({ children }: React.HTMLAttributes<HTMLPreElement>) => <>{children}</>,
@@ -343,5 +354,63 @@ Click "Provision" to create the volume.`;
 
     // List items should render
     expect(screen.getByText(/87% free capacity/)).toBeDefined();
+  });
+});
+
+describe('MessageBubble ordinary fenced code blocks', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('renders a multi-line ```bash fence as a block with preserved newlines and a copy button', () => {
+    const md = ['Run these commands:', '', '```bash', 'volume show', 'cluster show', '```'].join('\n');
+    renderAssistantMessage(md);
+
+    const pre = document.querySelector('pre');
+    expect(pre).not.toBeNull();
+    expect(pre!.textContent).toContain('volume show\ncluster show');
+    expect(screen.getByRole('button', { name: 'Copy code' })).toBeDefined();
+  });
+
+  it('copies the exact raw code when the copy button is clicked', async () => {
+    const code = 'volume show -vserver vs1\ncluster show';
+    const md = ['```bash', code, '```'].join('\n');
+    renderAssistantMessage(md);
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Copy code' }));
+    expect(await navigator.clipboard.readText()).toBe(code);
+  });
+
+  it('keeps inline `code` as inline <code> without a copy button or <pre>', () => {
+    renderAssistantMessage('Use the `volume show` command.');
+    const inline = screen.getByText('volume show');
+    expect(inline.tagName).toBe('CODE');
+    expect(inline.closest('pre')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Copy code' })).toBeNull();
+  });
+
+  it('still renders a ```dashboard fence as DashboardBlock (not wrapped in <pre>)', () => {
+    const dashboard = {
+      title: 'Fleet Overview',
+      panels: [{ type: 'stat', title: 'Clusters', value: '3', width: 'half' }],
+    };
+    const md = ['```dashboard', JSON.stringify(dashboard), '```'].join('\n');
+    renderAssistantMessage(md);
+
+    expect(screen.getByText('Fleet Overview')).toBeDefined();
+    expect(screen.getByText('Clusters')).toBeDefined();
+    // Dashboard is edge-to-edge — no CodeBlock <pre> wrapping the dashboard region.
+    const region = screen.getByRole('region', { name: 'Fleet Overview' });
+    expect(region.closest('pre')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Copy code' })).toBeNull();
+  });
+
+  it('renders a single-line ```bash fence (language- class) as a block', () => {
+    renderAssistantMessage('```bash\nvolume show\n```');
+    const pre = document.querySelector('pre');
+    expect(pre).not.toBeNull();
+    expect(pre!.textContent).toContain('volume show');
+    expect(screen.getByRole('button', { name: 'Copy code' })).toBeDefined();
   });
 });

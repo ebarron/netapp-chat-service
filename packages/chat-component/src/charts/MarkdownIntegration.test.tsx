@@ -9,6 +9,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ChartBlock } from './ChartBlock';
 import { DashboardBlock } from './DashboardBlock';
+import { CodeBlock } from '../CodeBlock';
 
 /**
  * A standalone test wrapper that replicates the ReactMarkdown components config
@@ -27,6 +28,15 @@ function MarkdownWithCharts({ content }: { content: string }) {
           }
           if (className === 'language-chart') {
             return <ChartBlock json={text} />;
+          }
+          const isBlock =
+            (typeof className === 'string' && className.startsWith('language-')) ||
+            text.includes('\n');
+          if (isBlock) {
+            const language = className?.startsWith('language-')
+              ? className.slice('language-'.length)
+              : undefined;
+            return <CodeBlock code={text} language={language} />;
           }
           return <code className={className} {...props}>{children}</code>;
         },
@@ -61,7 +71,7 @@ describe('Markdown chart integration', () => {
     expect(screen.getByText('That is the summary.')).toBeDefined();
   });
 
-  it('renders a ```dashboard code fence as a dashboard block', () => {
+  it('renders a ```dashboard fence as DashboardBlock edge-to-edge (no outer <pre>)', () => {
     const dashboard = {
       title: 'Morning Report',
       panels: [
@@ -82,9 +92,11 @@ describe('Markdown chart integration', () => {
     expect(screen.getByText('Clusters')).toBeDefined();
     expect(screen.getByText('Volumes')).toBeDefined();
     expect(screen.getByText('Good morning! Here is your summary:')).toBeDefined();
+    const region = screen.getByRole('region', { name: 'Morning Report' });
+    expect(region.closest('pre')).toBeNull();
   });
 
-  it('falls back to plain code for unknown languages', () => {
+  it('renders ordinary ```json fences as a CodeBlock (preserved whitespace + copy)', () => {
     const md = [
       '```json',
       '{"key": "value"}',
@@ -93,6 +105,8 @@ describe('Markdown chart integration', () => {
 
     render(<MarkdownWithCharts content={md} />);
     expect(screen.getByText('{"key": "value"}')).toBeDefined();
+    expect(document.querySelector('pre')).not.toBeNull();
+    expect(screen.getByRole('button', { name: 'Copy code' })).toBeDefined();
   });
 
   it('falls back to code block for invalid chart JSON', () => {

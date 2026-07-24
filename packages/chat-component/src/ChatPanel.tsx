@@ -46,6 +46,7 @@ import {
   type CanvasTabSummary,
   type HostCanvasTabInput,
 } from './useChatPanel';
+import { CodeBlock } from './CodeBlock';
 import { ModeToggle } from './ModeToggle';
 import { CapabilityControls } from './CapabilityControls';
 import { BookmarkPrompts } from './BookmarkPrompts';
@@ -1126,10 +1127,22 @@ function MessageBubble({ message, onAction, readOnly, isStreaming }: MessageBubb
             } catch {
               // Not valid JSON — fall through to raw code rendering.
             }
+            // Ordinary fenced blocks (```bash, ```text, plain ```) and any multi-line
+            // code → block CodeBlock. Single-backtick inline code stays inline.
+            const isBlock =
+              (typeof className === 'string' && className.startsWith('language-')) ||
+              content.includes('\n');
+            if (isBlock) {
+              const language = className?.startsWith('language-')
+                ? className.slice('language-'.length)
+                : undefined;
+              return <CodeBlock code={content} language={language} />;
+            }
             return <code className={className} {...props}>{children}</code>;
           },
           pre: ({ children }: React.HTMLAttributes<HTMLPreElement>) => {
-            // Strip the <pre> wrapper for dashboard/chart blocks so they render edge-to-edge.
+            // Strip the <pre> wrapper for dashboard/chart/CodeBlock so they render
+            // edge-to-edge without a double <pre>.
             return <>{children}</>;
           },
         }}
