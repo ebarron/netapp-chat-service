@@ -21,6 +21,8 @@ For a high-level overview of what the package is and why, see the
   - [C6 — Navigation by prompt](#c6--navigation-by-prompt)
 - [The docked assistant/canvas split](#the-docked-assistantcanvas-split)
 - [Layout modes (C7–C8)](#layout-modes-c7c8)
+- [Optional assistant header](#optional-assistant-header)
+- [Hiding the single-tab strip](#hiding-the-single-tab-strip)
 - [Auth headers and credentials](#auth-headers-and-credentials)
 - [`ChatAppShell` prop reference](#chatappshell-prop-reference)
 - [Exports](#exports)
@@ -369,6 +371,50 @@ side; expanded mode shows a "Hide assistant" affordance.
 
 ---
 
+## Optional assistant header
+
+`ChatPanel` and `ChatAppShell` do not provide a default assistant title. In
+`docked` and full-page layouts, the full-width assistant header bar renders only
+when `title` and/or `subtitle` is provided:
+
+```tsx
+// No assistant header bar; the assistant + canvas use the full body height.
+<ChatAppShell {...shellProps} />
+
+// Render the assistant header bar.
+<ChatAppShell {...shellProps} title="Planning Assistant" subtitle="Beta" />
+```
+
+The mode, bookmarks, capabilities/settings, clear, and hide-assistant controls
+remain in the assistant column and are unaffected when the header bar is absent.
+The drawer variant also omits its title/icon group when both values are absent,
+while retaining the drawer close button.
+
+> **Migration from 0.2.x:** `title` previously defaulted to `"AI Assistant"`.
+> Pass `title="AI Assistant"` explicitly if you want to preserve that header.
+
+---
+
+## Hiding the single-tab strip
+
+Set `hideSingleTab` to remove the canvas tab chrome while exactly one tab is
+open. The tab content remains visible. The strip appears automatically when a
+second tab opens and hides again after the tab count returns to one.
+
+```tsx
+<ChatAppShell
+  hideSingleTab
+  // ...existing shell props
+/>
+```
+
+This works for either a reserved host navigation tab or an engine-created tab.
+The default is `false`, so omitting the prop preserves the always-visible tab
+strip whenever at least one tab is open. The prop is available directly on
+`CanvasPanel` and `ChatPanel` as well as `ChatAppShell`.
+
+---
+
 ## Auth headers and credentials
 
 `createChatAPI` accepts custom `headers` and a `credentials` mode that are applied
@@ -407,7 +453,12 @@ Routing stays host-side.
 
 **Chat wiring** (forwarded to the docked `ChatPanel`): `chatAPI`, `title`,
 `subtitle`, `defaultMode`, `suggestedPrompts`, `bookmarkPrompts`, `pendingPrompt`,
-`onPromptConsumed`, `onBusyChange`, `onCanvasEvent`.
+`onPromptConsumed`, `onBusyChange`, `onCanvasEvent`, `hideSingleTab`.
+
+`title` has no default. When both `title` and `subtitle` are omitted, the docked
+assistant header bar is not rendered. `hideSingleTab` defaults to `false`; when
+enabled, it hides the canvas tab strip while exactly one tab is open without
+hiding that tab's content.
 
 **Header / layout**: `headerHeight` (default 60), `style`.
 
