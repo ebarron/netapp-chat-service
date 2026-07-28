@@ -18,7 +18,8 @@ import type {
   CanvasTabSummary,
   ChatMode,
 } from './useChatPanel';
-
+import { useViewportWide } from './useViewportWide';
+import { MobileRegionSwitch, type MobileRegion } from './MobileRegionSwitch';
 /**
  * A navigation destination the shell can open in the reserved nav canvas tab.
  * `id` is a stable identifier; `label` is the tab title; `route` is an opaque,
@@ -216,7 +217,42 @@ export interface ChatAppShellProps {
    * Forwarded to the docked `ChatPanel` / `CanvasPanel`. Defaults to `false`.
    */
   hideSingleTab?: boolean;
+
+  // --- Mobile layout (opt-in; default off = 0.3.1 byte-for-byte) ---
+  /**
+   * Enables the built-in single-column mobile layout below `mobileBreakpoint`.
+   * Default `false` — with this off, today's 0.3.1 narrow behavior (remove the
+   * canvas; engine canvases inline in chat) is preserved byte-for-byte.
+   */
+  mobileLayout?: boolean;
+  /**
+   * Viewport width (px) at/below which the mobile layout applies. Default: 1024.
+   * Only consulted when `mobileLayout` is on.
+   */
+  mobileBreakpoint?: number;
+  /**
+   * Which region is shown first when entering mobile: `'canvas'` (host page /
+   * canvas — default) or `'assistant'`.
+   */
+  mobileDefaultRegion?: 'canvas' | 'assistant';
+  /**
+   * Style of the page↔assistant switch. MVP default `'bottom-tab'` (2-item
+   * "Page · Assistant" bar). `'toggle'` is a single shell-owned button.
+   */
+  mobileRegionSwitch?: 'bottom-tab' | 'toggle';
+  /** Controlled active mobile region. */
+  mobileRegion?: 'canvas' | 'assistant';
+  /** Uncontrolled initial mobile region (falls back to `mobileDefaultRegion`). */
+  defaultMobileRegion?: 'canvas' | 'assistant';
+  /** Fired whenever the active mobile region changes. */
+  onMobileRegionChange?: (region: 'canvas' | 'assistant') => void;
+  /**
+   * Persist the active mobile region under this localStorage key (SSR-safe
+   * restore in an effect). Omit for ephemeral, default-region-on-load behavior.
+   */
+  persistMobileRegionKey?: string;
 }
+
 
 /**
  * ChatAppShell is a GENERIC, opt-in "AI-forward" workspace shell (C1–C6):
@@ -270,14 +306,75 @@ export function ChatAppShell({
   onAssistantCollapsedChange,
   persistAssistantCollapsedKey,
   hideSingleTab,
+  mobileLayout = false,
+  mobileBreakpoint = 1024,
+  mobileDefaultRegion = 'canvas',
+  mobileRegionSwitch = 'bottom-tab',
+  mobileRegion: mobileRegionProp,
+  defaultMobileRegion,
+  onMobileRegionChange,
+  persistMobileRegionKey,
 }: ChatAppShellProps) {
   const chatRef = useRef<ChatPanelHandle>(null);
+  // Reactive breakpoint only when mobileLayout is on (SSR-safe → defaults wide).
+  const isWide = useViewportWide(mobileBreakpoint, mobileLayout);
+  const mobileActive = mobileLayout && !isWide;
+  // Force overlay nav on mobile regardless of desktop navMode.
+  const effectiveNavMode = mobileActive ? 'overlay' : navMode;
+
   // In docked nav mode the column starts expanded (navOpened=true); in overlay
-  // mode the Drawer starts closed (navOpened=false) exactly as before.
-  const [navOpened, { toggle: toggleNav, close: closeNav }] = useDisclosure(navMode === 'docked');
+  // mode the Drawer starts closed (navOpened=false) exactly as before. When
+  // mobileLayout is on and the first paint is already narrow, start closed so
+  // the forced overlay Drawer does not pop open.
+  const initialNavOpen = (() => {
+    if (navMode !== 'docked') return false;
+    if (!mobileLayout || typeof window === 'undefined') return true;
+    if (typeof window.matchMedia === 'function') {
+      return window.matchMedia(`(min-width: ${mobileBreakpoint}px)`).matches;
+    }
+    return window.innerWidth >= mobileBreakpoint;
+  })();
+  const [navOpened, { toggle: toggleNav, close: closeNav }] = useDisclosure(initialNavOpen);
   const [portalEl, setPortalEl] = useState<HTMLElement | null>(null);
   const navDockedWidthResolved = navDockedWidth ?? navOverlayWidth;
 
+  // Mobile region (controlled / uncontrolled + persistence), mirroring C8b.
+  const isRegionControlled = mobileRegionProp !== undefined;
+  const [uncontrolledRegion, setUncontrolledRegion] = useState<MobileRegion>(
+    defaultMobileRegion ?? mobileDefaultRegion,
+  );
+  const mobileRegion: MobileRegion = isRegionControlled
+    ? mobileRegionProp!
+    : uncontrolledRegion;
+
+  useEffect(() => {
+    if (isRegionControlled || !persistMobileRegionKey) return;
+    try {
+      const stored = localStorage.getItem(persistMobileRegionKey);
+      if (stored === 'canvas' || stored === 'assistant') {
+        setUncontrolledRegion(stored);
+      }
+    } catch {
+      // SSR / private mode — ignore.
+    }
+  }, [persistMobileRegionKey, isRegionControlled]);
+
+  const setMobileRegion = useCallback(
+    (next: MobileRegion) => {
+      if (!isRegionControlled) {
+        setUncontrolledRegion(next);
+      }
+      if (persistMobileRegionKey) {
+        try {
+          localStorage.setItem(persistMobileRegionKey, next);
+        } catch {
+          // Private mode / quota — ignore.
+        }
+      }
+      onMobileRegionChange?.(next);
+    },
+    [isRegionControlled, persistMobileRegionKey, onMobileRegionChange],
+  );
   // The id currently shown in the reserved nav tab (null = closed/greeting).
   // Kept as BOTH state (so the portal re-renders the right page) and a ref (so
   // the URL-sync effect can guard without depending on it).
@@ -332,18 +429,19 @@ export function ChatAppShell({
 
   // openNav is shared by hamburger clicks and the engine's open_nav event so
   // both take the exact same path: open/replace the tab, ask the host to sync
-  // the URL, and close the overlay.
+  // the URL, and close the overlay. On mobile, also surface the page/canvas region.
   const openNav = useCallback(
     (idOrRoute: string) => {
       const dest = resolve(idOrRoute);
       if (!dest) return;
       openDestinationTab(dest);
       onActiveChangeRef.current?.(dest);
-      // Overlay mode closes the Drawer after a selection (as before). In docked
-      // mode the persistent column stays put — there is nothing to close.
-      if (navMode === 'overlay') closeNav();
+      if (mobileActive) setMobileRegion('canvas');
+      // Overlay mode (including forced-mobile overlay) closes the Drawer after a
+      // selection. In desktop docked mode the persistent column stays put.
+      if (effectiveNavMode === 'overlay') closeNav();
     },
-    [resolve, openDestinationTab, closeNav, navMode],
+    [resolve, openDestinationTab, closeNav, effectiveNavMode, mobileActive, setMobileRegion],
   );
 
   const publishSummary = useCallback(
@@ -384,6 +482,8 @@ export function ChatAppShell({
   // URL sync (host-URL-changed → set active). Depends ONLY on
   // `activeDestinationId`, so a manual tab close (which doesn't change it) does
   // not retrigger an auto-reopen — the same guarantee the reference consumer had.
+  // Does NOT force the mobile region — only openNav (user/hamburger/engine) does,
+  // so mobileDefaultRegion / persistMobileRegionKey survive initial deep-links.
   useEffect(() => {
     if (!activeDestinationId) return;
     if (openedDestIdRef.current === activeDestinationId) return;
@@ -433,6 +533,9 @@ export function ChatAppShell({
       onAssistantCollapsedChange={onAssistantCollapsedChange}
       persistAssistantCollapsedKey={persistAssistantCollapsedKey}
       hideSingleTab={hideSingleTab}
+      mobileLayout={mobileLayout}
+      mobileBreakpoint={mobileBreakpoint}
+      mobileRegion={mobileRegion}
     />
   );
 
@@ -444,9 +547,49 @@ export function ChatAppShell({
         )
       : null;
 
-  const body =
-    navMode === 'docked' ? (
-      // C7 — persistent nav column (left) · assistant/canvas area. No Drawer.
+  const regionSwitchEl = (
+    <MobileRegionSwitch
+      region={mobileRegion}
+      onChange={setMobileRegion}
+      variant={mobileRegionSwitch}
+    />
+  );
+
+  const overlayNavDrawer = (
+    <Drawer
+      opened={navOpened}
+      onClose={closeNav}
+      position="left"
+      size={navOverlayWidth}
+      withCloseButton
+      title={navOverlayTitle}
+      styles={{ body: { padding: 0, height: `calc(100% - ${headerHeight}px)` } }}
+    >
+      {renderNavMenu(navApi)}
+    </Drawer>
+  );
+
+  // When mobileLayout is off, preserve the 0.3.1 DOM structure byte-for-byte.
+  // Mobile layout only rearranges below the breakpoint.
+  let body: ReactNode;
+  if (mobileActive) {
+    body = (
+      <Box
+        style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'column' }}
+        data-testid="mobile-shell-body"
+      >
+        {mobileRegionSwitch === 'toggle' ? regionSwitchEl : null}
+        <Box style={{ flex: 1, minHeight: 0, position: 'relative' }}>
+          {chatPanelEl}
+          {portalNode}
+        </Box>
+        {mobileRegionSwitch === 'bottom-tab' ? regionSwitchEl : null}
+        {overlayNavDrawer}
+      </Box>
+    );
+  } else if (navMode === 'docked') {
+    // C7 — persistent nav column (left) · assistant/canvas area. No Drawer.
+    body = (
       <Box
         style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'row' }}
       >
@@ -470,8 +613,10 @@ export function ChatAppShell({
           {portalNode}
         </Box>
       </Box>
-    ) : (
-      // Body: docked assistant (left) + canvas (right), nav overlay on top.
+    );
+  } else {
+    // Body: docked assistant (left) + canvas (right), nav overlay on top.
+    body = (
       <Box style={{ flex: 1, minHeight: 0, position: 'relative' }}>
         {chatPanelEl}
 
@@ -479,19 +624,10 @@ export function ChatAppShell({
         {portalNode}
 
         {/* Hamburger-driven navigation overlay (host supplies the menu tree). */}
-        <Drawer
-          opened={navOpened}
-          onClose={closeNav}
-          position="left"
-          size={navOverlayWidth}
-          withCloseButton
-          title={navOverlayTitle}
-          styles={{ body: { padding: 0, height: `calc(100% - ${headerHeight}px)` } }}
-        >
-          {renderNavMenu(navApi)}
-        </Drawer>
+        {overlayNavDrawer}
       </Box>
     );
+  }
 
   const shell = (
     <Box style={{ display: 'flex', flexDirection: 'column', height: '100vh', ...style }}>

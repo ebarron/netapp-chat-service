@@ -23,6 +23,7 @@ For a high-level overview of what the package is and why, see the
 - [Layout modes (C7–C8)](#layout-modes-c7c8)
 - [Optional assistant header](#optional-assistant-header)
 - [Hiding the single-tab strip](#hiding-the-single-tab-strip)
+- [Mobile layout](#mobile-layout)
 - [Auth headers and credentials](#auth-headers-and-credentials)
 - [`ChatAppShell` prop reference](#chatappshell-prop-reference)
 - [Exports](#exports)
@@ -415,6 +416,39 @@ strip whenever at least one tab is open. The prop is available directly on
 
 ---
 
+## Mobile layout
+
+`ChatAppShell` has **no responsive behavior by default** — below 1024px the
+canvas (and any host-portal pages in it) is removed, matching `0.3.1`. Opt in
+with `mobileLayout` to get a built-in single-column phone layout:
+
+```tsx
+<ChatAppShell
+  mobileLayout
+  mobileBreakpoint={1024}          // default
+  mobileDefaultRegion="canvas"     // show the host page first
+  mobileRegionSwitch="bottom-tab"  // "Page · Assistant" bar (default)
+  persistMobileRegionKey="host.mobileRegion"
+  // ...existing shell props
+/>
+```
+
+Below the breakpoint:
+
+- The **host-portal mount stays mounted** (inactive region is CSS-hidden, never
+  unmounted — conversation, page state, and in-flight SSE survive).
+- Nav is forced to a burger-driven overlay `Drawer` (existing header hamburger).
+- A **"Page · Assistant" bottom-tab bar** switches the visible region
+  (`mobileRegionSwitch="toggle"` is an alternative).
+- The assistant is full-width; placement/resize/collapse props are inert.
+- Engine-emitted canvases still inline in the chat transcript when narrow
+  (unchanged from `0.3.1`); the persistent canvas region is for host pages.
+
+With `mobileLayout` omitted, behavior is byte-for-byte `0.3.1`. Full reference:
+[docs/mobile-layout.md](https://github.com/ebarron/netapp-chat-service/blob/main/docs/mobile-layout.md).
+
+---
+
 ## Auth headers and credentials
 
 `createChatAPI` accepts custom `headers` and a `credentials` mode that are applied
@@ -460,6 +494,11 @@ assistant header bar is not rendered. `hideSingleTab` defaults to `false`; when
 enabled, it hides the canvas tab strip while exactly one tab is open without
 hiding that tab's content.
 
+**Mobile layout** (opt-in): `mobileLayout`, `mobileBreakpoint`,
+`mobileDefaultRegion`, `mobileRegionSwitch`, `mobileRegion`,
+`defaultMobileRegion`, `onMobileRegionChange`, `persistMobileRegionKey`. See
+[Mobile layout](#mobile-layout).
+
 **Header / layout**: `headerHeight` (default 60), `style`.
 
 **Navigation**: `navOverlayTitle` (default "Navigation"), `navOverlayWidth`
@@ -503,4 +542,5 @@ configuration, and deployment.
 
 - [Agentic-forward UI seams (C1–C6)](https://github.com/ebarron/netapp-chat-service/blob/main/docs/agentic-forward-seams.md)
 - [Agentic-forward layout modes (C7–C8)](https://github.com/ebarron/netapp-chat-service/blob/main/docs/agentic-forward-layout-modes.md)
+- [Mobile layout](https://github.com/ebarron/netapp-chat-service/blob/main/docs/mobile-layout.md)
 - [CHANGELOG](./CHANGELOG.md)

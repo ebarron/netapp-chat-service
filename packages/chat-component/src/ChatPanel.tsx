@@ -65,6 +65,7 @@ import {
   resolveAssistantWidthPx,
   resolveDefaultAssistantWidth,
 } from './assistantSplit';
+import { useViewportWide } from './useViewportWide';
 import classes from './ChatPanel.module.css';
 
 interface ChatPanelProps {
@@ -182,6 +183,22 @@ interface ChatPanelProps {
    * Forwarded to `CanvasPanel`. Defaults to `false`.
    */
   hideSingleTab?: boolean;
+  /**
+   * Enables the built-in single-column mobile layout path in this panel
+   * (reactive breakpoint + keep host-portal canvas mounted when narrow).
+   * Default `false` — legacy one-shot `innerWidth < 1024` gate is unchanged.
+   */
+  mobileLayout?: boolean;
+  /**
+   * Viewport width (px) at/below which mobile layout applies. Default `1024`.
+   * Only consulted when `mobileLayout` is on.
+   */
+  mobileBreakpoint?: number;
+  /**
+   * Which region is visible when mobile layout is active (narrow). Controlled
+   * by the shell; unused when `mobileLayout` is off or the viewport is wide.
+   */
+  mobileRegion?: 'canvas' | 'assistant';
 }
 
 /**
@@ -246,6 +263,9 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
   onAssistantCollapsedChange,
   persistAssistantCollapsedKey,
   hideSingleTab = false,
+  mobileLayout = false,
+  mobileBreakpoint = 1024,
+  mobileRegion = 'canvas',
 }: ChatPanelProps, ref) {
   const {
     messages,
@@ -379,10 +399,18 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
 
   const dragging = useRef(false);
 
-  // Canvas active when tabs exist and viewport is wide enough.
-  const isNarrow = typeof window !== 'undefined' && window.innerWidth < 1024;
-  const hasCanvas = canvasTabs.length > 0 && !isNarrow;
-  const effectiveWidth = hasCanvas
+  // Legacy one-shot gate (0.3.1 byte-for-byte when mobileLayout is off).
+  // Intentionally NOT reactive — do not replace for non-adopters.
+  const legacyNarrow = typeof window !== 'undefined' && window.innerWidth < 1024;
+  // Reactive breakpoint only when mobileLayout is on.
+  const isWide = useViewportWide(mobileBreakpoint, mobileLayout);
+  const mobileActive = mobileLayout && !isWide;
+  // When mobileLayout is on, keep the host-portal canvas region mounted at all
+  // widths (the central mobile fix). When off, preserve today's remove-on-narrow.
+  const hasCanvas = mobileLayout
+    ? canvasTabs.length > 0 || mobileActive
+    : canvasTabs.length > 0 && !legacyNarrow;
+  const effectiveWidth = hasCanvas && !mobileActive
     ? Math.max(drawerWidth * 2.5, typeof window !== 'undefined' ? window.innerWidth * 0.8 : 1200)
     : drawerWidth;
 
@@ -444,7 +472,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
   );
 
   const showAssistantSplitHandle =
-    resizableAssistant && hasCanvas && assistantSizingActive && !collapsed;
+    resizableAssistant && hasCanvas && assistantSizingActive && !collapsed && !mobileActive;
 
   const splitRowRef = useRef<HTMLDivElement>(null);
   const assistantPanelRef = useRef<HTMLDivElement>(null);
@@ -474,7 +502,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
   ]);
 
   const splitRowStyle = useMemo((): CSSProperties | undefined => {
-    if (!assistantSizingActive || !hasCanvas) return undefined;
+    if (mobileActive || !assistantSizingActive || !hasCanvas) return undefined;
     const style: CSSProperties & Record<string, string> = {};
     if (assistantWidthCss) {
       style['--chat-assistant-width'] = assistantWidthCss;
@@ -486,7 +514,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
       style['--chat-assistant-max-width'] = `${assistantMaxWidth}px`;
     }
     return Object.keys(style).length > 0 ? style : undefined;
-  }, [assistantSizingActive, hasCanvas, assistantWidthCss, assistantMinWidth, assistantMaxWidth]);
+  }, [mobileActive, assistantSizingActive, hasCanvas, assistantWidthCss, assistantMinWidth, assistantMaxWidth]);
 
   const getSplitContainerWidth = useCallback(() => {
     return splitRowRef.current?.getBoundingClientRect().width ?? 0;
@@ -742,17 +770,21 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
         ref={splitRowRef}
         className={[
           hasCanvas ? classes.drawerBody : classes.panelWrapper,
-          assistantSizingActive && hasCanvas ? classes.assistantSized : '',
-          placementEnd ? classes.assistantPlacementEnd : '',
-          collapsibleActive && collapsed ? classes.assistantCollapsed : '',
+          assistantSizingActive && hasCanvas && !mobileActive ? classes.assistantSized : '',
+          placementEnd && !mobileActive ? classes.assistantPlacementEnd : '',
+          collapsibleActive && collapsed && !mobileActive ? classes.assistantCollapsed : '',
+          mobileActive ? classes.mobileLayout : '',
+          mobileActive && mobileRegion === 'canvas' ? classes.mobileRegionCanvas : '',
+          mobileActive && mobileRegion === 'assistant' ? classes.mobileRegionAssistant : '',
         ]
           .filter(Boolean)
           .join(' ')}
         style={splitRowStyle}
+        data-mobile-region={mobileActive ? mobileRegion : undefined}
       >
         <div ref={assistantPanelRef} className={classes.panel}>
-        {/* Collapse affordance (C8b) — only when the host opts into collapse. */}
-        {collapsibleActive && (
+        {/* Collapse affordance (C8b) — only when the host opts into collapse (wide only). */}
+        {collapsibleActive && !mobileActive && (
           <div
             className={classes.assistantCollapseHeader}
             style={{ justifyContent: placementEnd ? 'flex-start' : 'flex-end' }}
@@ -774,14 +806,20 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
         {/* Mode toggle + Capability controls */}
         {configured && (
           <>
-            <Group justify="space-between" px="xs">
+            <Group
+              justify="space-between"
+              px="xs"
+              wrap="wrap"
+              gap="xs"
+              className={mobileActive ? classes.mobileControls : undefined}
+            >
               <ModeToggle
                 mode={mode}
                 onChange={setMode}
                 timeLeft={modeTimeLeft}
                 disabled={!configured}
               />
-              <Group gap={4}>
+              <Group gap={4} wrap="wrap">
                 {bookmarkPrompts && bookmarkPrompts.length > 0 && (
                   <BookmarkPrompts
                     bookmarks={bookmarkPrompts}
@@ -965,21 +1003,29 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
             onKeyDown={onAssistantSplitKeyDown}
           />
         )}
-        {/* Canvas region — only rendered when tabs are present */}
-        {hasCanvas && (
-          <CanvasPanel
-            tabs={canvasTabs}
-            activeTab={activeCanvasTab}
-            onTabChange={setActiveCanvasTab}
-            onTabClose={closeCanvasTab}
-            onAction={sendMessage}
-            readOnly={mode === 'read-only'}
-            onHostTabPortal={onHostTabPortal}
-            hideSingleTab={hideSingleTab}
-          />
-        )}
-        {/* Reveal rail (C8b) — pinned to the assistant's side while collapsed. */}
-        {collapsibleActive && collapsed && (
+        {/* Canvas region — mounted when tabs exist, or always when mobile-narrow
+            so the host-portal hole survives region switches. */}
+        {hasCanvas &&
+          (canvasTabs.length > 0 ? (
+            <CanvasPanel
+              tabs={canvasTabs}
+              activeTab={activeCanvasTab}
+              onTabChange={setActiveCanvasTab}
+              onTabClose={closeCanvasTab}
+              onAction={sendMessage}
+              readOnly={mode === 'read-only'}
+              onHostTabPortal={onHostTabPortal}
+              hideSingleTab={hideSingleTab}
+            />
+          ) : (
+            <div
+              className={classes.canvasRegion}
+              data-testid="mobile-canvas-placeholder"
+              aria-hidden
+            />
+          ))}
+        {/* Reveal rail (C8b) — pinned to the assistant's side while collapsed (wide only). */}
+        {collapsibleActive && collapsed && !mobileActive && (
           <button
             type="button"
             className={classes.assistantRevealRail}

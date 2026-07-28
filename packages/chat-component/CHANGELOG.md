@@ -4,6 +4,30 @@ All notable changes to `@edjbarron/netapp-chat-component` are documented in this
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-07-28
+
+Opt-in mobile layout for `ChatAppShell`. Component-only — no engine, `/chat/*`,
+or binary changes. With none of the new props supplied, behavior is
+**byte-for-byte `0.3.1`** (including today's remove-the-canvas-when-narrow gate
+and the engine inline-canvas-in-chat fallback). See
+[docs/mobile-layout.md](https://github.com/ebarron/netapp-chat-service/blob/main/docs/mobile-layout.md).
+
+### Added
+- **`mobileLayout` mode.** Opt-in single-column layout below a configurable
+  breakpoint (`mobileBreakpoint`, default `1024`). Keeps the host-portal canvas
+  mount **mounted at all widths** (hide inactive region via CSS — never
+  unmount), forces burger→overlay nav, and switches Page ↔ Assistant via a
+  2-item **"Page · Assistant" bottom-tab bar** (or `'toggle'`). Default region
+  is `'canvas'` (`mobileDefaultRegion`). Controlled/uncontrolled
+  `mobileRegion` / `defaultMobileRegion` / `onMobileRegionChange` plus
+  `persistMobileRegionKey` mirror the C8b collapse convention.
+- **Reactive breakpoint** (only when `mobileLayout` is on) via an internal
+  `useViewportWide` `matchMedia`/resize hook. SSR-safe: defaults wide when
+  `window`/`matchMedia` is unavailable. The legacy one-shot `innerWidth < 1024`
+  gate is **left unchanged** for non-adopters.
+- Minimal responsive pass on assistant header controls (wrapping) so the
+  full-width mobile assistant is usable standalone.
+
 ## [0.3.1] - 2026-07-24
 
 ### Fixed

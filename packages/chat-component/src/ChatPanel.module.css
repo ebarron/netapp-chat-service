@@ -218,9 +218,75 @@
   flex-shrink: 0;
 }
 
-.fullPageBody {
-  flex: 1;
-  min-height: 0;
+/* --- Mobile layout (opt-in via mobileLayout) -------------------------------- */
+
+/* Single-column: stack fills the shell; inactive region is CSS-hidden (not
+   unmounted) so host portal state / chat / SSE survive region switches. */
+.mobileLayout {
+  flex-direction: column;
+}
+
+.mobileLayout .panel,
+.mobileLayout .canvasRegion {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+  border-left: none;
+  border-right: none;
+}
+
+/* Hide inactive region via CSS — never unmount. */
+.mobileRegionCanvas .panel {
+  display: none;
+}
+
+.mobileRegionAssistant .canvasRegion {
+  display: none;
+}
+
+/* Minimal responsive pass: let header controls wrap on a phone. */
+.mobileControls {
+  row-gap: 4px;
+}
+
+.mobileBottomTabBar {
+  flex: 0 0 auto;
+  border-top: 1px solid light-dark(var(--mantine-color-gray-3), var(--mantine-color-dark-4));
+  background-color: light-dark(var(--mantine-color-body), var(--mantine-color-dark-7));
+  z-index: 5;
+}
+
+.mobileBottomTabGroup {
+  height: 52px;
+}
+
+.mobileBottomTab {
   display: flex;
   flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: light-dark(var(--mantine-color-gray-7), var(--mantine-color-gray-4));
+  cursor: pointer;
+  padding: 4px 8px;
+}
+
+.mobileBottomTab[data-active] {
+  color: light-dark(var(--mantine-color-blue-7), var(--mantine-color-blue-3));
+}
+
+.mobileBottomTab:focus-visible {
+  outline: 2px solid var(--mantine-color-blue-filled);
+  outline-offset: -2px;
+}
+
+.mobileToggleBar {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px var(--mantine-spacing-xs);
+  border-bottom: 1px solid light-dark(var(--mantine-color-gray-3), var(--mantine-color-dark-4));
 }

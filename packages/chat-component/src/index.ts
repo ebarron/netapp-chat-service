@@ -14,6 +14,7 @@ export type {
   ChatAppShellNavApi,
   ChatAppShellDestinationApi,
 } from './ChatAppShell';
+export type { MobileRegion } from './MobileRegionSwitch';
 export { CanvasPanel } from './CanvasPanel';
 export { ModeToggle } from './ModeToggle';
 export { CapabilityControls } from './CapabilityControls';
