@@ -23,6 +23,10 @@ beside the chat.
 - **Composable layout.** Host-controlled and drag-resizable assistant/canvas
   split, left/right assistant placement, a collapsible assistant with a reveal
   rail, and docked-or-overlay navigation.
+- **Mobile-ready (opt-in).** `mobileLayout` turns `ChatAppShell` into a
+  single-column phone shell below a breakpoint — host pages stay mounted, nav
+  collapses to a burger overlay, and a "Page · Assistant" bottom-tab bar
+  switches regions.
 - **Navigation by prompt.** "Open alerting" can drive the same navigation a click
   would, via a host-registered tool and a single SSE event.
 - **Additive and safe.** Every advanced capability is opt-in; with none of the
@@ -35,7 +39,7 @@ beside the chat.
 | Assistant | Streaming chat, mode toggle, capability/budget controls, host-driven prompt injection, busy-state notifications |
 | Canvas | Engine charts/dashboards, host-page portals, per-tab context summaries exposed to the assistant |
 | Workspace shell | `ChatAppShell` with header/nav/destination slots and a managed reserved-nav-tab lifecycle |
-| Layout | Configurable + draggable split, assistant placement (left/right), collapsible assistant, docked/overlay nav |
+| Layout | Configurable + draggable split, assistant placement (left/right), collapsible assistant, docked/overlay nav, opt-in single-column mobile mode |
 | Transport | `createChatAPI` with shared auth headers/credentials across every request incl. SSE |
 
 ## Quick start
@@ -76,6 +80,7 @@ mode, the workspace shell, canvas portals, layout modes, and auth — see the
 - [**User Guide**](./UserGuide.md) — installation, integration, and full prop reference
 - [Agentic-forward UI seams (C1–C6)](https://github.com/ebarron/netapp-chat-service/blob/main/docs/agentic-forward-seams.md)
 - [Agentic-forward layout modes (C7–C8)](https://github.com/ebarron/netapp-chat-service/blob/main/docs/agentic-forward-layout-modes.md)
+- [Mobile layout](https://github.com/ebarron/netapp-chat-service/blob/main/docs/mobile-layout.md)
 - [CHANGELOG](./CHANGELOG.md)
 
 ## Exports
