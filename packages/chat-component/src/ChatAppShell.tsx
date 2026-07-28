@@ -148,6 +148,17 @@ export interface ChatAppShellProps {
   navMode?: 'overlay' | 'docked';
   /** Width (px) of the docked nav column. Defaults to `navOverlayWidth` (260). */
   navDockedWidth?: number;
+  /**
+   * Controlled nav-open state. When provided the host owns whether the nav
+   * overlay/column is open; the shell renders `navOpen` verbatim and calls
+   * `onNavOpenChange` on user intent (hamburger toggle, drawer close, selecting
+   * a destination in overlay mode). When omitted (default) the shell manages
+   * nav-open itself AND auto-syncs it whenever `navMode` changes at runtime, so
+   * a host can flip `navMode` as a live prop without remounting the shell.
+   */
+  navOpen?: boolean;
+  /** Fired on nav-open intent when using the controlled `navOpen` API. */
+  onNavOpenChange?: (open: boolean) => void;
 
   // --- Route-sync contract (routing stays host-side) ---
   /**
@@ -287,6 +298,8 @@ export function ChatAppShell({
   navOverlayWidth = 260,
   navMode = 'overlay',
   navDockedWidth,
+  navOpen: navOpenProp,
+  onNavOpenChange,
   activeDestinationId = null,
   onActiveDestinationChange,
   resolveDestination,
@@ -322,19 +335,60 @@ export function ChatAppShell({
   // Force overlay nav on mobile regardless of desktop navMode.
   const effectiveNavMode = mobileActive ? 'overlay' : navMode;
 
-  // In docked nav mode the column starts expanded (navOpened=true); in overlay
-  // mode the Drawer starts closed (navOpened=false) exactly as before. When
-  // mobileLayout is on and the first paint is already narrow, start closed so
-  // the forced overlay Drawer does not pop open.
-  const initialNavOpen = (() => {
-    if (navMode !== 'docked') return false;
-    if (!mobileLayout || typeof window === 'undefined') return true;
-    if (typeof window.matchMedia === 'function') {
-      return window.matchMedia(`(min-width: ${mobileBreakpoint}px)`).matches;
-    }
-    return window.innerWidth >= mobileBreakpoint;
-  })();
-  const [navOpened, { toggle: toggleNav, close: closeNav }] = useDisclosure(initialNavOpen);
+  // Resolves the nav-open default for a given navMode: in docked mode the column
+  // starts expanded (true); in overlay mode the Drawer starts closed (false)
+  // exactly as before. When mobileLayout is on and the viewport is already
+  // narrow, docked resolves closed so the forced overlay Drawer does not pop
+  // open. Kept as a stable callback so the runtime re-sync effect can reuse it.
+  const computeNavOpenForMode = useCallback(
+    (mode: 'overlay' | 'docked') => {
+      if (mode !== 'docked') return false;
+      if (!mobileLayout || typeof window === 'undefined') return true;
+      if (typeof window.matchMedia === 'function') {
+        return window.matchMedia(`(min-width: ${mobileBreakpoint}px)`).matches;
+      }
+      return window.innerWidth >= mobileBreakpoint;
+    },
+    [mobileLayout, mobileBreakpoint],
+  );
+
+  // Nav-open is uncontrolled by default (internal disclosure) but can be driven
+  // by the host via the `navOpen` prop. Either way the layout body follows the
+  // live `navMode` prop, so `navMode` can change without a remount.
+  const isNavControlled = navOpenProp !== undefined;
+  const [uncontrolledNavOpen, navDisclosure] = useDisclosure(computeNavOpenForMode(navMode));
+  const navOpened = isNavControlled ? navOpenProp! : uncontrolledNavOpen;
+
+  const onNavOpenChangeRef = useRef(onNavOpenChange);
+  onNavOpenChangeRef.current = onNavOpenChange;
+
+  const setNavOpen = useCallback(
+    (open: boolean) => {
+      if (isNavControlled) {
+        onNavOpenChangeRef.current?.(open);
+        return;
+      }
+      if (open) navDisclosure.open();
+      else navDisclosure.close();
+    },
+    [isNavControlled, navDisclosure],
+  );
+  const toggleNav = useCallback(() => setNavOpen(!navOpened), [setNavOpen, navOpened]);
+  const closeNav = useCallback(() => setNavOpen(false), [setNavOpen]);
+
+  // Re-sync nav-open when `navMode` actually changes (overlay↔docked) so hosts
+  // can flip the layout at runtime without a remount. Fires ONLY on a real
+  // navMode transition — it must not stomp a user who manually toggled the nav
+  // within a given navMode. Skipped entirely when the host controls `navOpen`.
+  const prevNavModeRef = useRef(navMode);
+  useEffect(() => {
+    if (prevNavModeRef.current === navMode) return;
+    prevNavModeRef.current = navMode;
+    if (isNavControlled) return;
+    if (computeNavOpenForMode(navMode)) navDisclosure.open();
+    else navDisclosure.close();
+  }, [navMode, isNavControlled, computeNavOpenForMode, navDisclosure]);
+
   const [portalEl, setPortalEl] = useState<HTMLElement | null>(null);
   const navDockedWidthResolved = navDockedWidth ?? navOverlayWidth;
 
@@ -569,8 +623,13 @@ export function ChatAppShell({
     </Drawer>
   );
 
-  // When mobileLayout is off, preserve the 0.3.1 DOM structure byte-for-byte.
-  // Mobile layout only rearranges below the breakpoint.
+  // The desktop overlay and docked layouts share ONE structure so the assistant
+  // (`chatPanelEl`) + reserved-nav portal keep a STABLE tree position when
+  // `navMode` flips at runtime — React then preserves the ChatPanel instance
+  // (chat messages, session, and every canvas / host-portal tab) instead of
+  // remounting it. Only the nav chrome changes around it: a persistent left
+  // column in `docked`, or a hamburger `Drawer` in `overlay`. The mobile
+  // single-column layout keeps its own structure (below the breakpoint).
   let body: ReactNode;
   if (mobileActive) {
     body = (
@@ -587,13 +646,15 @@ export function ChatAppShell({
         {overlayNavDrawer}
       </Box>
     );
-  } else if (navMode === 'docked') {
-    // C7 — persistent nav column (left) · assistant/canvas area. No Drawer.
+  } else {
+    const showDockedColumn = navMode === 'docked' && navOpened;
     body = (
       <Box
         style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'row' }}
       >
-        {navOpened && (
+        {/* Docked-nav persistent column (order-0). Null in overlay mode / when
+            collapsed — toggling this sibling never shifts the assistant slot. */}
+        {showDockedColumn ? (
           <Box
             component="nav"
             data-testid="nav-docked-column"
@@ -607,24 +668,18 @@ export function ChatAppShell({
           >
             {renderNavMenu(navApi)}
           </Box>
-        )}
+        ) : null}
+
+        {/* Assistant + canvas — stable across navMode changes. */}
         <Box style={{ flex: '1 1 auto', minWidth: 0, minHeight: 0, position: 'relative' }}>
           {chatPanelEl}
+          {/* Live host page rendered into the reserved nav canvas tab. */}
           {portalNode}
         </Box>
-      </Box>
-    );
-  } else {
-    // Body: docked assistant (left) + canvas (right), nav overlay on top.
-    body = (
-      <Box style={{ flex: 1, minHeight: 0, position: 'relative' }}>
-        {chatPanelEl}
 
-        {/* Live host page rendered into the reserved nav canvas tab. */}
-        {portalNode}
-
-        {/* Hamburger-driven navigation overlay (host supplies the menu tree). */}
-        {overlayNavDrawer}
+        {/* Hamburger-driven overlay (order-last). Only mounted in overlay mode;
+            docked mounts no Drawer. */}
+        {navMode === 'overlay' ? overlayNavDrawer : null}
       </Box>
     );
   }

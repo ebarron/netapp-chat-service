@@ -401,3 +401,125 @@ describe('ChatAppShell hideSingleTab', () => {
     });
   });
 });
+
+describe('ChatAppShell navMode live change (no remount)', () => {
+  function NavModeShell(navMode: 'overlay' | 'docked', api: ReturnType<typeof createMockChatAPI>) {
+    return (
+      <ChatAppShell
+        chatAPI={api}
+        destinations={DESTS}
+        activeDestinationId="alerting"
+        navMode={navMode}
+        renderHeader={({ toggleNav }) => (
+          <button type="button" data-testid="hamburger" onClick={toggleNav}>
+            menu
+          </button>
+        )}
+        renderNavMenu={() => <div data-testid="nav-menu">menu-tree</div>}
+        renderDestination={({ destination }) => (
+          <div data-testid="page">{destination.label}</div>
+        )}
+      />
+    );
+  }
+
+  it('overlay→docked live: chat message + engine canvas tab survive, nav chrome updates', async () => {
+    const api = createMockChatAPI({
+      stream: vi.fn().mockResolvedValue(
+        makeCanvasSSEResponse({
+          tab_id: 'volume::vol1::',
+          title: 'vol1',
+          kind: 'volume',
+          qualifier: '',
+          content: { type: 'object-detail', kind: 'volume', name: 'vol1', sections: [] },
+        }),
+      ),
+    });
+
+    const { rerender } = render(NavModeShell('overlay', api));
+    await waitFor(() => expect(screen.getByTestId('page').textContent).toBe('Alerting'));
+
+    // Overlay chrome: no docked column; the Drawer is closed by default.
+    expect(screen.queryByTestId('nav-docked-column')).toBeNull();
+    expect(screen.queryByTestId('nav-menu')).toBeNull();
+
+    // Seed client-only state: send a message (→ persisted message + session) and
+    // open a second, non-URL-backed engine canvas tab.
+    const input = screen.getByPlaceholderText('Type a message...');
+    await userEvent.type(input, 'remember me');
+    await userEvent.click(screen.getByLabelText('Send'));
+    await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(2));
+    expect(screen.getByText('remember me')).toBeDefined();
+
+    // Flip to docked as a LIVE prop (no key / no remount).
+    rerender(NavModeShell('docked', api));
+
+    // Nav chrome now matches docked: persistent column visible, no overlay Drawer.
+    expect(await screen.findByTestId('nav-docked-column')).toBeDefined();
+    expect(screen.getByTestId('nav-menu')).toBeDefined();
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    // Client state survived the layout change (ChatPanel/useChatPanel not remounted).
+    expect(screen.getByText('remember me')).toBeDefined();
+    expect(screen.getAllByRole('tab')).toHaveLength(2);
+  });
+
+  it('docked→overlay live: chrome flips and the overlay Drawer is not auto-popped', async () => {
+    const { rerender } = render(<LayoutShell navMode="docked" />);
+    expect(await screen.findByTestId('nav-docked-column')).toBeDefined();
+
+    rerender(<LayoutShell navMode="overlay" />);
+
+    // Docked column gone; the overlay Drawer is present but CLOSED (content hidden).
+    expect(screen.queryByTestId('nav-docked-column')).toBeNull();
+    expect(screen.queryByTestId('nav-menu')).toBeNull();
+
+    // The hamburger still opens the overlay.
+    await userEvent.click(screen.getByTestId('hamburger'));
+    expect(await screen.findByTestId('nav-menu')).toBeDefined();
+  });
+
+  it('does not override a manual nav toggle on an unrelated re-render', async () => {
+    // Docked defaults open; the user collapses it.
+    const { rerender } = render(<LayoutShell navMode="docked" navOverlayTitle="A" />);
+    expect(await screen.findByTestId('nav-docked-column')).toBeDefined();
+    await userEvent.click(screen.getByTestId('hamburger'));
+    expect(screen.queryByTestId('nav-docked-column')).toBeNull();
+
+    // A re-render that does NOT change navMode must keep the user's collapse.
+    rerender(<LayoutShell navMode="docked" navOverlayTitle="B" />);
+    expect(screen.queryByTestId('nav-docked-column')).toBeNull();
+  });
+
+  it('controlled navOpen defers to the host and fires onNavOpenChange', async () => {
+    const onNavOpenChange = vi.fn();
+    const { rerender } = render(
+      <LayoutShell navMode="overlay" navOpen={false} onNavOpenChange={onNavOpenChange} />,
+    );
+    expect(await screen.findByTestId('hamburger')).toBeDefined();
+    expect(screen.queryByTestId('nav-menu')).toBeNull();
+
+    // Hamburger reports intent but does NOT self-open while controlled.
+    await userEvent.click(screen.getByTestId('hamburger'));
+    expect(onNavOpenChange).toHaveBeenCalledWith(true);
+    expect(screen.queryByTestId('nav-menu')).toBeNull();
+
+    // Host flips the prop → overlay opens.
+    rerender(<LayoutShell navMode="overlay" navOpen onNavOpenChange={onNavOpenChange} />);
+    expect(await screen.findByTestId('nav-menu')).toBeDefined();
+  });
+
+  it('controlled navOpen is not auto-synced by a navMode change', async () => {
+    const onNavOpenChange = vi.fn();
+    const { rerender } = render(
+      <LayoutShell navMode="overlay" navOpen={false} onNavOpenChange={onNavOpenChange} />,
+    );
+    expect(await screen.findByTestId('hamburger')).toBeDefined();
+
+    // Flipping navMode must not touch the host-owned nav-open state.
+    rerender(<LayoutShell navMode="docked" navOpen={false} onNavOpenChange={onNavOpenChange} />);
+    expect(onNavOpenChange).not.toHaveBeenCalled();
+    // navOpen=false ⇒ docked column stays collapsed under host control.
+    expect(screen.queryByTestId('nav-docked-column')).toBeNull();
+  });
+});

@@ -335,8 +335,9 @@ their own presets. The component ships no preset vocabulary. Full reference:
 
 | Prop | Type | Description |
 |------|------|-------------|
-| `navMode` | `'overlay' \| 'docked'` | **C7.** `'overlay'` (default) is the hamburger `Drawer`. `'docked'` renders `renderNavMenu` as a persistent left column (no Drawer); the hamburger's `toggleNav` collapses/expands it and `navOpened` reflects that state. |
+| `navMode` | `'overlay' \| 'docked'` | **C7.** `'overlay'` (default) is the hamburger `Drawer`. `'docked'` renders `renderNavMenu` as a persistent left column (no Drawer); the hamburger's `toggleNav` collapses/expands it and `navOpened` reflects that state. **You can change `navMode` as a live prop** — the shell re-syncs the nav chrome and keeps the assistant (chat/session/canvas tabs) mounted, so no remount `key` is needed (0.4.1). |
 | `navDockedWidth` | `number` | Width (px) of the docked nav column. Defaults to `navOverlayWidth` (260). |
+| `navOpen` / `onNavOpenChange` | `boolean` / `(open) => void` | Optional controlled nav-open API (0.4.1). Supply both to own the open/closed state yourself (the automatic `navMode` re-sync is bypassed while controlled). Omit for the default self-managed behavior. |
 | `assistantPlacement` | `'start' \| 'end'` | **C8a.** Side of the canvas the assistant sits on. `'start'` (default) is left; `'end'` is right. Order-only — width/resize/persistence are unchanged. |
 | `assistantCollapsed` | `boolean` | **C8b.** Controlled collapse of the assistant column. |
 | `defaultAssistantCollapsed` | `boolean` | Uncontrolled initial collapsed state. |
@@ -502,7 +503,9 @@ hiding that tab's content.
 **Header / layout**: `headerHeight` (default 60), `style`.
 
 **Navigation**: `navOverlayTitle` (default "Navigation"), `navOverlayWidth`
-(default 260), `navMode`, `navDockedWidth`. See [Layout modes](#layout-modes-c7c8).
+(default 260), `navMode`, `navDockedWidth`, `navOpen`, `onNavOpenChange`. See
+[Layout modes](#layout-modes-c7c8). `navMode` may be changed at runtime without a
+remount (0.4.1).
 
 **Split sizing**: `assistantWidth`, `defaultAssistantWidth`, `assistantMinWidth`,
 `assistantMaxWidth`, `resizableAssistant`, `onAssistantWidthChange`,

@@ -22,7 +22,9 @@ beside the chat.
   plugs in via slots; routing stays host-side.
 - **Composable layout.** Host-controlled and drag-resizable assistant/canvas
   split, left/right assistant placement, a collapsible assistant with a reveal
-  rail, and docked-or-overlay navigation.
+  rail, and docked-or-overlay navigation you can switch at runtime — the
+  assistant (chat, session, and open canvas tabs) stays mounted across a
+  `navMode` change, no remount required.
 - **Mobile-ready (opt-in).** `mobileLayout` turns `ChatAppShell` into a
   single-column phone shell below a breakpoint — host pages stay mounted, nav
   collapses to a burger overlay, and a "Page · Assistant" bottom-tab bar

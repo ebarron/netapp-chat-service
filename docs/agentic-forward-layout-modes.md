@@ -81,16 +81,30 @@ Default `false` preserves today's always-visible strip.
 `<ChatAppShell>` gains one optional prop:
 
 ```ts
-navMode?: 'overlay' | 'docked'; // default: 'overlay'
-navDockedWidth?: number;        // px; default = navOverlayWidth (260)
+navMode?: 'overlay' | 'docked';        // default: 'overlay'
+navDockedWidth?: number;               // px; default = navOverlayWidth (260)
+navOpen?: boolean;                     // controlled nav-open (0.4.1)
+onNavOpenChange?: (open: boolean) => void; // (0.4.1)
 ```
 
-- **`navMode="overlay"` (default)** — today's behavior, unchanged: the
-  hamburger `toggleNav` opens/closes the left `Drawer`; `renderNavMenu` is
-  rendered inside it; `navOverlayTitle` / `navOverlayWidth` apply.
+- **`navMode="overlay"` (default)** — the hamburger `toggleNav` opens/closes the
+  left `Drawer`; `renderNavMenu` is rendered inside it; `navOverlayTitle` /
+  `navOverlayWidth` apply.
 - **`navMode="docked"`** — `renderNavMenu` is rendered as a **persistent
   left column** (width `navDockedWidth`) in the body flex row, before the
   assistant/canvas split. The `Drawer` is not mounted.
+
+**Live switching (0.4.1).** `navMode` may be changed at runtime as a normal prop.
+The shell re-syncs nav-open on a real `overlay`↔`docked` transition (open for
+docked, closed for overlay; a user's manual collapse/expand within a mode is not
+overridden) and renders both modes from **one** flex-row structure so the
+assistant + reserved-nav portal keep a stable tree position. React therefore
+preserves the `ChatPanel` instance — chat `messages`, `sessionId`, and open
+canvas / host-portal tabs survive the switch, so hosts no longer need a remount
+`key`. To keep this guarantee the desktop **overlay** body now shares the docked
+row/column wrapper (one extra flex nesting vs. 0.4.0); the visual result is
+unchanged. Supply the optional controlled `navOpen` / `onNavOpenChange` pair to
+own the open state yourself (this bypasses the auto re-sync).
 
 ### Header API is unchanged
 

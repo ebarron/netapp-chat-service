@@ -4,6 +4,34 @@ All notable changes to `@edjbarron/netapp-chat-component` are documented in this
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-07-28
+
+### Fixed
+- **`ChatAppShell` tracks `navMode` changes without a remount.** Previously the
+  nav-open state was derived from `navMode` only at mount, so a host that flipped
+  `navMode` (`overlay`↔`docked`) at runtime had to force a full remount (changing
+  React `key`) to get the nav chrome to match — which destroyed all client-side
+  state living inside the shell (chat `messages`, `sessionId`, and every open
+  canvas / host-portal tab). The shell now (a) auto-re-syncs nav-open on an actual
+  `navMode` transition (open for `docked`, closed for `overlay`), firing only on a
+  real change so a user's manual collapse/expand within a mode is never stomped,
+  and (b) renders the overlay and docked desktop layouts from **one structure** so
+  the assistant + reserved-nav portal keep a stable tree position — React
+  preserves the `ChatPanel` instance across the layout switch. Hosts can now drop
+  the remount `key` and change `navMode` as a normal live prop.
+
+### Added
+- **Controlled nav-open API.** Optional `navOpen?: boolean` +
+  `onNavOpenChange?: (open: boolean) => void` on `ChatAppShell`. When `navOpen` is
+  supplied the host owns the open/closed state (and the auto-sync in the fix above
+  is bypassed); when omitted the shell manages it internally as before plus the
+  new `navMode` auto-sync. Fully backward compatible.
+
+> Note: to keep the assistant mounted across a `navMode` switch, the desktop
+> **overlay** body now shares the docked layout's wrapper (an extra flex
+> `row`/column nesting around the assistant). Visual result is unchanged; only the
+> intermediate DOM nesting differs from `0.4.0`.
+
 ## [0.4.0] - 2026-07-28
 
 Opt-in mobile layout for `ChatAppShell`. Component-only — no engine, `/chat/*`,
