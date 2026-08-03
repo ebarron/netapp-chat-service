@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.2.1
+
+Additive and backward compatible: with `max_tokens` unset, behavior is
+byte-for-byte identical to v0.2.0.
+
+### Added
+
+- **`ProviderConfig.MaxTokens` (optional).** A new `max_tokens` field caps the
+  model's response length (completion tokens). When zero — the default, and the
+  case for any config that predates this field — each provider preserves its
+  prior behavior: the OpenAI / llm-proxy path sends no `max_tokens` (letting the
+  endpoint apply its own default), while the Anthropic / Bedrock path keeps its
+  built-in `4096`. Set a larger value to allow bigger responses (e.g.
+  multi-panel dashboards) that would otherwise be truncated mid-stream, leaving
+  an unclosed code fence that renders as raw JSON.
+- **Truncation visibility.** The OpenAI / llm-proxy stream now logs a `WARN`
+  when it ends with `finish_reason == "length"`, so response truncation is
+  diagnosable from operator logs.
+
 ## v0.1.20
 
 Agentic-forward UI seams (C5/C6 engine halves). All additive and **opt-in**:

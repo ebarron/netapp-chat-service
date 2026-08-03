@@ -116,12 +116,20 @@ type StreamEvent struct {
 // Typically persisted by the host product (e.g. NABox stores it in
 // /etc/nabox/ai.yaml).
 type ProviderConfig struct {
-	Provider     string `yaml:"provider" json:"provider"`                             // "openai", "anthropic", "bedrock", "custom", "llm-proxy"
-	Endpoint     string `yaml:"endpoint" json:"endpoint"`                             // API endpoint URL
-	APIKey       string `yaml:"api_key" json:"api_key,omitempty"`                     // masked in GET responses
-	Model        string `yaml:"model" json:"model"`                                   // e.g. "gpt-4.1", "claude-sonnet-4"
-	User         string `yaml:"user,omitempty" json:"user,omitempty"`                 // LLM Proxy: identifies the calling user
-	AWSRegion    string `yaml:"aws_region,omitempty" json:"aws_region,omitempty"`      // Bedrock only
+	Provider string `yaml:"provider" json:"provider"`             // "openai", "anthropic", "bedrock", "custom", "llm-proxy"
+	Endpoint string `yaml:"endpoint" json:"endpoint"`             // API endpoint URL
+	APIKey   string `yaml:"api_key" json:"api_key,omitempty"`     // masked in GET responses
+	Model    string `yaml:"model" json:"model"`                   // e.g. "gpt-4.1", "claude-sonnet-4"
+	User     string `yaml:"user,omitempty" json:"user,omitempty"` // LLM Proxy: identifies the calling user
+	// MaxTokens optionally caps the model's response length (completion tokens).
+	// When zero (the default, and the case for any config that predates this
+	// field) the provider preserves its previous behavior: the OpenAI /
+	// llm-proxy path sends no max_tokens and lets the endpoint apply its own
+	// default, while the Anthropic / Bedrock path keeps its built-in 4096
+	// default. Set a larger value to allow bigger responses (e.g. multi-panel
+	// dashboards) that would otherwise be truncated mid-stream.
+	MaxTokens    int    `yaml:"max_tokens,omitempty" json:"max_tokens,omitempty"`
+	AWSRegion    string `yaml:"aws_region,omitempty" json:"aws_region,omitempty"` // Bedrock only
 	AWSAccessKey string `yaml:"aws_access_key,omitempty" json:"aws_access_key,omitempty"`
 	AWSSecretKey string `yaml:"aws_secret_key,omitempty" json:"aws_secret_key,omitempty"`
 }

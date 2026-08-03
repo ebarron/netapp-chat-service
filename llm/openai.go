@@ -188,6 +188,17 @@ func (p *openaiProvider) ChatStream(ctx context.Context, req ChatRequest) iter.S
 			"has_content", len(acc.Choices) > 0 && acc.Choices[0].Message.Content != "",
 		)
 
+		// A "length" finish reason means the model hit the response token
+		// ceiling and its output was truncated mid-stream. Surface this at
+		// WARN so operators can spot it (e.g. a dashboard that renders as raw
+		// JSON because its closing fence never arrived) and raise max_tokens.
+		if lastFinishReason == "length" {
+			slog.Warn("openai: response truncated by token limit",
+				"finish_reason", lastFinishReason,
+				"configured_max_tokens", p.cfg.MaxTokens,
+			)
+		}
+
 		// Fallback: check for tool calls that were accumulated but not
 		// detected by JustFinishedToolCall. This handles OpenAI-compatible
 		// proxies (e.g. llm-proxy with Claude models) that may chunk
@@ -221,6 +232,14 @@ func (p *openaiProvider) ChatStream(ctx context.Context, req ChatRequest) iter.S
 func (p *openaiProvider) buildParams(req ChatRequest) openai.ChatCompletionNewParams {
 	params := openai.ChatCompletionNewParams{
 		Model: req.Model,
+	}
+
+	// Only cap the response length when explicitly configured. When
+	// MaxTokens is 0 we omit max_tokens entirely, preserving the prior
+	// behavior of letting the endpoint (e.g. the llm-proxy) apply its own
+	// default.
+	if p.cfg.MaxTokens > 0 {
+		params.MaxTokens = openai.Int(int64(p.cfg.MaxTokens))
 	}
 
 	if p.cfg.User != "" {

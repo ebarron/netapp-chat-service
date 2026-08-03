@@ -156,9 +156,16 @@ func (p *anthropicProvider) ChatStream(ctx context.Context, req ChatRequest) ite
 
 // buildParams converts our ChatRequest into Anthropic SDK params.
 func (p *anthropicProvider) buildParams(req ChatRequest) anthropic.MessageNewParams {
+	// Anthropic requires max_tokens. Keep the historical 4096 default and
+	// only override it when the config asks for a different cap, so existing
+	// deployments are unaffected.
+	maxTokens := int64(4096)
+	if p.cfg.MaxTokens > 0 {
+		maxTokens = int64(p.cfg.MaxTokens)
+	}
 	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(req.Model),
-		MaxTokens: 4096,
+		MaxTokens: maxTokens,
 	}
 
 	// System message
