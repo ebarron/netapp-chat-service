@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { render, screen } from '../test-utils';
 import { ChatPanel } from './ChatPanel';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
@@ -58,5 +60,35 @@ describe('ChatPanel variant prop (C1)', () => {
   it('variant="drawer" is explicit-equivalent to the default', () => {
     render(<ChatPanel opened={false} onClose={onClose} variant="drawer" />);
     expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('fullPage renders the body wrapper element that carries the .fullPageBody class', async () => {
+    const { container } = render(<ChatPanel opened onClose={onClose} fullPage />);
+    expect(await screen.findByPlaceholderText('Type a message...')).toBeDefined();
+    // Full-page container + its body wrapper are present in the tree.
+    expect(container.querySelector('[class*="fullPage"]')).not.toBeNull();
+    expect(container.querySelector('[class*="fullPageBody"]')).not.toBeNull();
+  });
+
+  it('the .fullPageBody rule exists in the stylesheet (0.4.0/0.4.1 regression guard)', () => {
+    // The wrapper class is applied in ChatPanel.tsx, but in 0.4.0/0.4.1 the
+    // matching rule was accidentally deleted from ChatPanel.module.css. CSS
+    // modules return undefined for a missing key without erroring, so the class
+    // was silently omitted and the unstyled flex item kept min-height: auto —
+    // breaking the fullPage height chain (no transcript scroll; composer pushed
+    // off-screen). Vitest resolves CSS-module keys via an identity proxy (no
+    // layout, keys never come back undefined), so a rendered-DOM check cannot
+    // catch a missing rule. Assert against the stylesheet source instead, which
+    // is exactly what regressed.
+    // Read from the Vitest root (the package dir); import.meta.url is not a
+    // file URL under happy-dom.
+    const css = readFileSync(resolve(process.cwd(), 'src/ChatPanel.module.css'), 'utf8');
+    const rule = css.match(/\.fullPageBody\s*\{([^}]*)\}/);
+    expect(rule, '.fullPageBody rule missing from ChatPanel.module.css').not.toBeNull();
+    const body = rule![1];
+    // The two declarations that make the wrapper a shrinkable flex column — the
+    // part that actually fixes the height chain.
+    expect(body).toMatch(/flex:\s*1/);
+    expect(body).toMatch(/min-height:\s*0/);
   });
 });

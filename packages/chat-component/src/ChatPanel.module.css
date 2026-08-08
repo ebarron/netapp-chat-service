@@ -218,6 +218,17 @@
   flex-shrink: 0;
 }
 
+/* Full-page body wrapper: a shrinkable flex column so the height chain reaches
+   .messages (flex: 1; overflow-y: auto) and keeps the composer pinned. Without
+   min-height: 0 the wrapper cannot shrink below content height, breaking
+   transcript scrolling and pushing the input past the 100vh boundary. */
+.fullPageBody {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 /* --- Mobile layout (opt-in via mobileLayout) -------------------------------- */
 
 /* Single-column: stack fills the shell; inactive region is CSS-hidden (not

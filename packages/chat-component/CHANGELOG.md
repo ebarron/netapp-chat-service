@@ -4,6 +4,27 @@ All notable changes to `@edjbarron/netapp-chat-component` are documented in this
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-08-08
+
+### Fixed
+- **`<ChatPanel fullPage>` scrolls again; the composer stays pinned.** The
+  `.fullPageBody` rule was accidentally dropped from `ChatPanel.module.css` in
+  `0.4.0` (the mobile-layout block was pasted over it; its surviving
+  `display/flex-direction` lines were absorbed into `.mobileBottomTab`), and
+  `0.4.1` did not touch the CSS. CSS modules return `undefined` for a missing
+  key without erroring, so React omitted the class and the wrapper rendered
+  unstyled — an unstyled flex item keeps `min-height: auto` and cannot shrink
+  below its content, which broke the full-page height chain: the transcript
+  (`.messages { flex: 1; overflow-y: auto }`) stopped scrolling and a long
+  response pushed the composer past the `100vh` boundary where `overflow: hidden`
+  clipped it. Restored the rule (`flex: 1; min-height: 0; display: flex;
+  flex-direction: column`) verbatim; `.mobileBottomTab` is left as-is. The
+  `docked` and `drawer` variants were never affected (`.dockedBody` still exists;
+  the drawer sets the same constraint inline). Adds a regression test that guards
+  the `.fullPageBody` rule in the stylesheet source (the DOM-only variant test
+  missed it, and Vitest's identity-proxy CSS-module resolution cannot catch a
+  missing rule).
+
 ## [0.4.1] - 2026-07-28
 
 ### Fixed
