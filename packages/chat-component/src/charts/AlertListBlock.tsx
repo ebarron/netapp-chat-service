@@ -14,6 +14,9 @@ const severityConfig = {
 } as const;
 
 export function AlertListBlock({ data, onAction }: AlertListBlockProps) {
+  const items = Array.isArray(data.items)
+    ? data.items.filter((item) => typeof item === 'object' && item !== null)
+    : [];
   return (
     <Paper p="sm" radius="sm" withBorder>
       {data.title && (
@@ -22,11 +25,11 @@ export function AlertListBlock({ data, onAction }: AlertListBlockProps) {
         </Text>
       )}
       <Stack gap="xs" role="list" aria-label="Alerts">
-        {data.items.length === 0 && (
+        {items.length === 0 && (
           <Text fz="xs" c="dimmed" ta="center" py="sm">No alerts</Text>
         )}
-        {data.items.map((item, i) => {
-          const config = severityConfig[item.severity];
+        {items.map((item, i) => {
+          const config = severityConfig[item.severity] ?? severityConfig.info;
           return (
             <Group
               key={i}

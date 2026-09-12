@@ -14,14 +14,17 @@ const statusConfig = {
 } as const;
 
 export function StatusGridBlock({ data }: StatusGridBlockProps) {
+  const items = Array.isArray(data.items)
+    ? data.items.filter((item) => typeof item === 'object' && item !== null)
+    : [];
   return (
     <Paper p="sm" radius="sm" withBorder>
       <Text fw={500} fz="sm" mb="xs">
         {data.title}
       </Text>
       <SimpleGrid cols={{ base: 2, sm: 3, md: 4 }} spacing="xs" role="list" aria-label="Status items">
-        {data.items.map((item) => {
-          const config = statusConfig[item.status];
+        {items.map((item) => {
+          const config = statusConfig[item.status] ?? statusConfig.unknown;
           return (
             <Group key={item.name} gap="xs" wrap="nowrap" role="listitem" aria-label={`${item.name}: ${item.status}`}>
               <ThemeIcon size="sm" color={config.color} variant="light">

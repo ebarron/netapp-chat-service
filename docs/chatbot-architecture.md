@@ -459,11 +459,17 @@ buffers anything that might be the start of a canvas fence; mid-content backtick
 `canvas-dashboard` block arrives, the interceptor:
 
 1. **suppresses** the fence from the normal `EventText` stream (so it does not also render inline), and
-2. emits an `EventCanvasOpen` carrying a `CanvasPayload{ TabID, Title, Kind, Qualifier, Content }`. The `TabID` is derived as `kind::title::qualifier` so re-opening the same object reuses its tab. The `Content` is the raw inner JSON (an ordinary `object-detail` or `dashboard` object).
+2. validates and normalizes the structured content, then emits an
+   `EventCanvasOpen` carrying a
+   `CanvasPayload{ TabID, Title, Kind, Qualifier, Content }`. The `TabID` is
+   derived as `kind::title::qualifier` so a valid update reuses its tab. Exact
+   duplicates are suppressed.
 
 The server serializes this as a dedicated SSE event — `event: canvas_open` with the
-`CanvasPayload` as data (`server/server.go`). Malformed/incomplete fences fall back
-to plain text, so a partial stream never corrupts the message.
+`CanvasPayload` as data (`server/server.go`). Malformed/incomplete fences and
+semantically incomplete known panel types are rejected; diagnostics report only
+reason codes, schema paths, and sizes. The interceptor never logs or emits the
+rejected model content.
 
 **Producing canvas blocks:** the LLM can emit a canvas fence directly, or a bespoke
 render tool (§5.6) can call `(*render.ObjectDetail).MarshalCanvasBlock()` instead of
@@ -475,9 +481,11 @@ render tool (§5.6) can call `(*render.ObjectDetail).MarshalCanvasBlock()` inste
 "canvas context" section so the LLM knows what the user has pinned and can refer to
 or update it.
 
-**Frontend:** the chat UI component (`@edjbarron/netapp-chat-component`) handles
-`canvas_open` by opening/updating a canvas tab and rendering the payload with the
-same `DashboardBlock` / `ObjectDetailBlock` components used inline (see
+**Frontend:** the chat UI component (`@edjbarron/netapp-chat-component`) strictly
+validates and normalizes `canvas_open` content before opening/updating a canvas
+tab. An invalid later event leaves the last valid tab untouched. The
+`DashboardBlock` / `ObjectDetailBlock` parsing and leaf renderers remain
+defensive for inline or externally supplied data (see
 `useChatPanel.canvas.test.ts`).
 
 ```mermaid

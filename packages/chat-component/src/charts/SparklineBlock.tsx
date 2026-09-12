@@ -7,7 +7,10 @@ interface SparklineBlockProps {
 }
 
 export function SparklineBlock({ data }: SparklineBlockProps) {
-  const isEmpty = data.data.length === 0;
+  const chartData = Array.isArray(data.data)
+    ? data.data.filter((point): point is number => typeof point === 'number')
+    : [];
+  const isEmpty = chartData.length === 0;
 
   return (
     <Paper p="sm" radius="sm" withBorder style={{ minWidth: 0 }} role="img" aria-label={`Sparkline: ${data.title ?? 'trend'}`}>
@@ -22,7 +25,7 @@ export function SparklineBlock({ data }: SparklineBlockProps) {
         <Sparkline
           h={60}
           w="100%"
-          data={data.data}
+          data={chartData}
           color={data.color ?? 'blue'}
           curveType="monotone"
           fillOpacity={0.2}

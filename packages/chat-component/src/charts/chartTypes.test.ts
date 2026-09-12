@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { parseDashboard, parseChart, parseObjectDetail, downsamplePanel, inferChartType } from './chartTypes';
+import {
+  parseDashboard,
+  parseChart,
+  parseObjectDetail,
+  downsamplePanel,
+  inferChartType,
+  normalizeCanvasContent,
+  normalizeDashboardPayload,
+} from './chartTypes';
 import type { AreaChartData, SparklineData, GaugeData } from './chartTypes';
 
 describe('parseDashboard', () => {
@@ -131,6 +139,81 @@ describe('parseDashboard', () => {
     const result = parseDashboard(json);
     expect(result).not.toBeNull();
     expect(result!.panels).toHaveLength(12);
+  });
+
+  it('defensively defaults missing action buttons without crashing renderers', () => {
+    const result = parseDashboard(JSON.stringify({
+      title: 'Missing actions',
+      panels: [{ type: 'action-button' }],
+    }));
+    expect(result).not.toBeNull();
+    expect(result!.panels[0]).toMatchObject({ type: 'action-button', buttons: [] });
+  });
+
+  it('strict canvas ingestion rejects an action-button missing required buttons', () => {
+    const result = normalizeDashboardPayload({
+      title: 'Missing actions',
+      panels: [{ type: 'action-button' }],
+    });
+    expect(result.value).toBeNull();
+    expect(result.issues).toContainEqual({
+      code: 'missing_or_invalid_collection',
+      path: '$.panels[0].buttons',
+      severity: 'error',
+    });
+  });
+
+  it('strict canvas ingestion rejects action buttons without a usable target', () => {
+    const result = normalizeDashboardPayload({
+      title: 'Inert action',
+      panels: [{ type: 'action-button', buttons: [{ label: 'Delete' }] }],
+    });
+    expect(result.value).toBeNull();
+    expect(result.issues.some((issue) => issue.code === 'invalid_action_target')).toBe(true);
+  });
+
+  it('defaults genuinely optional panel collections to empty arrays', () => {
+    const result = normalizeDashboardPayload({
+      title: 'Optional collections',
+      panels: [
+        { type: 'area', title: 'Trend', xKey: 'time', series: [], data: [] },
+        {
+          type: 'action-form',
+          fields: [{ key: 'mode', label: 'Mode', type: 'select' }],
+          submit: { label: 'Apply', tool: 'apply' },
+        },
+      ],
+    });
+    expect(result.value).not.toBeNull();
+    expect(result.value!.panels[0]).toMatchObject({ annotations: [] });
+    expect(result.value!.panels[1]).toMatchObject({
+      fields: [{ key: 'mode', label: 'Mode', type: 'select', options: [] }],
+    });
+  });
+
+  it('accepts valid dashboards both with and without actions', () => {
+    const withoutActions = normalizeCanvasContent({
+      type: 'dashboard',
+      title: 'Read only',
+      panels: [{ type: 'stat', title: 'Count', value: '1' }],
+    });
+    const withActions = normalizeCanvasContent({
+      type: 'dashboard',
+      title: 'Interactive',
+      panels: [{ type: 'action-button', buttons: [] }],
+    });
+    expect(withoutActions.value).not.toBeNull();
+    expect(withActions.value).not.toBeNull();
+  });
+
+  it('rejects semantically partial streamed dashboard content', () => {
+    const result = normalizeCanvasContent({
+      type: 'dashboard',
+      title: 'Partial',
+      panels: [{ type: 'resource-table', title: 'Volumes', columns: ['Name'] }],
+    });
+    expect(result.value).toBeNull();
+    expect(result.issues.some((issue) => issue.path === '$.panels[0].rows')).toBe(true);
   });
 });
 

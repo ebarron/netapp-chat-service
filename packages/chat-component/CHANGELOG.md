@@ -4,6 +4,25 @@ All notable changes to `@edjbarron/netapp-chat-component` are documented in this
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-09-12
+
+### Fixed
+- **Malformed streamed canvases can no longer replace valid UI state or crash a
+  renderer.** `canvas_open` content is now strictly validated and normalized
+  before state updates. A later invalid payload for an existing tab is rejected,
+  preserving the last valid dashboard; partial SSE frames are also rejected.
+  Diagnostics contain only stable reason codes and schema paths, never payload
+  values, titles, tab IDs, or tool parameters.
+- Dashboard, chart, and object-detail parsing now normalizes collection fields,
+  and collection-based renderers retain local array guards as defense in depth.
+  `action-button.buttons` remains required by the producer contract: strict
+  canvas ingestion rejects an omitted/non-array value, while defensive rendering
+  treats it as `[]` so externally supplied malformed data cannot throw.
+- Exact optional collections currently include chart `annotations` and select
+  field `options`; absent values normalize to empty arrays. Existing dashboards
+  with no actions remain valid (omit the action-button panel or use
+  `"buttons":[]`).
+
 ## [0.4.2] - 2026-08-08
 
 ### Fixed

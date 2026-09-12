@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useChatAPI } from './ChatAPIContext';
+import {
+  normalizeCanvasContent,
+  type PayloadValidationIssue,
+} from './charts/chartTypes';
 
 /** A message in the chat conversation. */
 export interface ChatMessage {
@@ -146,6 +150,21 @@ interface SSEData {
   approval_id?: string;
   description?: string;
   destination?: string;
+}
+
+function reportRejectedCanvasPayload(issues: PayloadValidationIssue[]): void {
+  // Paths and reason codes are safe for diagnostics; never log payload values,
+  // titles, tab IDs, tool parameters, or other model-generated content.
+  console.warn('[netapp-chat-component] Rejected invalid canvas payload', {
+    code: 'invalid_canvas_payload',
+    issues: issues.map(({ code, path }) => ({ code, path })),
+  });
+}
+
+function reportMalformedSSEFrame(): void {
+  console.warn('[netapp-chat-component] Rejected malformed SSE frame', {
+    code: 'malformed_sse_frame',
+  });
 }
 
 let msgCounter = 0;
@@ -606,9 +625,14 @@ export function useChatPanel(options?: UseChatPanelOptions) {
               const parsed: SSEData = JSON.parse(data);
               handleSSEEvent(eventType, parsed, assistantId);
             } catch {
-              // Ignore malformed events.
+              reportMalformedSSEFrame();
             }
           }
+        }
+        if (buffer.trim()) {
+          // The stream ended in the middle of an SSE frame. Never attempt to
+          // parse or surface the partial data as structured UI content.
+          reportMalformedSSEFrame();
         }
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') {
@@ -729,53 +753,63 @@ export function useChatPanel(options?: UseChatPanelOptions) {
           break;
 
         case 'canvas_open': {
-          // Open (or focus) a canvas tab with the received content.
+          // Validate and normalize untrusted model content before it can
+          // replace a previously valid tab or enter any other UI state.
           const d = data as unknown as Record<string, unknown>;
+          const tabId = typeof d.tab_id === 'string' ? d.tab_id : '';
+          const normalized = normalizeCanvasContent(d.content);
+          if (!tabId || !normalized.value) {
+            reportRejectedCanvasPayload([
+              ...(!tabId
+                ? [{ code: 'missing_tab_id', path: '$.tab_id', severity: 'error' as const }]
+                : []),
+              ...normalized.issues,
+            ]);
+            break;
+          }
           const tab: CanvasTab = {
-            tabId: d.tab_id as string || '',
-            title: d.title as string || '',
-            kind: d.kind as string || '',
-            qualifier: d.qualifier as string || '',
-            content: (d.content as Record<string, unknown>) || {},
+            tabId,
+            title: typeof d.title === 'string' ? d.title : '',
+            kind: typeof d.kind === 'string' ? d.kind : '',
+            qualifier: typeof d.qualifier === 'string' ? d.qualifier : '',
+            content: normalized.value,
           };
-          if (tab.tabId) {
-            // A canvas whose content carries `close: true` is a directive to
-            // CLOSE the matching tab (e.g. after the underlying object was
-            // deleted) rather than open one. Either way the host is notified
-            // via onCanvasEvent so it can react to the specific canvas.
-            const isClose = !!(tab.content as Record<string, unknown>).close;
-            if (isClose) {
-              closeCanvasTab(tab.tabId);
-              onCanvasEventRef.current?.({
-                action: 'close',
-                tabId: tab.tabId,
-                title: tab.title,
-                kind: tab.kind,
-              });
-              break;
-            }
+          // A canvas whose content carries `close: true` is a directive to
+          // CLOSE the matching tab (e.g. after the underlying object was
+          // deleted) rather than open one. Either way the host is notified
+          // via onCanvasEvent so it can react to the specific canvas.
+          const isClose = tab.content.close === true;
+          if (isClose) {
+            closeCanvasTab(tab.tabId);
             onCanvasEventRef.current?.({
-              action: 'open',
+              action: 'close',
               tabId: tab.tabId,
               title: tab.title,
               kind: tab.kind,
             });
-            // On narrow viewports, render canvas content inline in chat
-            // instead of opening a canvas tab (canvas panel is hidden).
-            const narrow = typeof window !== 'undefined' && window.innerWidth < 1024;
-            if (narrow) {
-              const fenceType = tab.content && 'panels' in tab.content ? 'dashboard' : 'object-detail';
-              const json = JSON.stringify(tab.content);
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantId
-                    ? { ...m, content: m.content + '\n```' + fenceType + '\n' + json + '\n```\n' }
-                    : m
-                )
-              );
-            } else {
-              addOrFocusCanvasTab(tab);
-            }
+            break;
+          }
+          onCanvasEventRef.current?.({
+            action: 'open',
+            tabId: tab.tabId,
+            title: tab.title,
+            kind: tab.kind,
+          });
+          // On narrow viewports, render canvas content inline in chat
+          // instead of opening a canvas tab (canvas panel is hidden).
+          const narrow = typeof window !== 'undefined' && window.innerWidth < 1024;
+          if (narrow) {
+            const fenceType = 'panels' in tab.content ? 'dashboard' : 'object-detail';
+            const json = JSON.stringify(tab.content);
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantId
+                  ? { ...m, content: m.content + '\n```' + fenceType + '\n' + json + '\n```\n' }
+                  : m
+              )
+            );
+          } else {
+            addOrFocusCanvasTab(tab);
           }
           break;
         }

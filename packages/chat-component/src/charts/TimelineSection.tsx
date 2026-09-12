@@ -34,7 +34,9 @@ function EventIcon({ event }: { event: TimelineEvent }) {
 
 export function TimelineSection({ data }: TimelineSectionProps) {
   const [expanded, setExpanded] = useState(false);
-  const events = data.events;
+  const events = Array.isArray(data.events)
+    ? data.events.filter((event) => typeof event === 'object' && event !== null)
+    : [];
   const shouldCollapse = events.length > COLLAPSE_THRESHOLD;
   const visible = shouldCollapse && !expanded ? events.slice(0, COLLAPSE_THRESHOLD) : events;
   const remaining = events.length - COLLAPSE_THRESHOLD;

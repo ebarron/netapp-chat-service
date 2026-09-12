@@ -1,8 +1,6 @@
 package agent
 
 import (
-	"encoding/json"
-	"fmt"
 	"log/slog"
 	"strings"
 )
@@ -15,9 +13,10 @@ import (
 // The interceptor wraps the emit function: pass each EventText through
 // HandleToken. Non-text events should be forwarded directly.
 type canvasFenceInterceptor struct {
-	emit   func(Event) // downstream emit
-	buffer strings.Builder
-	inside bool // true when we're inside a canvas fence
+	emit      func(Event) // downstream emit
+	buffer    strings.Builder
+	inside    bool // true when we're inside a canvas fence
+	lastValid map[string][]byte
 }
 
 // canvasFencePrefixes are the code fence openings we intercept.
@@ -28,7 +27,10 @@ var canvasFencePrefixes = []string{
 
 // newCanvasFenceInterceptor creates an interceptor that wraps emit.
 func newCanvasFenceInterceptor(emit func(Event)) *canvasFenceInterceptor {
-	return &canvasFenceInterceptor{emit: emit}
+	return &canvasFenceInterceptor{
+		emit:      emit,
+		lastValid: make(map[string][]byte),
+	}
 }
 
 // HandleToken processes a text token. It buffers tokens that might be
@@ -37,7 +39,7 @@ func (c *canvasFenceInterceptor) HandleToken(text string) {
 	c.buffer.WriteString(text)
 	buf := c.buffer.String()
 
-	slog.Debug("canvas interceptor", "token", text, "bufLen", len(buf), "inside", c.inside)
+	slog.Debug("canvas interceptor", "tokenLen", len(text), "bufLen", len(buf), "inside", c.inside)
 
 	if c.inside {
 		// We're inside a canvas fence — look for the closing ```.
@@ -101,12 +103,12 @@ func (c *canvasFenceInterceptor) HandleToken(text string) {
 	// fence. This avoids holding regular ```dashboard or ```object-detail
 	// fences that share a common ``` prefix with canvas fences.
 	if canvasPartialMatch(buf) {
-		slog.Debug("canvas interceptor: PARTIAL MATCH, holding buffer", "buf", buf)
+		slog.Debug("canvas interceptor: PARTIAL MATCH, holding buffer", "bufLen", len(buf))
 		return
 	}
 
 	// No fence detected and no partial match — emit the buffered text.
-	slog.Debug("canvas interceptor: NO MATCH, emitting", "bufLen", len(buf), "bufPreview", truncate(buf, 120))
+	slog.Debug("canvas interceptor: NO MATCH, emitting", "bufLen", len(buf))
 	c.emit(Event{Type: EventText, Text: buf})
 	c.buffer.Reset()
 }
@@ -115,12 +117,25 @@ func (c *canvasFenceInterceptor) HandleToken(text string) {
 func (c *canvasFenceInterceptor) Flush() {
 	buf := c.buffer.String()
 	if buf == "" {
+		if c.inside {
+			slog.Warn("canvas payload rejected",
+				"reason", "incomplete_stream",
+				"path", "$",
+				"content_len", 0,
+			)
+			c.inside = false
+		}
 		return
 	}
 	slog.Debug("canvas interceptor: FLUSH", "inside", c.inside, "bufLen", len(buf))
 	if c.inside {
-		// Incomplete canvas fence — emit as regular text (graceful fallback).
-		c.emit(Event{Type: EventText, Text: buf})
+		// A partial structured payload must not leak into normal text or UI
+		// state. Report only shape metadata, never model-generated content.
+		slog.Warn("canvas payload rejected",
+			"reason", "incomplete_stream",
+			"path", "$",
+			"content_len", len(buf),
+		)
 	} else {
 		c.emit(Event{Type: EventText, Text: buf})
 	}
@@ -128,43 +143,46 @@ func (c *canvasFenceInterceptor) Flush() {
 	c.inside = false
 }
 
-// emitCanvasEvent parses the JSON content and emits an EventCanvasOpen.
-// On parse failure, falls back to emitting as regular text.
+// emitCanvasEvent validates and normalizes the JSON content before emitting an
+// EventCanvasOpen. Invalid payloads are rejected, and exact valid duplicates
+// are suppressed. Updated valid payloads with the same tab identity still emit.
 func (c *canvasFenceInterceptor) emitCanvasEvent(jsonContent string) {
 	slog.Debug("canvas interceptor: EMITTING CANVAS EVENT", "contentLen", len(jsonContent))
-	// Parse just enough to extract identity fields.
-	var obj struct {
-		Type      string `json:"type"`
-		Kind      string `json:"kind"`
-		Name      string `json:"name"`
-		Qualifier string `json:"qualifier"`
-		Title     string `json:"title"` // dashboards use title
-	}
-	if err := json.Unmarshal([]byte(jsonContent), &obj); err != nil {
-		// Malformed JSON — fall back to regular text.
-		c.emit(Event{Type: EventText, Text: jsonContent})
+	normalized, meta, err := normalizeCanvasPayload(jsonContent)
+	if err != nil {
+		issue, ok := err.(*canvasPayloadIssue)
+		reason, path := "invalid_canvas_payload", "$"
+		if ok {
+			reason, path = issue.Code, issue.Path
+		}
+		_, duplicate := c.lastValid[meta.TabID]
+		slog.Warn("canvas payload rejected",
+			"reason", reason,
+			"path", path,
+			"payload_type", meta.PayloadType,
+			"duplicate", duplicate,
+			"content_len", len(jsonContent),
+		)
 		return
 	}
 
-	// Build tab identity.
-	title := obj.Name
-	kind := obj.Kind
-	if title == "" {
-		title = obj.Title
+	if previous, ok := c.lastValid[meta.TabID]; ok && sameCanvasPayload(previous, normalized) {
+		slog.Debug("canvas payload duplicate suppressed",
+			"payload_type", meta.PayloadType,
+			"content_len", len(normalized),
+		)
+		return
 	}
-	if kind == "" && obj.Type == "dashboard" {
-		kind = "dashboard"
-	}
-	tabID := fmt.Sprintf("%s::%s::%s", kind, title, obj.Qualifier)
+	c.lastValid[meta.TabID] = append([]byte(nil), normalized...)
 
 	c.emit(Event{
 		Type: EventCanvasOpen,
 		Canvas: &CanvasPayload{
-			TabID:     tabID,
-			Title:     title,
-			Kind:      kind,
-			Qualifier: obj.Qualifier,
-			Content:   json.RawMessage(jsonContent),
+			TabID:     meta.TabID,
+			Title:     meta.Title,
+			Kind:      meta.Kind,
+			Qualifier: meta.Qualifier,
+			Content:   normalized,
 		},
 	})
 }
@@ -213,11 +231,4 @@ func canvasPartialMatch(s string) bool {
 		}
 	}
 	return false
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
 }

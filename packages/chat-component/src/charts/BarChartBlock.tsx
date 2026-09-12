@@ -7,7 +7,9 @@ interface BarChartBlockProps {
 }
 
 export function BarChartBlock({ data }: BarChartBlockProps) {
-  const isEmpty = data.data.length === 0;
+  const chartData = Array.isArray(data.data) ? data.data : [];
+  const series = Array.isArray(data.series) ? data.series : [];
+  const isEmpty = chartData.length === 0;
 
   return (
     <Paper p="sm" radius="sm" withBorder style={{ minWidth: 0 }} role="img" aria-label={`Bar chart: ${data.title}`}>
@@ -19,9 +21,9 @@ export function BarChartBlock({ data }: BarChartBlockProps) {
       ) : (
         <BarChart
           h={200}
-          data={data.data}
+          data={chartData}
           dataKey={data.xKey}
-          series={data.series.map((s) => ({
+          series={series.map((s) => ({
             name: s.key,
             label: s.label,
             color: s.color ?? 'violet',

@@ -156,6 +156,16 @@ describe('DashboardBlock', () => {
     expect(screen.getByText('Empty Dashboard')).toBeDefined();
   });
 
+  it('does not crash when an external action-button payload omits buttons', () => {
+    const json = JSON.stringify({
+      title: 'Malformed Actions',
+      panels: [{ type: 'action-button' }],
+    });
+    render(<DashboardBlock json={json} />);
+    expect(screen.getByText('Malformed Actions')).toBeDefined();
+    expect(screen.getByRole('group', { name: 'Actions' })).toBeDefined();
+  });
+
   it('passes readOnly to action buttons', () => {
     const json = JSON.stringify({
       title: 'Read-Only Dashboard',

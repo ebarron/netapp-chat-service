@@ -83,7 +83,10 @@ function toReferenceLines(annotations?: ChartAnnotation[]) {
 }
 
 export function AreaChartBlock({ data }: AreaChartBlockProps) {
-  const chartData = useMemo(() => normalizeXAxis(data.data, data.xKey), [data.data, data.xKey]);
+  const rows = Array.isArray(data.data) ? data.data : [];
+  const series = Array.isArray(data.series) ? data.series : [];
+  const annotations = Array.isArray(data.annotations) ? data.annotations : [];
+  const chartData = useMemo(() => normalizeXAxis(rows, data.xKey), [rows, data.xKey]);
   const isEmpty = chartData.length === 0;
 
   return (
@@ -98,7 +101,7 @@ export function AreaChartBlock({ data }: AreaChartBlockProps) {
           h={200}
           data={chartData}
           dataKey={data.xKey}
-          series={data.series.map((s) => ({
+          series={series.map((s) => ({
             name: s.key,
             label: s.label,
             color: s.color ?? 'blue',
@@ -108,7 +111,7 @@ export function AreaChartBlock({ data }: AreaChartBlockProps) {
           withTooltip
           withDots={false}
           tooltipAnimationDuration={200}
-          referenceLines={toReferenceLines(data.annotations)}
+          referenceLines={toReferenceLines(annotations)}
         />
       )}
     </Paper>

@@ -1,9 +1,13 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/ebarron/netapp-chat-service/llm"
+	"github.com/ebarron/netapp-chat-service/mcpclient"
 )
 
 func TestCanvasFenceInterceptor_DetectsObjectDetail(t *testing.T) {
@@ -104,24 +108,12 @@ func TestCanvasFenceInterceptor_MalformedJSON(t *testing.T) {
 	ci.HandleToken("\n```\n")
 	ci.Flush()
 
-	// Should fall back to emitting as regular text.
-	var textEvents []Event
+	// Malformed structured content is rejected rather than entering UI state
+	// or leaking its raw model-generated contents into the transcript.
 	for _, e := range events {
-		if e.Type == EventText {
-			textEvents = append(textEvents, e)
+		if e.Type == EventCanvasOpen || e.Type == EventText {
+			t.Fatalf("expected malformed canvas payload to be suppressed, got %+v", events)
 		}
-	}
-	if len(textEvents) == 0 {
-		t.Fatal("expected text fallback for malformed JSON")
-	}
-	var canvasEvents []Event
-	for _, e := range events {
-		if e.Type == EventCanvasOpen {
-			canvasEvents = append(canvasEvents, e)
-		}
-	}
-	if len(canvasEvents) != 0 {
-		t.Errorf("expected no canvas events for malformed JSON, got %d", len(canvasEvents))
 	}
 }
 
@@ -170,15 +162,155 @@ func TestCanvasFenceInterceptor_IncompleteFlush(t *testing.T) {
 	// Stream ends without closing fence.
 	ci.Flush()
 
-	// Should emit as regular text (graceful fallback).
-	var textEvents []Event
-	for _, e := range events {
-		if e.Type == EventText {
-			textEvents = append(textEvents, e)
+	// Partial structured content is rejected and never enters UI state.
+	if len(events) != 0 {
+		t.Fatalf("expected incomplete canvas payload to be suppressed, got %+v", events)
+	}
+}
+
+func TestCanvasFenceInterceptor_EmptyIncompleteFenceDoesNotSwallowLaterText(t *testing.T) {
+	var events []Event
+	ci := newCanvasFenceInterceptor(func(e Event) { events = append(events, e) })
+
+	ci.HandleToken("```canvas-dashboard\n")
+	ci.Flush()
+	ci.HandleToken("ordinary follow-up text")
+	ci.Flush()
+
+	if len(events) != 1 || events[0].Type != EventText || events[0].Text != "ordinary follow-up text" {
+		t.Fatalf("interceptor remained stuck after empty partial fence: %+v", events)
+	}
+}
+
+func TestCanvasFenceInterceptor_RejectsMalformedDuplicateAndPreservesValid(t *testing.T) {
+	var events []Event
+	emit := func(e Event) { events = append(events, e) }
+	ci := newCanvasFenceInterceptor(emit)
+
+	valid := `{"type":"dashboard","title":"Alert Rule","panels":[{"type":"action-button","buttons":[{"label":"Delete","action":"message","message":"delete it"}]}]}`
+	malformed := `{"type":"dashboard","title":"Alert Rule","panels":[{"type":"action-button"}]}`
+
+	ci.HandleToken("```canvas-dashboard\n" + valid + "\n```\n")
+	ci.HandleToken("```canvas-dashboard\n" + malformed + "\n```\n")
+	ci.Flush()
+
+	var canvasEvents []Event
+	for _, event := range events {
+		if event.Type == EventCanvasOpen {
+			canvasEvents = append(canvasEvents, event)
 		}
 	}
-	if len(textEvents) == 0 {
-		t.Fatal("incomplete fence should be flushed as text")
+	if len(canvasEvents) != 1 {
+		t.Fatalf("expected only the valid dashboard event, got %d: %+v", len(canvasEvents), events)
+	}
+	if !strings.Contains(string(canvasEvents[0].Canvas.Content), `"buttons"`) {
+		t.Fatalf("valid dashboard was not preserved: %s", canvasEvents[0].Canvas.Content)
+	}
+}
+
+func TestAgentRun_PreservesEmitResultDashboardWhenFinalModelDuplicateIsMalformed(t *testing.T) {
+	valid := `{"type":"dashboard","title":"Alert Rule","panels":[{"type":"action-button","buttons":[{"label":"Delete","action":"message","message":"delete it"}]}]}`
+	malformed := `{"type":"dashboard","title":"Alert Rule","panels":[{"type":"action-button"}]}`
+	provider := &llm.MockProvider{
+		ProviderName: "mock",
+		Responses: [][]llm.StreamEvent{
+			llm.MockToolCallResponse("render-1", "render_dashboard", map[string]any{}),
+			llm.MockTextResponse("```canvas-dashboard\n", malformed, "\n```\n"),
+		},
+	}
+	tools := map[string]InternalTool{
+		"render_dashboard": {
+			Def: llm.ToolDef{
+				Name:        "render_dashboard",
+				Description: "Render a dashboard",
+				Schema:      json.RawMessage(`{"type":"object"}`),
+			},
+			Handler: func(context.Context, json.RawMessage) (string, error) {
+				return "```canvas-dashboard\n" + valid + "\n```", nil
+			},
+			EmitResult: true,
+		},
+	}
+	ag := New(provider, mcpclient.NewMockRouter(nil), WithInternalTools(tools))
+	events := collectEvents(t, ag, []llm.Message{{Role: llm.RoleUser, Content: "clone the rule"}})
+
+	var canvases []*CanvasPayload
+	for _, event := range events {
+		if event.Type == EventCanvasOpen {
+			canvases = append(canvases, event.Canvas)
+		}
+	}
+	if len(canvases) != 1 {
+		t.Fatalf("expected only the valid EmitResult dashboard, got %d canvas events", len(canvases))
+	}
+	if !strings.Contains(string(canvases[0].Content), `"buttons"`) {
+		t.Fatalf("valid EmitResult dashboard was not preserved: %s", canvases[0].Content)
+	}
+}
+
+func TestCanvasFenceInterceptor_RejectsDashboardMissingButtons(t *testing.T) {
+	var events []Event
+	ci := newCanvasFenceInterceptor(func(e Event) { events = append(events, e) })
+
+	ci.HandleToken("```canvas-dashboard\n")
+	ci.HandleToken(`{"type":"dashboard","title":"Broken","panels":[{"type":"action-button"}]}`)
+	ci.HandleToken("\n```\n")
+	ci.Flush()
+
+	for _, event := range events {
+		if event.Type == EventCanvasOpen {
+			t.Fatalf("dashboard with an incomplete action-button must be rejected: %+v", event)
+		}
+	}
+}
+
+func TestCanvasFenceInterceptor_SuppressesExactDuplicate(t *testing.T) {
+	var events []Event
+	ci := newCanvasFenceInterceptor(func(e Event) { events = append(events, e) })
+	payload := `{"type":"dashboard","title":"Fleet","panels":[]}`
+
+	ci.HandleToken("```canvas-dashboard\n" + payload + "\n```\n")
+	ci.HandleToken("```canvas-dashboard\n" + payload + "\n```\n")
+	ci.Flush()
+
+	count := 0
+	for _, event := range events {
+		if event.Type == EventCanvasOpen {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected one canvas event for an exact duplicate, got %d", count)
+	}
+}
+
+func TestNormalizeCanvasPayload_DefaultsOptionalCollections(t *testing.T) {
+	payload := `{
+		"type":"dashboard",
+		"title":"Optional collections",
+		"panels":[
+			{"type":"area","title":"Trend","xKey":"time","series":[],"data":[]},
+			{"type":"action-form","fields":[{"key":"mode","label":"Mode","type":"select"}],"submit":{"label":"Apply","tool":"apply"}}
+		]
+	}`
+
+	normalized, _, err := normalizeCanvasPayload(payload)
+	if err != nil {
+		t.Fatalf("normalizeCanvasPayload returned error: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(normalized, &got); err != nil {
+		t.Fatal(err)
+	}
+	panels := got["panels"].([]any)
+	area := panels[0].(map[string]any)
+	if annotations, ok := area["annotations"].([]any); !ok || len(annotations) != 0 {
+		t.Fatalf("annotations not normalized to []: %#v", area["annotations"])
+	}
+	form := panels[1].(map[string]any)
+	field := form["fields"].([]any)[0].(map[string]any)
+	if options, ok := field["options"].([]any); !ok || len(options) != 0 {
+		t.Fatalf("options not normalized to []: %#v", field["options"])
 	}
 }
 
@@ -263,13 +395,13 @@ func TestCanvasPartialMatch(t *testing.T) {
 		input string
 		want  bool
 	}{
-		{"`", true},          // at start, 1 backtick — could start a fence
-		{"``", true},         // at start, 2 backticks
-		{"```", true},        // at start, 3 backticks — fence-start position
-		{"```c", true},       // heading toward canvas
+		{"`", true},    // at start, 1 backtick — could start a fence
+		{"``", true},   // at start, 2 backticks
+		{"```", true},  // at start, 3 backticks — fence-start position
+		{"```c", true}, // heading toward canvas
 		{"```canvas-", true},
 		{"```canvas-d", true},
-		{"```d", false},      // diverged — regular fence
+		{"```d", false}, // diverged — regular fence
 		{"```dashboard", false},
 		{"```object-detail", false},
 		{"hello```", false},  // backticks not at fence-start (no preceding newline)

@@ -197,12 +197,19 @@ describe('useChatPanel canvas tab summary extraction', () => {
 
 /** Build an SSE response that emits a single canvas_open event then done. */
 function makeCanvasSSEResponse(canvas: Record<string, unknown>): Response {
+  return makeCanvasSequenceSSEResponse([canvas]);
+}
+
+/** Build an SSE response containing canvas events in arrival order. */
+function makeCanvasSequenceSSEResponse(canvases: Record<string, unknown>[]): Response {
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     start(controller) {
-      controller.enqueue(
-        encoder.encode('event: canvas_open\ndata: ' + JSON.stringify(canvas) + '\n\n')
-      );
+      for (const canvas of canvases) {
+        controller.enqueue(
+          encoder.encode('event: canvas_open\ndata: ' + JSON.stringify(canvas) + '\n\n')
+        );
+      }
       controller.enqueue(encoder.encode('event: done\ndata: {"session_id":"s1"}\n\n'));
       controller.close();
     },
@@ -246,6 +253,110 @@ describe('useChatPanel canvas events (onCanvasEvent + close)', () => {
       title: 'Item Detail',
       kind: 'dashboard',
     });
+  });
+
+  it('rejects a malformed duplicate and preserves the last valid dashboard', async () => {
+    const onCanvasEvent = vi.fn();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const valid = {
+      tab_id: 'dashboard::Alert Rule::',
+      title: 'Alert Rule',
+      kind: 'dashboard',
+      qualifier: '',
+      content: {
+        type: 'dashboard',
+        title: 'Alert Rule',
+        panels: [{
+          type: 'action-button',
+          buttons: [{ label: 'Delete', action: 'message', message: 'delete it' }],
+        }],
+      },
+    };
+    const malformed = {
+      ...valid,
+      content: {
+        type: 'dashboard',
+        title: 'Alert Rule',
+        panels: [{ type: 'action-button' }],
+      },
+    };
+    const api = createMockChatAPI({
+      stream: vi.fn().mockResolvedValue(makeCanvasSequenceSSEResponse([valid, malformed])),
+    });
+    const { result } = renderHook(() => useChatPanel({ onCanvasEvent }), { api });
+
+    await act(async () => {
+      await result.current.sendMessage('clone the rule');
+    });
+
+    expect(result.current.canvasTabs).toHaveLength(1);
+    const panels = result.current.canvasTabs[0].content.panels as Array<Record<string, unknown>>;
+    expect(panels[0].buttons).toEqual([
+      { label: 'Delete', action: 'message', message: 'delete it' },
+    ]);
+    expect(onCanvasEvent).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      '[netapp-chat-component] Rejected invalid canvas payload',
+      expect.objectContaining({ code: 'invalid_canvas_payload' }),
+    );
+    const diagnostic = warn.mock.calls[0][1] as Record<string, unknown>;
+    expect(JSON.stringify(diagnostic)).not.toContain('Delete');
+    expect(JSON.stringify(diagnostic)).not.toContain('Alert Rule');
+    warn.mockRestore();
+  });
+
+  it('does not put a first malformed dashboard into canvas state', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const api = createMockChatAPI({
+      stream: vi.fn().mockResolvedValue(
+        makeCanvasSSEResponse({
+          tab_id: 'dashboard::Broken::',
+          title: 'Broken',
+          kind: 'dashboard',
+          qualifier: '',
+          content: {
+            type: 'dashboard',
+            title: 'Broken',
+            panels: [{ type: 'action-button' }],
+          },
+        })
+      ),
+    });
+    const { result } = renderHook(() => useChatPanel(), { api });
+
+    await act(async () => {
+      await result.current.sendMessage('show it');
+    });
+
+    expect(result.current.canvasTabs).toHaveLength(0);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('rejects a partial SSE frame without changing canvas state', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const encoder = new TextEncoder();
+    const response = new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(
+          'event: canvas_open\ndata: {"tab_id":"dashboard::Partial::","content":{"type":"dashboard"'
+        ));
+        controller.close();
+      },
+    }), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+    const api = createMockChatAPI({ stream: vi.fn().mockResolvedValue(response) });
+    const { result } = renderHook(() => useChatPanel(), { api });
+
+    await act(async () => {
+      await result.current.sendMessage('show it');
+    });
+
+    expect(result.current.canvasTabs).toHaveLength(0);
+    expect(warn).toHaveBeenCalledWith(
+      '[netapp-chat-component] Rejected malformed SSE frame',
+      { code: 'malformed_sse_frame' },
+    );
+    warn.mockRestore();
   });
 
   it('closes the matching tab when content.close is set, and notifies "close"', async () => {

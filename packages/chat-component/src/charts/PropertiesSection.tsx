@@ -11,10 +11,13 @@ interface PropertiesSectionProps {
 
 export function PropertiesSection({ data, onAction, cardQualifier }: PropertiesSectionProps) {
   const cols = data.columns ?? 2;
+  const items = Array.isArray(data.items)
+    ? data.items.filter((item) => typeof item === 'object' && item !== null)
+    : [];
 
   return (
     <SimpleGrid cols={cols} spacing="xs" verticalSpacing={4}>
-      {data.items.map((item, i) => (
+      {items.map((item, i) => (
         <div key={i}>
           <Text fz="xs" c="dimmed" lh={1.2}>
             {item.label}

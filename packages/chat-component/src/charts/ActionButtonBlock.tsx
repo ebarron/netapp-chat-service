@@ -13,6 +13,14 @@ interface ActionButtonBlockProps {
 }
 
 export function ActionButtonBlock({ data, onAction, onExecute, readOnly, cardQualifier }: ActionButtonBlockProps) {
+  const buttons = Array.isArray(data.buttons)
+    ? data.buttons.filter((button): button is ActionButtonItem => (
+        typeof button === 'object'
+        && button !== null
+        && typeof button.label === 'string'
+      ))
+    : [];
+
   const handleClick = (btn: ActionButtonItem) => {
     const action = resolveAction(btn);
     if (action === 'message' && btn.message) {
@@ -24,7 +32,7 @@ export function ActionButtonBlock({ data, onAction, onExecute, readOnly, cardQua
 
   return (
     <Group gap="xs" role="group" aria-label="Actions">
-      {data.buttons.map((btn, i) => {
+      {buttons.map((btn, i) => {
         const action = resolveAction(btn);
         const isDisabled = (action === 'execute' || !!btn.requiresReadWrite) && !!readOnly;
         const button = (

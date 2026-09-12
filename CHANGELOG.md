@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.2.2
+
+### Fixed
+
+- Canvas fences are now schema-validated and normalized before a
+  `canvas_open` event is emitted. Incomplete known panels (including an
+  `action-button` without its required `buttons` array), malformed JSON, and
+  partial streamed fences are rejected without exposing model-generated
+  content in diagnostics.
+- The per-turn canvas interceptor remembers the last valid payload per tab:
+  exact duplicates are suppressed, valid updates still emit, and an invalid
+  duplicate cannot follow and overwrite an exact `EmitResult` dashboard.
+
 ## v0.2.1
 
 Additive and backward compatible: with `max_tokens` unset, behavior is

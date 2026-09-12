@@ -9,28 +9,37 @@ interface ActionFormBlockProps {
 }
 
 export function ActionFormBlock({ data, onAction, readOnly }: ActionFormBlockProps) {
+  const fields = Array.isArray(data.fields)
+    ? data.fields.filter((field) => (
+        typeof field === 'object'
+        && field !== null
+        && typeof field.key === 'string'
+        && typeof field.label === 'string'
+      ))
+    : [];
+  const submit = data.submit && typeof data.submit === 'object' ? data.submit : null;
   const [values, setValues] = useState<Record<string, string>>(() => {
     const init: Record<string, string> = {};
-    for (const field of data.fields) {
+    for (const field of fields) {
       init[field.key] = field.defaultValue ?? '';
     }
     return init;
   });
 
-  const requiredMissing = data.fields.some(
+  const requiredMissing = fields.some(
     (f) => f.required && !values[f.key]?.trim()
   );
 
   // Form submits run a tool, so they're treated as read-write by default and
   // disabled in read-only mode. A submit can opt out (requiresReadWrite:false)
   // when it's read-only-safe — e.g. a picker that only re-renders a dashboard.
-  const writeGated = data.submit.requiresReadWrite ?? true;
+  const writeGated = submit?.requiresReadWrite ?? true;
   const lockedReadOnly = !!readOnly && writeGated;
 
   const handleSubmit = () => {
-    if (requiredMissing) return;
-    const merged: Record<string, unknown> = { ...data.submit.params };
-    const checkboxKeys = new Set(data.fields.filter((f) => f.type === 'checkbox').map((f) => f.key));
+    if (requiredMissing || !submit) return;
+    const merged: Record<string, unknown> = { ...submit.params };
+    const checkboxKeys = new Set(fields.filter((f) => f.type === 'checkbox').map((f) => f.key));
     for (const [k, v] of Object.entries(values)) {
       if (checkboxKeys.has(k)) {
         if (v === 'true') merged[k] = v;
@@ -41,7 +50,7 @@ export function ActionFormBlock({ data, onAction, readOnly }: ActionFormBlockPro
     const paramStr = Object.entries(merged)
       .map(([k, v]) => `${k}=${v}`)
       .join(', ');
-    onAction?.(`Run ${data.submit.tool} with ${paramStr}`);
+    onAction?.(`Run ${submit.tool} with ${paramStr}`);
   };
 
   const setField = (key: string, val: string) =>
@@ -49,9 +58,9 @@ export function ActionFormBlock({ data, onAction, readOnly }: ActionFormBlockPro
 
   // Render every field in the same responsive grid; checkboxes flow inline
   // with selects/text inputs so the form stays compact.
-  const allFields = data.fields;
+  const allFields = fields;
 
-  const renderField = (field: typeof data.fields[number]) =>
+  const renderField = (field: typeof fields[number]) =>
     field.type === 'select' ? (
       <Select
         key={field.key}
@@ -99,26 +108,30 @@ export function ActionFormBlock({ data, onAction, readOnly }: ActionFormBlockPro
           {allFields.map(renderField)}
         </SimpleGrid>
       )}
-      <Divider />
-      <Group justify="space-between" align="center" wrap="nowrap">
-        <Button
-          size="sm"
-          disabled={requiredMissing || lockedReadOnly}
-          onClick={handleSubmit}
-        >
-          {data.submit.label}
-        </Button>
-        {data.secondary && (
-          <Button
-            size="compact-sm"
-            variant="subtle"
-            color="gray"
-            onClick={() => onAction?.(data.secondary!.message)}
-          >
-            {data.secondary.label}
-          </Button>
-        )}
-      </Group>
+      {submit && (
+        <>
+          <Divider />
+          <Group justify="space-between" align="center" wrap="nowrap">
+            <Button
+              size="sm"
+              disabled={requiredMissing || lockedReadOnly}
+              onClick={handleSubmit}
+            >
+              {submit.label}
+            </Button>
+            {data.secondary && (
+              <Button
+                size="compact-sm"
+                variant="subtle"
+                color="gray"
+                onClick={() => onAction?.(data.secondary!.message)}
+              >
+                {data.secondary.label}
+              </Button>
+            )}
+          </Group>
+        </>
+      )}
     </Stack>
   );
 }

@@ -139,8 +139,13 @@ function findInlineTrend(row: Record<string, unknown>, col: string, visibleCols:
 
 export function ResourceTableBlock({ data, onAction }: ResourceTableBlockProps) {
   // Normalize columns to support both string[] and {key,label}[] formats from LLMs.
-  const cols = (data.columns ?? []).map(normalizeColumn);
+  const cols = (Array.isArray(data.columns) ? data.columns : []).map(normalizeColumn);
   const colKeys = cols.map((c) => c.key);
+  const rows = Array.isArray(data.rows)
+    ? data.rows.filter((row): row is ResourceTableData['rows'][number] => (
+        typeof row === 'object' && row !== null
+      ))
+    : [];
 
   const handleRowClick = (row: Record<string, unknown>) => {
     const name = String(row.name || '');
@@ -175,14 +180,14 @@ export function ResourceTableBlock({ data, onAction }: ResourceTableBlockProps) 
           </Table.Tr>
         </Table.Thead>
         <Table.Tbody>
-          {data.rows.length === 0 && (
+          {rows.length === 0 && (
             <Table.Tr>
               <Table.Td colSpan={cols.length}>
                 <Text fz="xs" c="dimmed" ta="center">No data available</Text>
               </Table.Td>
             </Table.Tr>
           )}
-          {data.rows.map((row, rowIdx) => {
+          {rows.map((row, rowIdx) => {
             const r = row as Record<string, unknown>;
 
             return (
