@@ -6,6 +6,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -266,5 +267,60 @@ func TestContainsFold(t *testing.T) {
 		if got := containsFold(tt.s, tt.sub); got != tt.want {
 			t.Errorf("containsFold(%q, %q) = %v, want %v", tt.s, tt.sub, got, tt.want)
 		}
+	}
+}
+
+// TestExtractText covers the tool-result join: the block count and sizes come
+// from the MCP server, so extractText builds the result with a strings.Builder
+// rather than concatenating per block. These cases pin the join semantics —
+// including that an empty leading block contributes no separator.
+func TestExtractText(t *testing.T) {
+	text := func(s string) mcp.Content { return &mcp.TextContent{Text: s} }
+
+	cases := []struct {
+		name    string
+		content []mcp.Content
+		want    string
+	}{
+		{"no content", nil, ""},
+		{"single block", []mcp.Content{text("one")}, "one"},
+		{"blocks are newline-joined", []mcp.Content{text("one"), text("two"), text("three")}, "one\ntwo\nthree"},
+		{"empty leading block adds no separator", []mcp.Content{text(""), text("two")}, "two"},
+		{"empty trailing block keeps its separator", []mcp.Content{text("one"), text("")}, "one\n"},
+		{"non-text blocks are skipped", []mcp.Content{
+			&mcp.ImageContent{Data: []byte{1, 2}, MIMEType: "image/png"},
+			text("one"),
+		}, "one"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractText(&mcp.CallToolResult{Content: tc.content})
+			if got != tc.want {
+				t.Errorf("extractText() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestExtractTextLinear renders many blocks to keep the join proportional to
+// its output: `text += tc.Text` would copy the whole accumulated result per
+// block, which is quadratic in a count the MCP server controls.
+func TestExtractTextLinear(t *testing.T) {
+	const blocks = 200_000
+	content := make([]mcp.Content, blocks)
+	for i := range content {
+		content[i] = &mcp.TextContent{Text: "0123456789"}
+	}
+
+	start := time.Now()
+	got := extractText(&mcp.CallToolResult{Content: content})
+	elapsed := time.Since(start)
+
+	if want := blocks*11 - 1; len(got) != want {
+		t.Fatalf("len = %d, want %d", len(got), want)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("joining %d text blocks took %v; the join must be linear in its output", blocks, elapsed)
 	}
 }

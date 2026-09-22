@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -955,14 +956,17 @@ func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit C
 		ag.ApprovalFunc = approvalFunc
 	}
 
-	// Collect assistant response text for session history.
-	var assistantText string
+	// Collect assistant response text for session history. A builder, not
+	// `text += evt.Text`: one EventText arrives per streamed delta, and
+	// concatenation would copy the whole response per delta (quadratic in the
+	// number of deltas) for a response the model, not this code, sizes.
+	var assistantText strings.Builder
 
 	// Run agent loop, converting agent events to emitted events.
 	ag.Run(ctx, sess.Messages, func(evt agent.Event) {
 		switch evt.Type {
 		case agent.EventText:
-			assistantText += evt.Text
+			assistantText.WriteString(evt.Text)
 			emit("message", map[string]string{
 				"type":    "text",
 				"content": evt.Text,
@@ -1006,7 +1010,7 @@ func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit C
 			})
 
 		case agent.EventTextClear:
-			assistantText = ""
+			assistantText.Reset()
 			emit("text_clear", map[string]string{
 				"type": "text_clear",
 			})
@@ -1029,10 +1033,10 @@ func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit C
 
 		case agent.EventDone:
 			// Append assistant response to session history.
-			if assistantText != "" {
+			if text := assistantText.String(); text != "" {
 				sess.AddMessage(llm.Message{
 					Role:    llm.RoleAssistant,
-					Content: assistantText,
+					Content: text,
 				})
 			}
 			emit("done", map[string]string{

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -453,18 +454,21 @@ func (r *Router) convertTool(t *mcp.Tool, serverName string, allowSet map[string
 	return def
 }
 
-// extractText concatenates all text content blocks from a tool result.
+// extractText concatenates all text content blocks from a tool result. The
+// block count and sizes come from the MCP server, so the join uses a builder
+// rather than `text += tc.Text`, which would copy the whole accumulated result
+// per block (quadratic in the number of blocks).
 func extractText(result *mcp.CallToolResult) string {
-	var text string
+	var b strings.Builder
 	for _, c := range result.Content {
 		if tc, ok := c.(*mcp.TextContent); ok {
-			if text != "" {
-				text += "\n"
+			if b.Len() > 0 {
+				b.WriteString("\n")
 			}
-			text += tc.Text
+			b.WriteString(tc.Text)
 		}
 	}
-	return text
+	return b.String()
 }
 
 // ConnectAll connects to all the given MCP servers with retries. Each server
