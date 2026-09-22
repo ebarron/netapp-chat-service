@@ -21,14 +21,21 @@
   `strings.Builder`, like the sibling index renderers; the rendered prompt is
   byte-for-byte unchanged.
 - **`POST /chat/message` bounds its input.** The body is capped at 1 MiB
-  (`413` when exceeded) and `canvas_tabs` is capped at 64 entries with
-  per-field limits (name/kind/qualifier/status/option labels and choices 1 KiB,
-  `digest` 8 KiB, 64 `key_properties`, 32 options × 128 choices per tab),
-  rejected with `400` before the session is created or the message appended.
-  The chat component keeps at most 5 canvas tabs open, so hosts are unaffected.
-  The other control endpoints cap their bodies at 64 KiB, and the standalone
-  binary now sets `ReadHeaderTimeout`, `IdleTimeout` and `MaxHeaderBytes`
-  (no read/write deadline, so SSE streams are unaffected).
+  (`413` when exceeded) and `canvas_tabs` at 64 entries, with per-field limits
+  (name/kind/qualifier/status/option labels and choices 1 KiB, `digest` 8 KiB,
+  64 `key_properties`, 32 options × 128 choices per tab) and a 128 KiB budget
+  for all canvas text in one request, rejected with `400` before the session is
+  created or the message appended. The tab count is enforced with a streaming
+  scan of the raw array, so an oversized array is refused without materializing
+  it (and a repeated `canvas_tabs` key cannot hide the work from the check).
+  The chat component keeps at most 5 canvas tabs open, so hosts are unaffected;
+  the same caps apply to `server.RunChat` for embedders that decode their own
+  transport. The other control endpoints cap their bodies at 64 KiB and answer
+  `413` past it. Request bodies also get a 30s upload deadline, cleared before
+  the SSE stream starts, since a byte cap alone does not stop a client from
+  holding a request goroutine open by trickling. The standalone binary now sets
+  `ReadHeaderTimeout`, `IdleTimeout` and `MaxHeaderBytes`; `ReadTimeout` and
+  `WriteTimeout` stay unset so SSE streams are never cut short.
 
 ## v0.2.1
 

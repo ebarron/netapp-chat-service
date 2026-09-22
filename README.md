@@ -133,8 +133,9 @@ ExtraTool), `error`, and `done`. The request body accepts an optional
 `canvas_tabs` array of `CanvasTabSummary` (identity + optional `status` /
 `key_properties` / `digest`) so the assistant stays aware of on-screen content.
 The body is capped at 1 MiB (`413` when exceeded) and `canvas_tabs` at 64
-entries with per-field length limits (`400` when exceeded) — far above what a
-real canvas holds, since the chat component keeps at most 5 tabs open.
+entries, with per-field length limits and a 128 KiB budget for all canvas text
+in one request (`400` when exceeded) — far above what a real canvas holds,
+since the chat component keeps at most 5 tabs open.
 
 ## Docker
 

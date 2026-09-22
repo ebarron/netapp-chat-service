@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -91,12 +92,26 @@ const (
 	maxCanvasDigestLen = 8 << 10 // 8 KiB
 
 	// maxCanvasKeyProperties caps the key_properties map on a single tab.
+	// KeyProperties is not rendered into the prompt, so this bounds the
+	// decoded request only.
 	maxCanvasKeyProperties = 64
 
 	// maxCanvasOptionsPerTab / maxCanvasChoicesPerOption cap the structured
 	// per-control option sets (C1 grounding) on a single tab.
 	maxCanvasOptionsPerTab    = 32
 	maxCanvasChoicesPerOption = 128
+
+	// maxCanvasTotalBytes caps the summed length of all canvas strings in one
+	// request. The per-field caps alone would allow 64 tabs × 8 KiB of digest
+	// (plus option text) to land in the system prompt; this keeps the whole
+	// client-supplied section within a sane prompt budget while leaving ample
+	// room for a real canvas (~10 tabs with a paragraph each).
+	maxCanvasTotalBytes = 128 << 10 // 128 KiB
+
+	// bodyReadTimeout bounds how long a client may take to upload a request
+	// body. http.MaxBytesReader caps bytes, not time, so without a deadline a
+	// client can hold a request goroutine open indefinitely by trickling.
+	bodyReadTimeout = 30 * time.Second
 )
 
 // validateCanvasTabs rejects a canvas_tabs payload that is larger than any
@@ -109,6 +124,7 @@ func validateCanvasTabs(tabs []agent.CanvasTabSummary) error {
 	if len(tabs) > maxCanvasTabs {
 		return fmt.Errorf("canvas_tabs has %d entries (max %d)", len(tabs), maxCanvasTabs)
 	}
+	total := 0
 	for i, tab := range tabs {
 		for _, f := range []struct {
 			name  string
@@ -123,12 +139,17 @@ func validateCanvasTabs(tabs []agent.CanvasTabSummary) error {
 			if len(f.value) > maxCanvasFieldLen {
 				return fmt.Errorf("canvas_tabs[%d].%s is %d bytes (max %d)", i, f.name, len(f.value), maxCanvasFieldLen)
 			}
+			total += len(f.value)
 		}
 		if len(tab.Digest) > maxCanvasDigestLen {
 			return fmt.Errorf("canvas_tabs[%d].digest is %d bytes (max %d)", i, len(tab.Digest), maxCanvasDigestLen)
 		}
+		total += len(tab.Digest)
 		if len(tab.KeyProperties) > maxCanvasKeyProperties {
 			return fmt.Errorf("canvas_tabs[%d].key_properties has %d entries (max %d)", i, len(tab.KeyProperties), maxCanvasKeyProperties)
+		}
+		for k, v := range tab.KeyProperties {
+			total += len(k) + len(v)
 		}
 		if len(tab.Options) > maxCanvasOptionsPerTab {
 			return fmt.Errorf("canvas_tabs[%d].options has %d entries (max %d)", i, len(tab.Options), maxCanvasOptionsPerTab)
@@ -137,6 +158,7 @@ func validateCanvasTabs(tabs []agent.CanvasTabSummary) error {
 			if len(o.Label) > maxCanvasFieldLen {
 				return fmt.Errorf("canvas_tabs[%d].options[%d].label is %d bytes (max %d)", i, j, len(o.Label), maxCanvasFieldLen)
 			}
+			total += len(o.Label)
 			if len(o.Choices) > maxCanvasChoicesPerOption {
 				return fmt.Errorf("canvas_tabs[%d].options[%d].choices has %d entries (max %d)", i, j, len(o.Choices), maxCanvasChoicesPerOption)
 			}
@@ -144,23 +166,90 @@ func validateCanvasTabs(tabs []agent.CanvasTabSummary) error {
 				if len(c) > maxCanvasFieldLen {
 					return fmt.Errorf("canvas_tabs[%d].options[%d].choices[%d] is %d bytes (max %d)", i, j, k, len(c), maxCanvasFieldLen)
 				}
+				total += len(c)
 			}
+		}
+		if total > maxCanvasTotalBytes {
+			return fmt.Errorf("canvas_tabs carries more than %d bytes of text", maxCanvasTotalBytes)
 		}
 	}
 	return nil
 }
 
-// limitBody caps how many bytes a handler will read from the request body.
-// Exceeding the cap surfaces as an *http.MaxBytesError from the JSON decoder,
-// which callers map to 413.
+// decodeCanvasTabs turns the raw canvas_tabs value into tab summaries,
+// refusing an oversized array before it is materialized.
+//
+// Decoding straight into []agent.CanvasTabSummary allocates ~128 bytes per
+// element, so a 1 MiB body of `{}` entries (~350k of them) costs hundreds of
+// MB of allocation churn before a length check can look at the slice — and a
+// duplicate canvas_tabs key hides that work from such a check entirely, since
+// encoding/json keeps the last occurrence of a repeated key. Counting the
+// top-level elements with a streaming scan that stops at the cap keeps the
+// work proportional to the bytes the client actually sent.
+func decodeCanvasTabs(raw json.RawMessage) ([]agent.CanvasTabSummary, error) {
+	trimmed := bytes.TrimSpace(raw)
+	// Absent or explicitly null: no canvas, as before.
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return nil, nil
+	}
+
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, errors.New("canvas_tabs must be an array")
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '[' {
+		return nil, errors.New("canvas_tabs must be an array")
+	}
+	for n := 0; dec.More(); {
+		n++
+		if n > maxCanvasTabs {
+			return nil, fmt.Errorf("canvas_tabs has more than %d entries", maxCanvasTabs)
+		}
+		var elem json.RawMessage
+		if err := dec.Decode(&elem); err != nil {
+			return nil, errors.New("canvas_tabs is not a valid array of tab summaries")
+		}
+	}
+
+	var tabs []agent.CanvasTabSummary
+	if err := json.Unmarshal(trimmed, &tabs); err != nil {
+		return nil, errors.New("canvas_tabs is not a valid array of tab summaries")
+	}
+	return tabs, nil
+}
+
+// limitBody caps how many bytes and how long a handler will spend reading the
+// request body. Exceeding the byte cap surfaces as an *http.MaxBytesError from
+// the JSON decoder, which callers map to 413.
+//
+// A handler that goes on to stream a response must call clearReadDeadline once
+// the body is decoded — the deadline also covers the server's background read
+// for disconnect detection, so leaving it set would cancel a long-lived SSE
+// stream when it expires.
 func limitBody(w http.ResponseWriter, r *http.Request, max int64) {
 	r.Body = http.MaxBytesReader(w, r.Body, max)
+	// Not every ResponseWriter supports deadlines (httptest recorders do not);
+	// the byte cap still applies when it does not.
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(bodyReadTimeout))
+}
+
+// clearReadDeadline removes the body-read deadline set by limitBody.
+func clearReadDeadline(w http.ResponseWriter) {
+	_ = http.NewResponseController(w).SetReadDeadline(time.Time{})
 }
 
 // bodyTooLarge reports whether a decode error was caused by the body cap.
 func bodyTooLarge(err error) bool {
 	var maxErr *http.MaxBytesError
 	return errors.As(err, &maxErr)
+}
+
+// writeTooLarge answers a request whose body exceeded the given cap.
+func writeTooLarge(w http.ResponseWriter, max int64) {
+	writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
+		"message": fmt.Sprintf("request body exceeds %d bytes", max),
+	})
 }
 
 // ChatEmitter is called for each SSE event.
@@ -238,25 +327,44 @@ func (s *Server) PostChatMessage(w http.ResponseWriter, r *http.Request) {
 	// appended, so an oversized request mutates no state.
 	limitBody(w, r, maxChatMessageBytes)
 
-	var req ChatMessageRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// canvas_tabs is held as raw JSON through the decode so the element cap can
+	// be applied before the tab structs are allocated (see decodeCanvasTabs).
+	var body struct {
+		Message    string          `json:"message"`
+		Mode       string          `json:"mode,omitempty"`
+		SessionID  string          `json:"session_id,omitempty"`
+		CanvasTabs json.RawMessage `json:"canvas_tabs,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		if bodyTooLarge(err) {
-			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
-				"message": fmt.Sprintf("request body exceeds %d bytes", maxChatMessageBytes),
-			})
+			writeTooLarge(w, maxChatMessageBytes)
 			return
 		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "invalid request body"})
 		return
 	}
-	if req.Message == "" {
+	if body.Message == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "message is required"})
 		return
+	}
+	tabs, err := decodeCanvasTabs(body.CanvasTabs)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"message": err.Error()})
+		return
+	}
+	req := ChatMessageRequest{
+		Message:    body.Message,
+		Mode:       body.Mode,
+		SessionID:  body.SessionID,
+		CanvasTabs: tabs,
 	}
 	if err := validateCanvasTabs(req.CanvasTabs); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"message": err.Error()})
 		return
 	}
+
+	// The body is in hand; drop the upload deadline so it cannot fire mid-stream.
+	clearReadDeadline(w)
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -339,7 +447,12 @@ func (s *Server) DeleteChatSession(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		SessionID string `json:"session_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.SessionID == "" {
+	err := json.NewDecoder(r.Body).Decode(&body)
+	if bodyTooLarge(err) {
+		writeTooLarge(w, maxControlBodyBytes)
+		return
+	}
+	if err != nil || body.SessionID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "session_id is required"})
 		return
 	}
@@ -451,6 +564,10 @@ func (s *Server) PostChatCapabilities(w http.ResponseWriter, r *http.Request) {
 		Mode         string            `json:"mode,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if bodyTooLarge(err) {
+			writeTooLarge(w, maxControlBodyBytes)
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "invalid request body"})
 		return
 	}
@@ -619,7 +736,12 @@ func (s *Server) PostChatApprove(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ApprovalID string `json:"approval_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ApprovalID == "" {
+	err := json.NewDecoder(r.Body).Decode(&body)
+	if bodyTooLarge(err) {
+		writeTooLarge(w, maxControlBodyBytes)
+		return
+	}
+	if err != nil || body.ApprovalID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "approval_id is required"})
 		return
 	}
@@ -640,7 +762,12 @@ func (s *Server) PostChatDeny(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ApprovalID string `json:"approval_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ApprovalID == "" {
+	err := json.NewDecoder(r.Body).Decode(&body)
+	if bodyTooLarge(err) {
+		writeTooLarge(w, maxControlBodyBytes)
+		return
+	}
+	if err != nil || body.ApprovalID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "approval_id is required"})
 		return
 	}
@@ -661,7 +788,10 @@ func (s *Server) PostChatStop(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		SessionID string `json:"session_id"`
 	}
-	json.NewDecoder(r.Body).Decode(&body)
+	if err := json.NewDecoder(r.Body).Decode(&body); bodyTooLarge(err) {
+		writeTooLarge(w, maxControlBodyBytes)
+		return
+	}
 	if body.SessionID != "" {
 		if cancel, ok := activeContexts.LoadAndDelete(body.SessionID); ok {
 			cancel.(context.CancelFunc)()
@@ -678,6 +808,16 @@ func (s *Server) GetHealth(w http.ResponseWriter, r *http.Request) {
 // RunChat runs the agent loop for a single user message, emitting SSE events.
 func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit ChatEmitter, approvalFunc func(capID, toolName string, tc llm.ToolCall) bool) {
 	deps.Logger.Info("user prompt", "message", req.Message, "mode", req.Mode, "session", req.SessionID)
+
+	// The canvas caps apply wherever the request came from, not just from
+	// PostChatMessage: RunChat is exported, so an embedder that decodes its own
+	// transport reaches the prompt builder through here. Checked before the
+	// session is touched, so a rejected request appends no message.
+	if err := validateCanvasTabs(req.CanvasTabs); err != nil {
+		deps.Logger.Warn("rejecting chat request", "error", err)
+		emit("error", map[string]string{"type": "error", "message": err.Error()})
+		return
+	}
 
 	// Default mode is read-only.
 	mode := req.Mode
