@@ -36,6 +36,12 @@
   holding a request goroutine open by trickling. The standalone binary now sets
   `ReadHeaderTimeout`, `IdleTimeout` and `MaxHeaderBytes`; `ReadTimeout` and
   `WriteTimeout` stay unset so SSE streams are never cut short.
+- The two remaining accumulate-by-concatenation loops now use a
+  `strings.Builder`: the assistant response collected for session history (one
+  event per streamed delta) and `extractText`, which joins an MCP tool result's
+  text blocks. Neither is client-controlled — the model and the MCP server
+  respectively decide the item count — but both were quadratic in it. Output is
+  unchanged in both cases.
 
 ## v0.2.1
 

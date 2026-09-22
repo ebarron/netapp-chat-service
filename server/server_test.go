@@ -499,3 +499,69 @@ func TestGetCapabilitiesIncludesDualBudgets(t *testing.T) {
 		t.Error("max should be set in both budgets")
 	}
 }
+
+// TestRunChatAccumulatesStreamedText covers the builder that collects the
+// assistant response for session history: one EventText arrives per streamed
+// delta (a count the model, not this code, decides), and a text_clear — emitted
+// when the model produced "thinking" text before a tool call — must discard
+// what came before it.
+func TestRunChatAccumulatesStreamedText(t *testing.T) {
+	newDeps := func(provider llm.Provider, router mcpclient.ToolRouter) *ChatDeps {
+		return &ChatDeps{
+			Sessions: session.NewManager(10),
+			Provider: provider,
+			Router:   router,
+			Logger:   slogDiscard(),
+		}
+	}
+
+	t.Run("deltas are joined in order", func(t *testing.T) {
+		provider := &llm.MockProvider{
+			ProviderName: "mock",
+			Responses:    [][]llm.StreamEvent{llm.MockTextResponse("All ", "systems ", "operational", ".")},
+		}
+		deps := newDeps(provider, mcpclient.NewMockRouter(nil))
+
+		RunChat(context.Background(), deps, ChatMessageRequest{Message: "hi", SessionID: "s1"},
+			func(string, any) {}, nil)
+
+		msgs := deps.Sessions.Get("s1").Messages
+		last := msgs[len(msgs)-1]
+		if last.Role != llm.RoleAssistant || last.Content != "All systems operational." {
+			t.Errorf("session history = %+v, want the joined assistant text", last)
+		}
+	})
+
+	t.Run("text_clear discards earlier text", func(t *testing.T) {
+		provider := &llm.MockProvider{
+			ProviderName: "mock",
+			Responses: [][]llm.StreamEvent{
+				// Turn 1: thinking text + tool call (Claude pattern) — the
+				// thinking text must not survive into session history.
+				llm.MockToolCallResponse("tc-1", "metrics_query", `{"query":"up"}`),
+				// Turn 2: the real answer, streamed in two deltas.
+				llm.MockTextResponse("All good", "."),
+			},
+		}
+		router := mcpclient.NewMockRouter([]llm.ToolDef{mcpclient.MockTool("metrics_query", "Query metrics")})
+		router.SetResult("metrics_query", `[{"value":1}]`)
+		deps := newDeps(provider, router)
+
+		var sawTextClear bool
+		RunChat(context.Background(), deps, ChatMessageRequest{Message: "how are things?", SessionID: "s2"},
+			func(event string, _ any) {
+				if event == "text_clear" {
+					sawTextClear = true
+				}
+			}, nil)
+
+		if !sawTextClear {
+			t.Fatal("expected a text_clear event for thinking text before a tool call")
+		}
+		msgs := deps.Sessions.Get("s2").Messages
+		last := msgs[len(msgs)-1]
+		if last.Content != "All good." {
+			t.Errorf("session history = %q, want only the post-clear text", last.Content)
+		}
+	})
+}
