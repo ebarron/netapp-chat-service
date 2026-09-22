@@ -1047,126 +1047,149 @@ Guidelines:
 
 	// Append canvas context when the user has pinned tabs.
 	if len(canvasTabs) > 0 {
-		prompt += "\n## Canvas Context\n\n"
-		prompt += "The user has the following items pinned in the canvas (visible alongside this chat):\n\n"
-		prompt += "| Tab | Kind | Name | Status | Context |\n"
-		prompt += "|-----|------|------|--------|---------|\n"
-		for i, tab := range canvasTabs {
-			status := tab.Status
-			if status == "" {
-				status = "-"
-			}
-			qualifier := tab.Qualifier
-			if qualifier == "" {
-				qualifier = "-"
-			}
-			prompt += fmt.Sprintf("| %d | %s | %s | %s | %s |\n", i+1, tab.Kind, tab.Name, status, qualifier)
+		prompt += renderCanvasContext(canvasTabs)
+	}
+
+	return prompt
+}
+
+// renderCanvasContext renders the canvas context section of the system prompt
+// from the tab summaries supplied by the client.
+//
+// The section is assembled with a strings.Builder, like the sibling index
+// renderers (capability.RenderGroupIndex, interest.Catalog.BuildIndex), so the
+// work is linear in the size of the rendered output. Appending each per-tab
+// row to the prompt with `prompt +=` instead would copy the whole accumulated
+// prompt on every iteration (runtime.concatstrings allocates a fresh string
+// each time), making this client-controlled, unbounded slice quadratic in CPU
+// and allocation: a few hundred KB of canvas_tabs would pin a core for tens of
+// seconds before the first LLM call. The output is byte-for-byte what the
+// concatenated form produced.
+//
+// Callers are still expected to bound how many tabs reach here — the HTTP
+// layer caps canvas_tabs per request (see server.maxCanvasTabs) — but the cost
+// of rendering is now proportional to the bytes actually rendered.
+func renderCanvasContext(canvasTabs []CanvasTabSummary) string {
+	var b strings.Builder
+	b.WriteString("\n## Canvas Context\n\n")
+	b.WriteString("The user has the following items pinned in the canvas (visible alongside this chat):\n\n")
+	b.WriteString("| Tab | Kind | Name | Status | Context |\n")
+	b.WriteString("|-----|------|------|--------|---------|\n")
+	for i, tab := range canvasTabs {
+		status := tab.Status
+		if status == "" {
+			status = "-"
 		}
-		prompt += "\nThe user can see these items without scrolling. You can refer to them "
-		prompt += "(\"the volume in your canvas\", \"as shown in the cluster detail\") without "
-		prompt += "repeating their full content. When the user asks follow-up questions, "
-		prompt += "consider whether they're referring to a canvas item.\n\n"
-		prompt += "When the user closes a canvas tab, it will no longer appear here. "
-		prompt += "Do not reference closed tabs.\n"
+		qualifier := tab.Qualifier
+		if qualifier == "" {
+			qualifier = "-"
+		}
+		fmt.Fprintf(&b, "| %d | %s | %s | %s | %s |\n", i+1, tab.Kind, tab.Name, status, qualifier)
+	}
+	b.WriteString("\nThe user can see these items without scrolling. You can refer to them ")
+	b.WriteString("(\"the volume in your canvas\", \"as shown in the cluster detail\") without ")
+	b.WriteString("repeating their full content. When the user asks follow-up questions, ")
+	b.WriteString("consider whether they're referring to a canvas item.\n\n")
+	b.WriteString("When the user closes a canvas tab, it will no longer appear here. ")
+	b.WriteString("Do not reference closed tabs.\n")
 
-		// Grounding guardrail (C2). Instruct the model to answer on-screen and
-		// options/choices questions ONLY from the canvas context provided here,
-		// and to admit it doesn't know rather than invent picklist values when
-		// a choice set isn't listed. This block is inside the canvas section, so
-		// it is only emitted when the host attached at least one canvas summary
-		// — legacy add-on consumers that send no canvas tabs get the prior
-		// prompt byte-for-byte.
-		prompt += "\n**Grounding:** When the user asks what is shown on screen, or what "
-		prompt += "options, choices, or values are available for a control (a dropdown, "
-		prompt += "picklist, setting, or mode), answer ONLY from the canvas context provided "
-		prompt += "here — the tab list above, any additional detail, and the selectable "
-		prompt += "options listed below. Do NOT invent, guess, or extrapolate option values "
-		prompt += "from general knowledge. If the choices for what the user asked about are "
-		prompt += "not listed here, say you don't have that information (and suggest they "
-		prompt += "open the relevant screen) rather than making up plausible values.\n"
+	// Grounding guardrail (C2). Instruct the model to answer on-screen and
+	// options/choices questions ONLY from the canvas context provided here,
+	// and to admit it doesn't know rather than invent picklist values when
+	// a choice set isn't listed. This block is inside the canvas section, so
+	// it is only emitted when the host attached at least one canvas summary
+	// — legacy add-on consumers that send no canvas tabs get the prior
+	// prompt byte-for-byte.
+	b.WriteString("\n**Grounding:** When the user asks what is shown on screen, or what ")
+	b.WriteString("options, choices, or values are available for a control (a dropdown, ")
+	b.WriteString("picklist, setting, or mode), answer ONLY from the canvas context provided ")
+	b.WriteString("here — the tab list above, any additional detail, and the selectable ")
+	b.WriteString("options listed below. Do NOT invent, guess, or extrapolate option values ")
+	b.WriteString("from general knowledge. If the choices for what the user asked about are ")
+	b.WriteString("not listed here, say you don't have that information (and suggest they ")
+	b.WriteString("open the relevant screen) rather than making up plausible values.\n")
 
-		// Free-text digests (C5) for tabs whose content doesn't decompose into
-		// key/values — typically host-rendered (portal) tabs opaque to the LLM.
-		// Only appended when at least one tab supplies a digest, so the output
-		// is byte-for-byte identical to today when no digests are present.
-		hasDigest := false
+	// Free-text digests (C5) for tabs whose content doesn't decompose into
+	// key/values — typically host-rendered (portal) tabs opaque to the LLM.
+	// Only appended when at least one tab supplies a digest, so the output
+	// is byte-for-byte identical to today when no digests are present.
+	hasDigest := false
+	for _, tab := range canvasTabs {
+		if strings.TrimSpace(tab.Digest) != "" {
+			hasDigest = true
+			break
+		}
+	}
+	if hasDigest {
+		b.WriteString("\nAdditional detail for what is currently shown in these tabs:\n\n")
 		for _, tab := range canvasTabs {
-			if strings.TrimSpace(tab.Digest) != "" {
-				hasDigest = true
-				break
+			d := strings.TrimSpace(tab.Digest)
+			if d == "" {
+				continue
 			}
-		}
-		if hasDigest {
-			prompt += "\nAdditional detail for what is currently shown in these tabs:\n\n"
-			for _, tab := range canvasTabs {
-				d := strings.TrimSpace(tab.Digest)
-				if d == "" {
-					continue
-				}
-				name := tab.Name
-				if name == "" {
-					name = tab.TabID
-				}
-				prompt += fmt.Sprintf("- **%s**: %s\n", name, d)
+			name := tab.Name
+			if name == "" {
+				name = tab.TabID
 			}
+			fmt.Fprintf(&b, "- **%s**: %s\n", name, d)
 		}
+	}
 
-		// Structured per-control option sets (C1 grounding). When any tab
-		// advertises the available choices for an on-screen control, list them
-		// explicitly so the model can answer "what options are there?" from the
-		// authoritative set instead of inventing values. Only appended when at
-		// least one tab supplies a non-empty option set, so a summary without
-		// Options renders byte-for-byte as the prior release.
-		hasOptions := false
-		for _, tab := range canvasTabs {
-			for _, o := range tab.Options {
-				if len(nonEmptyChoices(o.Choices)) > 0 {
-					hasOptions = true
-					break
-				}
-			}
-			if hasOptions {
+	// Structured per-control option sets (C1 grounding). When any tab
+	// advertises the available choices for an on-screen control, list them
+	// explicitly so the model can answer "what options are there?" from the
+	// authoritative set instead of inventing values. Only appended when at
+	// least one tab supplies a non-empty option set, so a summary without
+	// Options renders byte-for-byte as the prior release.
+	hasOptions := false
+	for _, tab := range canvasTabs {
+		for _, o := range tab.Options {
+			if len(nonEmptyChoices(o.Choices)) > 0 {
+				hasOptions = true
 				break
 			}
 		}
 		if hasOptions {
-			prompt += "\nSelectable options currently available on these tabs "
-			prompt += "(these are the ONLY valid choices — do not invent others):\n\n"
-			for _, tab := range canvasTabs {
-				// Collect this tab's non-empty controls first so tabs with no
-				// options contribute nothing (no dangling header).
-				type control struct {
-					label   string
-					choices []string
-				}
-				var controls []control
-				for _, o := range tab.Options {
-					choices := nonEmptyChoices(o.Choices)
-					if len(choices) == 0 {
-						continue
-					}
-					controls = append(controls, control{label: strings.TrimSpace(o.Label), choices: choices})
-				}
-				if len(controls) == 0 {
+			break
+		}
+	}
+	if hasOptions {
+		b.WriteString("\nSelectable options currently available on these tabs ")
+		b.WriteString("(these are the ONLY valid choices — do not invent others):\n\n")
+		for _, tab := range canvasTabs {
+			// Collect this tab's non-empty controls first so tabs with no
+			// options contribute nothing (no dangling header).
+			type control struct {
+				label   string
+				choices []string
+			}
+			var controls []control
+			for _, o := range tab.Options {
+				choices := nonEmptyChoices(o.Choices)
+				if len(choices) == 0 {
 					continue
 				}
-				name := tab.Name
-				if name == "" {
-					name = tab.TabID
+				controls = append(controls, control{label: strings.TrimSpace(o.Label), choices: choices})
+			}
+			if len(controls) == 0 {
+				continue
+			}
+			name := tab.Name
+			if name == "" {
+				name = tab.TabID
+			}
+			fmt.Fprintf(&b, "- **%s**:\n", name)
+			for _, c := range controls {
+				label := c.label
+				if label == "" {
+					label = "options"
 				}
-				prompt += fmt.Sprintf("- **%s**:\n", name)
-				for _, c := range controls {
-					label := c.label
-					if label == "" {
-						label = "options"
-					}
-					prompt += fmt.Sprintf("  - %s: %s\n", label, strings.Join(c.choices, ", "))
-				}
+				fmt.Fprintf(&b, "  - %s: %s\n", label, strings.Join(c.choices, ", "))
 			}
 		}
 	}
 
-	return prompt
+	return b.String()
 }
 
 // nonEmptyChoices returns the trimmed, de-duplicated, non-empty entries of a

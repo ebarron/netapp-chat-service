@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -62,6 +63,104 @@ type ChatMessageRequest struct {
 	Mode       string                   `json:"mode,omitempty"`
 	SessionID  string                   `json:"session_id,omitempty"`
 	CanvasTabs []agent.CanvasTabSummary `json:"canvas_tabs,omitempty"`
+}
+
+// Request body limits. The canvas_tabs array is taken verbatim from the
+// network client and is rendered into the system prompt before the first LLM
+// call, so without these caps the client alone decides how much work the
+// server performs per request (and how much of the process's memory it holds).
+// The limits are far above what any legitimate host sends: the chat component
+// keeps at most 5 canvas tabs open and the canvas design doc budgets ~10.
+const (
+	// maxChatMessageBytes bounds the POST /chat/message body before decoding.
+	maxChatMessageBytes = 1 << 20 // 1 MiB
+
+	// maxControlBodyBytes bounds the small control endpoints (session delete,
+	// capability updates, approve/deny, stop), whose bodies are a handful of
+	// identifiers.
+	maxControlBodyBytes = 64 << 10 // 64 KiB
+
+	// maxCanvasTabs caps the number of canvas tab summaries per request.
+	maxCanvasTabs = 64
+
+	// maxCanvasFieldLen caps each single-line canvas field rendered into the
+	// prompt (tab_id, kind, name, qualifier, status, option labels/choices).
+	maxCanvasFieldLen = 1024
+
+	// maxCanvasDigestLen caps a tab's free-text digest (C5).
+	maxCanvasDigestLen = 8 << 10 // 8 KiB
+
+	// maxCanvasKeyProperties caps the key_properties map on a single tab.
+	maxCanvasKeyProperties = 64
+
+	// maxCanvasOptionsPerTab / maxCanvasChoicesPerOption cap the structured
+	// per-control option sets (C1 grounding) on a single tab.
+	maxCanvasOptionsPerTab    = 32
+	maxCanvasChoicesPerOption = 128
+)
+
+// validateCanvasTabs rejects a canvas_tabs payload that is larger than any
+// real canvas. Prompt construction is linear in its size (see
+// agent.renderCanvasContext), so this is not load-bearing for complexity, but
+// it keeps the prompt — and the per-request work done before the LLM is
+// contacted — proportional to what a host can legitimately have on screen.
+// Returns a message safe to hand back to the client verbatim.
+func validateCanvasTabs(tabs []agent.CanvasTabSummary) error {
+	if len(tabs) > maxCanvasTabs {
+		return fmt.Errorf("canvas_tabs has %d entries (max %d)", len(tabs), maxCanvasTabs)
+	}
+	for i, tab := range tabs {
+		for _, f := range []struct {
+			name  string
+			value string
+		}{
+			{"tab_id", tab.TabID},
+			{"kind", tab.Kind},
+			{"name", tab.Name},
+			{"qualifier", tab.Qualifier},
+			{"status", tab.Status},
+		} {
+			if len(f.value) > maxCanvasFieldLen {
+				return fmt.Errorf("canvas_tabs[%d].%s is %d bytes (max %d)", i, f.name, len(f.value), maxCanvasFieldLen)
+			}
+		}
+		if len(tab.Digest) > maxCanvasDigestLen {
+			return fmt.Errorf("canvas_tabs[%d].digest is %d bytes (max %d)", i, len(tab.Digest), maxCanvasDigestLen)
+		}
+		if len(tab.KeyProperties) > maxCanvasKeyProperties {
+			return fmt.Errorf("canvas_tabs[%d].key_properties has %d entries (max %d)", i, len(tab.KeyProperties), maxCanvasKeyProperties)
+		}
+		if len(tab.Options) > maxCanvasOptionsPerTab {
+			return fmt.Errorf("canvas_tabs[%d].options has %d entries (max %d)", i, len(tab.Options), maxCanvasOptionsPerTab)
+		}
+		for j, o := range tab.Options {
+			if len(o.Label) > maxCanvasFieldLen {
+				return fmt.Errorf("canvas_tabs[%d].options[%d].label is %d bytes (max %d)", i, j, len(o.Label), maxCanvasFieldLen)
+			}
+			if len(o.Choices) > maxCanvasChoicesPerOption {
+				return fmt.Errorf("canvas_tabs[%d].options[%d].choices has %d entries (max %d)", i, j, len(o.Choices), maxCanvasChoicesPerOption)
+			}
+			for k, c := range o.Choices {
+				if len(c) > maxCanvasFieldLen {
+					return fmt.Errorf("canvas_tabs[%d].options[%d].choices[%d] is %d bytes (max %d)", i, j, k, len(c), maxCanvasFieldLen)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// limitBody caps how many bytes a handler will read from the request body.
+// Exceeding the cap surfaces as an *http.MaxBytesError from the JSON decoder,
+// which callers map to 413.
+func limitBody(w http.ResponseWriter, r *http.Request, max int64) {
+	r.Body = http.MaxBytesReader(w, r.Body, max)
+}
+
+// bodyTooLarge reports whether a decode error was caused by the body cap.
+func bodyTooLarge(err error) bool {
+	var maxErr *http.MaxBytesError
+	return errors.As(err, &maxErr)
 }
 
 // ChatEmitter is called for each SSE event.
@@ -132,13 +231,30 @@ func (s *Server) Handler() http.Handler {
 
 // PostChatMessage streams agent responses as SSE events.
 func (s *Server) PostChatMessage(w http.ResponseWriter, r *http.Request) {
+	// Bound the body before decoding, and the canvas payload before anything
+	// is done with it: both feed system-prompt construction, which runs
+	// synchronously on this goroutine before the first LLM call. Rejecting
+	// here happens before the session is created or the user message is
+	// appended, so an oversized request mutates no state.
+	limitBody(w, r, maxChatMessageBytes)
+
 	var req ChatMessageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if bodyTooLarge(err) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
+				"message": fmt.Sprintf("request body exceeds %d bytes", maxChatMessageBytes),
+			})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "invalid request body"})
 		return
 	}
 	if req.Message == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "message is required"})
+		return
+	}
+	if err := validateCanvasTabs(req.CanvasTabs); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"message": err.Error()})
 		return
 	}
 
@@ -218,6 +334,8 @@ func (s *Server) PostChatMessage(w http.ResponseWriter, r *http.Request) {
 
 // DeleteChatSession clears a session's conversation history.
 func (s *Server) DeleteChatSession(w http.ResponseWriter, r *http.Request) {
+	limitBody(w, r, maxControlBodyBytes)
+
 	var body struct {
 		SessionID string `json:"session_id"`
 	}
@@ -326,6 +444,8 @@ func (s *Server) GetChatCapabilities(w http.ResponseWriter, r *http.Request) {
 // Returns 409 with a helpful message when the change would blow the budget,
 // without mutating server state.
 func (s *Server) PostChatCapabilities(w http.ResponseWriter, r *http.Request) {
+	limitBody(w, r, maxControlBodyBytes)
+
 	var body struct {
 		Capabilities map[string]string `json:"capabilities"`
 		Mode         string            `json:"mode,omitempty"`
@@ -494,6 +614,8 @@ func effectiveToolBudget(total int, perCap map[string]int, routingOn bool) int {
 
 // PostChatApprove approves a pending tool call.
 func (s *Server) PostChatApprove(w http.ResponseWriter, r *http.Request) {
+	limitBody(w, r, maxControlBodyBytes)
+
 	var body struct {
 		ApprovalID string `json:"approval_id"`
 	}
@@ -513,6 +635,8 @@ func (s *Server) PostChatApprove(w http.ResponseWriter, r *http.Request) {
 
 // PostChatDeny denies a pending tool call.
 func (s *Server) PostChatDeny(w http.ResponseWriter, r *http.Request) {
+	limitBody(w, r, maxControlBodyBytes)
+
 	var body struct {
 		ApprovalID string `json:"approval_id"`
 	}
@@ -532,6 +656,8 @@ func (s *Server) PostChatDeny(w http.ResponseWriter, r *http.Request) {
 
 // PostChatStop cancels an in-progress chat.
 func (s *Server) PostChatStop(w http.ResponseWriter, r *http.Request) {
+	limitBody(w, r, maxControlBodyBytes)
+
 	var body struct {
 		SessionID string `json:"session_id"`
 	}

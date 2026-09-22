@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -607,6 +608,39 @@ func TestBuildSystemPrompt_CanvasGrounding(t *testing.T) {
 			t.Errorf("de-duplicated, trimmed choices expected; got:\n%s", prompt)
 		}
 	})
+}
+
+// TestBuildSystemPrompt_CanvasContextLinear guards the canvas section against
+// a return to quadratic construction. canvasTabs comes verbatim from the
+// network client, so appending each row with `prompt +=` (which copies the
+// whole accumulated prompt every iteration) turned a few hundred KB of
+// canvas_tabs into minutes of pinned CPU and tens of GB of allocation churn
+// before the first LLM call. With a strings.Builder the cost is proportional
+// to the rendered output: 100k empty tabs took >30s pre-fix and tens of
+// milliseconds after.
+func TestBuildSystemPrompt_CanvasContextLinear(t *testing.T) {
+	const tabs = 100_000
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	start := time.Now()
+	section := renderCanvasContext(make([]CanvasTabSummary, tabs))
+	elapsed := time.Since(start)
+	runtime.ReadMemStats(&after)
+	allocated := after.TotalAlloc - before.TotalAlloc
+
+	if elapsed > 5*time.Second {
+		t.Errorf("rendering %d canvas tabs took %v; construction must be linear in the output size", tabs, elapsed)
+	}
+	// O(output): the builder doubles its buffer and fmt uses small scratch
+	// buffers, so a modest constant factor over the rendered size is expected.
+	// The quadratic form allocated the whole accumulated prompt once per tab
+	// (~120GB for this input).
+	if limit := uint64(len(section)) * 16; allocated > limit {
+		t.Errorf("rendering %d canvas tabs allocated %d bytes for %d bytes of output; expected O(output)",
+			tabs, allocated, len(section))
+	}
 }
 
 // TestBuildSystemPromptWithRouting covers the Layer 2 group-index section of

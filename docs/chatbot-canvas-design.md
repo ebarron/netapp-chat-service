@@ -477,6 +477,8 @@ type CanvasTabSummary struct {
 
 Each canvas tab summary adds approximately 1–2 lines to the system prompt. With a practical maximum of ~10 open tabs, this adds at most ~20 lines — negligible relative to the system prompt's existing size and the LLM's context window.
 
+This budget is now enforced rather than assumed: `canvas_tabs` arrives verbatim from the network client, so `POST /chat/message` caps the array at 64 entries (with per-field length limits) and the whole body at 1 MiB, rejecting anything larger with `400`/`413` before the prompt is built. The section itself is rendered with a `strings.Builder`, so its cost is linear in the rendered output.
+
 The full JSON content of canvas tabs is **not** included in the system prompt. The LLM has enough context from the summary to refer to items and answer follow-up questions. If the user asks a question that requires data not in the summary (e.g., "what was the IOPS trend on that volume?"), the LLM can re-query the metrics tools.
 
 ---
