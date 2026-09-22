@@ -98,8 +98,21 @@ func main() {
 
 	srv := server.New(deps)
 
+	// ReadHeaderTimeout and IdleTimeout bound how long a connection can sit on
+	// a request goroutine before a handler runs; request bodies are capped per
+	// endpoint in the server package. ReadTimeout and WriteTimeout are left
+	// unset deliberately: /chat/message streams SSE for as long as the agent
+	// loop runs, and either deadline would cut live responses short.
+	httpSrv := &http.Server{
+		Addr:              cfg.Server.Addr,
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 20 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1 MiB
+	}
+
 	logger.Info("starting chat service", "addr", cfg.Server.Addr)
-	if err := http.ListenAndServe(cfg.Server.Addr, srv.Handler()); err != nil {
+	if err := httpSrv.ListenAndServe(); err != nil {
 		logger.Error("server error", "error", err)
 		os.Exit(1)
 	}

@@ -12,6 +12,30 @@
 - The per-turn canvas interceptor remembers the last valid payload per tab:
   exact duplicates are suppressed, valid updates still emit, and an invalid
   duplicate cannot follow and overwrite an exact `EmitResult` dashboard.
+- **Canvas context prompt construction is now linear.** The canvas section of
+  the system prompt was appended one row per tab with `prompt +=`, which copies
+  the whole accumulated prompt on every iteration — quadratic in the number of
+  client-supplied `canvas_tabs`, so a few hundred KB of tabs could pin a core
+  for tens of seconds (and a few MB for far longer) before the first LLM call,
+  on the request goroutine and uncancellable. It is now built with a
+  `strings.Builder`, like the sibling index renderers; the rendered prompt is
+  byte-for-byte unchanged.
+- **`POST /chat/message` bounds its input.** The body is capped at 1 MiB
+  (`413` when exceeded) and `canvas_tabs` at 64 entries, with per-field limits
+  (name/kind/qualifier/status/option labels and choices 1 KiB, `digest` 8 KiB,
+  64 `key_properties`, 32 options × 128 choices per tab) and a 128 KiB budget
+  for all canvas text in one request, rejected with `400` before the session is
+  created or the message appended. The tab count is enforced with a streaming
+  scan of the raw array, so an oversized array is refused without materializing
+  it (and a repeated `canvas_tabs` key cannot hide the work from the check).
+  The chat component keeps at most 5 canvas tabs open, so hosts are unaffected;
+  the same caps apply to `server.RunChat` for embedders that decode their own
+  transport. The other control endpoints cap their bodies at 64 KiB and answer
+  `413` past it. Request bodies also get a 30s upload deadline, cleared before
+  the SSE stream starts, since a byte cap alone does not stop a client from
+  holding a request goroutine open by trickling. The standalone binary now sets
+  `ReadHeaderTimeout`, `IdleTimeout` and `MaxHeaderBytes`; `ReadTimeout` and
+  `WriteTimeout` stay unset so SSE streams are never cut short.
 
 ## v0.2.1
 
