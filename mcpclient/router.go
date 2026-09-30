@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -142,15 +143,39 @@ func (r *Router) Connect(ctx context.Context, cfg ServerConfig) error {
 		return fmt.Errorf("mcp connect %q: %w", cfg.Name, err)
 	}
 
-	// Discover tools.
+	// Discover tools. The list is supplied by the server over the network and
+	// is untrusted: read at most maxToolListPages pages and
+	// maxToolsScannedPerServer entries so a hostile server cannot page us
+	// indefinitely (e.g. empty pages with a non-empty cursor), then validate
+	// and cap it.
 	var tools []*mcp.Tool
-	for tool, err := range session.Tools(ctx, nil) {
+	params := &mcp.ListToolsParams{}
+	for page := 0; ; page++ {
+		if page >= maxToolListPages {
+			r.logger.Error("mcp server tool list has too many pages, ignoring the remainder",
+				"server", cfg.Name, "pages", page, "scanned", len(tools))
+			break
+		}
+		res, err := session.ListTools(ctx, params)
 		if err != nil {
 			_ = session.Close()
 			return fmt.Errorf("mcp list tools %q: %w", cfg.Name, err)
 		}
-		tools = append(tools, tool)
+		tools = append(tools, res.Tools...)
+		if len(tools) >= maxToolsScannedPerServer {
+			if len(tools) > maxToolsScannedPerServer || res.NextCursor != "" {
+				r.logger.Error("mcp server tool list too long, ignoring the remainder",
+					"server", cfg.Name, "scanned", maxToolsScannedPerServer)
+			}
+			tools = tools[:maxToolsScannedPerServer]
+			break
+		}
+		if res.NextCursor == "" {
+			break
+		}
+		params.Cursor = res.NextCursor
 	}
+	tools = sanitizeTools(r.logger, cfg.Name, tools)
 
 	r.servers[cfg.Name] = &serverConn{
 		cfg:     cfg,
@@ -422,6 +447,146 @@ func (r *Router) rebuildToolIndex() {
 			r.toolDefs = append(r.toolDefs, r.convertTool(tool, name, allowSet))
 		}
 	}
+}
+
+// MaxToolsPerServer is the maximum number of tools accepted from a single MCP
+// server. It matches the per-request cap enforced by the agent (Azure OpenAI
+// rejects > 128 tools), so no single server can by itself exceed what one LLM
+// request may carry. Excess tools are dropped at Connect with a logged error.
+const MaxToolsPerServer = 128
+
+// maxToolsScannedPerServer bounds how many tools/list entries Connect reads
+// from one server (valid or not) before giving up on the rest of the list;
+// maxToolListPages bounds the number of tools/list pages requested.
+const (
+	maxToolsScannedPerServer = 4 * MaxToolsPerServer
+	maxToolListPages         = 32
+)
+
+// maxToolSchemaBytes and maxToolDescriptionBytes bound the per-tool payload a
+// server can inject into every LLM request, and MaxToolBytesPerServer bounds
+// the combined name+description+schema size of all tools kept from one
+// server, so a single server cannot push requests past provider size limits.
+const (
+	maxToolSchemaBytes      = 16 << 10
+	maxToolDescriptionBytes = 4 << 10
+	MaxToolBytesPerServer   = 256 << 10
+)
+
+// validToolNameRe is the tool-name pattern accepted by the LLM providers
+// (Anthropic, OpenAI/Azure OpenAI and Bedrock all require ^[a-zA-Z0-9_-]{1,64}$).
+// A name outside it makes the provider reject the whole request.
+var validToolNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+
+// sanitizeTools validates the tool list a server returned from tools/list.
+// Tools with a name the providers reject, a name repeated within the same
+// server, or an input schema that is not a bounded JSON object of type
+// "object" are dropped; over-long descriptions are truncated; and at most
+// MaxToolsPerServer tools totalling at most MaxToolBytesPerServer are kept.
+// Every drop is logged. The input slice is not modified.
+func sanitizeTools(logger *slog.Logger, serverName string, tools []*mcp.Tool) []*mcp.Tool {
+	out := make([]*mcp.Tool, 0, min(len(tools), MaxToolsPerServer))
+	seen := make(map[string]bool, len(tools))
+	truncated := 0
+	totalBytes := 0
+	for _, t := range tools {
+		if t == nil {
+			continue
+		}
+		if !validToolNameRe.MatchString(t.Name) {
+			logger.Error("mcp tool has invalid name, skipping",
+				"server", serverName, "tool", truncateForLog(t.Name))
+			continue
+		}
+		if seen[t.Name] {
+			logger.Error("mcp server published duplicate tool name, skipping",
+				"server", serverName, "tool", t.Name)
+			continue
+		}
+		schemaBytes, err := validateToolSchema(t.InputSchema)
+		if err != nil {
+			logger.Error("mcp tool has invalid input schema, skipping",
+				"server", serverName, "tool", t.Name, "error", err)
+			continue
+		}
+		if len(t.Description) > maxToolDescriptionBytes {
+			cp := *t
+			cp.Description = strings.ToValidUTF8(t.Description[:maxToolDescriptionBytes], "")
+			t = &cp
+		}
+		size := len(t.Name) + len(t.Description) + schemaBytes
+		if len(out) >= MaxToolsPerServer || totalBytes+size > MaxToolBytesPerServer {
+			truncated++
+			continue
+		}
+		seen[t.Name] = true
+		totalBytes += size
+		out = append(out, t)
+	}
+	if truncated > 0 {
+		logger.Error("mcp server published too many tools, excess dropped",
+			"server", serverName, "kept", len(out), "kept_bytes", totalBytes,
+			"dropped", truncated, "max", MaxToolsPerServer,
+			"max_bytes", MaxToolBytesPerServer)
+	}
+	return out
+}
+
+// validateToolSchema checks that an MCP tool input schema is a JSON object
+// with "type": "object" (required by the MCP spec and by OpenAI function
+// parameters), no larger than maxToolSchemaBytes, whose "properties" (if
+// present) maps names to schema objects or booleans and whose "required" (if
+// present) is a list of strings — the structure the providers validate. It
+// returns the schema's encoded size.
+func validateToolSchema(schema any) (int, error) {
+	raw, err := json.Marshal(schema)
+	if err != nil {
+		return 0, fmt.Errorf("unmarshalable schema: %w", err)
+	}
+	if len(raw) > maxToolSchemaBytes {
+		return 0, fmt.Errorf("schema is %d bytes, max %d", len(raw), maxToolSchemaBytes)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil || m == nil {
+		return 0, fmt.Errorf("schema is not a JSON object")
+	}
+	if typ, _ := m["type"].(string); typ != "object" {
+		return 0, fmt.Errorf(`schema type must be "object"`)
+	}
+	if p, ok := m["properties"]; ok && p != nil {
+		props, ok := p.(map[string]any)
+		if !ok {
+			return 0, fmt.Errorf(`schema "properties" must be an object`)
+		}
+		for name, v := range props {
+			switch v.(type) {
+			case map[string]any, bool:
+			default:
+				return 0, fmt.Errorf("schema property %q must be a schema object", truncateForLog(name))
+			}
+		}
+	}
+	if rq, ok := m["required"]; ok && rq != nil {
+		list, ok := rq.([]any)
+		if !ok {
+			return 0, fmt.Errorf(`schema "required" must be an array`)
+		}
+		for _, v := range list {
+			if _, ok := v.(string); !ok {
+				return 0, fmt.Errorf(`schema "required" entries must be strings`)
+			}
+		}
+	}
+	return len(raw), nil
+}
+
+// truncateForLog shortens a server-supplied string before it is logged.
+func truncateForLog(s string) string {
+	const limit = 128
+	if len(s) <= limit {
+		return s
+	}
+	return strings.ToValidUTF8(s[:limit], "") + "…"
 }
 
 // convertTool converts an MCP tool to an llm.ToolDef. ReadOnlyHint is

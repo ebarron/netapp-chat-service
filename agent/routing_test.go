@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"strings"
 	"testing"
 
@@ -347,51 +346,67 @@ func TestRoutingModeOffUnaffected(t *testing.T) {
 	}
 }
 
-// TestRoutedBudgetOverflowNamesGroup verifies a single loaded group whose tool
-// count exceeds the budget produces ErrTooManyTools naming that group.
-func TestRoutedBudgetOverflowNamesGroup(t *testing.T) {
+// TestRoutedBudgetOverflowExcludesGroup verifies a single loaded group whose
+// tool count exceeds the budget is excluded from the request (with the other
+// loaded groups kept) instead of failing the turn.
+func TestRoutedBudgetOverflowExcludesGroup(t *testing.T) {
 	n := MaxToolsPerRequest + 3
-	tools := make([]llm.ToolDef, n)
-	toolServer := make(map[string]string, n)
-	for i := range tools {
+	tools := make([]llm.ToolDef, 0, n+1)
+	toolServer := make(map[string]string, n+1)
+	for i := 0; i < n; i++ {
 		name := "big_tool_" + itoa(i)
-		tools[i] = mcpclient.MockReadOnlyTool(name, "")
+		tools = append(tools, mcpclient.MockReadOnlyTool(name, ""))
 		toolServer[name] = "big"
 	}
+	tools = append(tools, mcpclient.MockReadOnlyTool("small_tool", ""))
+	toolServer["small_tool"] = "small"
 	router := mcpclient.NewMockRouter(tools)
 	ag := New(nil, router,
-		WithCapabilityFilter(capability.CapabilityMap{"big": capability.StateAllow}, "read-only"),
+		WithCapabilityFilter(capability.CapabilityMap{"big": capability.StateAllow, "small": capability.StateAllow}, "read-only"),
 		WithToolServerMap(toolServer),
-		WithToolRouting(ToolRoutingInBand, []capability.Group{{ID: "big"}}, nil, 0, false),
+		WithToolRouting(ToolRoutingInBand, []capability.Group{{ID: "big"}, {ID: "small"}}, nil, 0, false),
 	)
-	loadGroups(t, ag, "big")
+	loadGroups(t, ag, "big", "small")
 
-	_, err := ag.filteredTools()
-	if !errors.Is(err, ErrTooManyTools) {
-		t.Fatalf("filteredTools() error = %v, want ErrTooManyTools", err)
+	ft, err := ag.filteredTools()
+	if err != nil {
+		t.Fatalf("filteredTools() error = %v, want nil (degrade, not fail)", err)
 	}
-	if !strings.Contains(err.Error(), "big") {
-		t.Errorf("error should name the offending group: %v", err)
+	got := toolNameSet(ft)
+	if got["big_tool_0"] {
+		t.Error("oversized group should be excluded")
+	}
+	if !got["small_tool"] || !got["load_tools"] {
+		t.Errorf("small group and internal tools should remain; got %v", got)
 	}
 }
 
 // TestRoutedBudgetMaxToolsCap verifies the optional max_tools cap is enforced
-// below MaxToolsPerRequest.
+// below MaxToolsPerRequest by excluding groups rather than failing.
 func TestRoutedBudgetMaxToolsCap(t *testing.T) {
 	tools := []llm.ToolDef{
 		mcpclient.MockReadOnlyTool("a", ""),
 		mcpclient.MockReadOnlyTool("b", ""),
 		mcpclient.MockReadOnlyTool("c", ""),
+		mcpclient.MockReadOnlyTool("d", ""),
 	}
 	router := mcpclient.NewMockRouter(tools)
 	ag := New(nil, router,
-		WithCapabilityFilter(capability.CapabilityMap{"g": capability.StateAllow}, "read-only"),
-		WithToolServerMap(map[string]string{"a": "g", "b": "g", "c": "g"}),
-		WithToolRouting(ToolRoutingInBand, []capability.Group{{ID: "g"}}, nil, 2, false),
+		WithCapabilityFilter(capability.CapabilityMap{"g": capability.StateAllow, "h": capability.StateAllow}, "read-only"),
+		WithToolServerMap(map[string]string{"a": "g", "b": "g", "c": "g", "d": "h"}),
+		WithToolRouting(ToolRoutingInBand, []capability.Group{{ID: "g"}, {ID: "h"}}, nil, 2, false),
 	)
-	loadGroups(t, ag, "g")
-	if _, err := ag.filteredTools(); !errors.Is(err, ErrTooManyTools) {
-		t.Fatalf("expected ErrTooManyTools with max_tools=2 and 3 loaded tools, got %v", err)
+	loadGroups(t, ag, "g", "h")
+	ft, err := ag.filteredTools()
+	if err != nil {
+		t.Fatalf("filteredTools() error = %v", err)
+	}
+	got := toolNameSet(ft)
+	if got["a"] || got["b"] || got["c"] {
+		t.Errorf("group g (3 tools) exceeds max_tools=2 and should be excluded; got %v", got)
+	}
+	if !got["d"] {
+		t.Errorf("group h should remain; got %v", got)
 	}
 }
 

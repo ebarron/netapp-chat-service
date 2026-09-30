@@ -61,9 +61,11 @@ func ValidToolRoutingMode(mode string) bool {
 	return false
 }
 
-// ErrTooManyTools is returned by filteredTools when the assembled tool list
-// exceeds MaxToolsPerRequest. The chat handler should surface a clear
-// message to the user instead of letting the LLM call fail.
+// ErrTooManyTools is returned by filteredTools when the registered internal
+// tools alone exceed the per-request budget. (An oversized MCP tool list does not
+// produce it: filteredTools excludes the largest MCP servers instead.) The
+// chat handler should surface a clear message to the user instead of letting
+// the LLM call fail.
 var ErrTooManyTools = errors.New("too many tools enabled")
 
 // maxRateLimitRetries is the number of times to retry after a 429 rate-limit error.
@@ -1395,34 +1397,72 @@ func (a *Agent) isReadOnlyTool(name string) bool {
 
 // filteredTools returns tools from the router, filtered by capability states
 // and the agent's read-only/read-write mode, plus any internal tools
-// registered on the agent. It returns ErrTooManyTools (wrapped with detail)
-// if the resulting list exceeds MaxToolsPerRequest.
+// registered on the agent.
+//
+// The MCP portion of the list is supplied by the connected servers and is
+// treated as untrusted: MCP tools whose names collide with an internal tool
+// are dropped, and when the MCP tools exceed the per-request budget
+// (MaxToolsPerRequest tools, MaxToolBytesPerRequest bytes) whole servers are
+// excluded from the request (see fitToolBudget) rather than failing the turn,
+// so no single server can deny service to every chat. ErrTooManyTools is
+// returned only when the operator-registered internal tools alone exceed the
+// budget.
 func (a *Agent) filteredTools() ([]llm.ToolDef, error) {
+	internal := a.appendInternalTools(nil)
+	internalBytes := 0
+	for _, t := range internal {
+		internalBytes += toolDefBytes(t)
+	}
+	if len(internal) > MaxToolsPerRequest || internalBytes > MaxToolBytesPerRequest {
+		a.Logger.Error("internal tool budget exceeded",
+			"internal", len(internal), "max", MaxToolsPerRequest,
+			"internal_bytes", internalBytes, "max_bytes", MaxToolBytesPerRequest)
+		return nil, fmt.Errorf("%w: %d internal tools registered, max %d",
+			ErrTooManyTools, len(internal), MaxToolsPerRequest)
+	}
+	// Names of every registered internal tool, regardless of mode. Run
+	// dispatches these names to the internal handler, so an MCP tool sharing
+	// one must never be advertised: it would duplicate a name in the provider
+	// request (rejected by the providers) or, for a read-write-only internal
+	// tool in read-only mode, expose that handler under the MCP definition.
+	reserved := make(map[string]bool, 2*len(a.InternalTools))
+	for name, it := range a.InternalTools {
+		reserved[name] = true
+		reserved[it.Def.Name] = true
+	}
+
 	allTools := a.Router.Tools()
 	var mcpTools []llm.ToolDef
-	if a.CapStates == nil || a.ToolServerMap == nil {
-		// No capability filter configured — pass MCP tools through as-is.
-		// Mode filtering only applies when capability filtering is active,
-		// which is how the chat handler always wires the agent in
-		// production.
-		mcpTools = allTools
-	} else {
-		for _, t := range allTools {
-			capID := a.ToolServerMap[t.Name]
-			state, hasState := a.CapStates[capID]
-			if hasState && state == capability.StateOff {
-				continue
-			}
-			// Write tools are sent to the LLM only when the global mode is
-			// read-write OR this capability is in ask-on-write state (which
-			// promises an interactive approval before any write executes).
-			allowWrites := a.Mode == "read-write" || (hasState && state == capability.StateAskOnWrite)
-			if !allowWrites && !t.ReadOnlyHint {
-				continue
-			}
-			mcpTools = append(mcpTools, t)
+	for _, t := range allTools {
+		if reserved[t.Name] {
+			a.Logger.Warn("MCP tool name collides with an internal tool, skipping",
+				"tool", t.Name)
+			continue
 		}
+		if a.CapStates == nil || a.ToolServerMap == nil {
+			// No capability filter configured — pass MCP tools through as-is.
+			// Mode filtering only applies when capability filtering is active,
+			// which is how the chat handler always wires the agent in
+			// production.
+			mcpTools = append(mcpTools, t)
+			continue
+		}
+		capID := a.ToolServerMap[t.Name]
+		state, hasState := a.CapStates[capID]
+		if hasState && state == capability.StateOff {
+			continue
+		}
+		// Write tools are sent to the LLM only when the global mode is
+		// read-write OR this capability is in ask-on-write state (which
+		// promises an interactive approval before any write executes).
+		allowWrites := a.Mode == "read-write" || (hasState && state == capability.StateAskOnWrite)
+		if !allowWrites && !t.ReadOnlyHint {
+			continue
+		}
+		mcpTools = append(mcpTools, t)
 	}
+
+	budget := MaxToolsPerRequest - len(internal)
 
 	// In-band tool routing (S7a): further restrict the (already
 	// capability/mode-filtered) MCP tools to the active group set —
@@ -1434,7 +1474,6 @@ func (a *Agent) filteredTools() ([]llm.ToolDef, error) {
 		active := a.activeGroups()
 		activeTools := a.activeToolSet()
 		routed := make([]llm.ToolDef, 0, len(mcpTools))
-		perGroup := make(map[string]int)
 		for _, t := range mcpTools {
 			capID := a.ToolServerMap[t.Name]
 			// A tool is included if its whole group is active (group-level
@@ -1443,37 +1482,112 @@ func (a *Agent) filteredTools() ([]llm.ToolDef, error) {
 				continue
 			}
 			routed = append(routed, t)
-			perGroup[capID]++
 		}
-		if err := a.checkRoutedBudget(perGroup); err != nil {
-			a.Logger.Error("routed tool budget exceeded",
-				"per_group", perGroup, "max", MaxToolsPerRequest, "max_routed", a.MaxRoutedTools)
-			return nil, err
+		if a.MaxRoutedTools > 0 && a.MaxRoutedTools < budget {
+			budget = a.MaxRoutedTools
 		}
 		mcpTools = routed
 	}
 
-	tools := a.appendInternalTools(mcpTools)
+	mcpTools = a.fitToolBudget(mcpTools, budget, MaxToolBytesPerRequest-internalBytes)
+	return append(mcpTools, internal...), nil
+}
 
-	if len(tools) > MaxToolsPerRequest {
-		// Collect per-capability counts for diagnostics.
-		perCap := make(map[string]int)
-		if a.ToolServerMap != nil {
-			for _, t := range mcpTools {
-				perCap[a.ToolServerMap[t.Name]]++
+// MaxToolBytesPerRequest bounds the combined name+description+schema size of
+// the tools sent in one LLM request, so the tool lists chosen by MCP servers
+// cannot push every request past the provider's request or context limits.
+// Enforced in (*Agent).filteredTools.
+const MaxToolBytesPerRequest = 384 << 10
+
+// toolDefBytes is the size a tool definition contributes to a request.
+func toolDefBytes(t llm.ToolDef) int {
+	return len(t.Name) + len(t.Description) + len(t.Schema)
+}
+
+// fitToolBudget returns tools unchanged when they fit within budget tools and
+// byteBudget bytes. Otherwise it excludes whole MCP servers until the
+// remainder fits and logs which servers were excluded. At each step it
+// excludes the smallest server whose removal alone makes the list fit, or,
+// when no single server suffices, the largest server (ties broken by name for
+// determinism). A server's tool list is chosen by that server, so an
+// oversized list degrades only that server's availability for this request
+// instead of aborting the turn for every user, and a server cannot push a
+// larger server out merely by tipping the total over the budget.
+func (a *Agent) fitToolBudget(tools []llm.ToolDef, budget, byteBudget int) []llm.ToolDef {
+	type usage struct{ count, bytes int }
+	var total usage
+	for _, t := range tools {
+		total.count++
+		total.bytes += toolDefBytes(t)
+	}
+	fits := func(u usage) bool { return u.count <= budget && u.bytes <= byteBudget }
+	if fits(total) {
+		return tools
+	}
+	toolServer := a.Router.ToolMap()
+	source := func(name string) string {
+		if srv, ok := toolServer[name]; ok {
+			return srv
+		}
+		// Fall back to the capability ID for routers that do not report
+		// server ownership.
+		return a.ToolServerMap[name]
+	}
+	perSource := make(map[string]usage)
+	for _, t := range tools {
+		u := perSource[source(t.Name)]
+		u.count++
+		u.bytes += toolDefBytes(t)
+		perSource[source(t.Name)] = u
+	}
+	remaining := make([]string, 0, len(perSource))
+	for s := range perSource {
+		remaining = append(remaining, s)
+	}
+	// Largest first (by the dimension that matters most: count, then bytes),
+	// ties by name.
+	sort.Slice(remaining, func(i, j int) bool {
+		ui, uj := perSource[remaining[i]], perSource[remaining[j]]
+		if ui.count != uj.count {
+			return ui.count > uj.count
+		}
+		if ui.bytes != uj.bytes {
+			return ui.bytes > uj.bytes
+		}
+		return remaining[i] < remaining[j]
+	})
+	excluded := make(map[string]bool)
+	var excludedList []string
+	for !fits(total) && len(remaining) > 0 {
+		pick := 0 // largest, unless a single smaller server suffices
+		for i := len(remaining) - 1; i >= 0; i-- {
+			u := perSource[remaining[i]]
+			if fits(usage{total.count - u.count, total.bytes - u.bytes}) {
+				pick = i
+				break
 			}
 		}
-		a.Logger.Error("tool budget exceeded",
-			"total", len(tools),
-			"max", MaxToolsPerRequest,
-			"mode", a.Mode,
-			"per_capability", perCap,
-		)
-		return nil, fmt.Errorf("%w: %d enabled, max %d (mode=%s). Disable an MCP capability or switch to read-only mode in chat settings.",
-			ErrTooManyTools, len(tools), MaxToolsPerRequest, a.Mode)
+		s := remaining[pick]
+		remaining = append(remaining[:pick], remaining[pick+1:]...)
+		excluded[s] = true
+		excludedList = append(excludedList, s)
+		total.count -= perSource[s].count
+		total.bytes -= perSource[s].bytes
 	}
-
-	return tools, nil
+	kept := make([]llm.ToolDef, 0, total.count)
+	for _, t := range tools {
+		if !excluded[source(t.Name)] {
+			kept = append(kept, t)
+		}
+	}
+	a.Logger.Error("tool budget exceeded, excluding MCP servers from this request",
+		"budget", budget,
+		"byte_budget", byteBudget,
+		"mode", a.Mode,
+		"per_server", perSource,
+		"excluded", excludedList,
+	)
+	return kept
 }
 
 // loadToolsDef returns the LLM tool definition for the internal load_tools
@@ -1692,37 +1806,6 @@ func (a *Agent) shouldForceGroupLoad() bool {
 	// A tool-level load (S8) counts as a selection too, so don't nudge if the
 	// model has loaded individual tools even without a whole group.
 	return len(a.activeGroups()) == 0 && len(a.activeToolSet()) == 0
-}
-
-// checkRoutedBudget asserts the post-routing per-group tool counts fit within
-// the effective budget. When a single group alone exceeds the budget, the
-// error names it — the signal that one server's fan-out is irreducible and
-// needs an operator-side fix.
-func (a *Agent) checkRoutedBudget(perGroup map[string]int) error {
-	budget := MaxToolsPerRequest
-	if a.MaxRoutedTools > 0 && a.MaxRoutedTools < budget {
-		budget = a.MaxRoutedTools
-	}
-	total := 0
-	for _, n := range perGroup {
-		total += n
-	}
-	if total <= budget {
-		return nil
-	}
-	var offenders []string
-	for g, n := range perGroup {
-		if n > budget {
-			offenders = append(offenders, fmt.Sprintf("%q (%d tools)", g, n))
-		}
-	}
-	if len(offenders) > 0 {
-		sort.Strings(offenders)
-		return fmt.Errorf("%w: loaded group %s alone exceeds the %d-tool budget; this server's tool fan-out is irreducible and needs an operator-side fix",
-			ErrTooManyTools, strings.Join(offenders, ", "), budget)
-	}
-	return fmt.Errorf("%w: %d tools across the loaded groups exceed the %d-tool budget; load fewer groups per turn",
-		ErrTooManyTools, total, budget)
 }
 
 // LastRoutingStats returns a copy of the telemetry from the most recent Run.
