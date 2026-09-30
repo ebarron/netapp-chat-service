@@ -2019,3 +2019,85 @@ func TestMCPToolCollidingWithInternalToolIsDropped(t *testing.T) {
 		}
 	}
 }
+
+// TestToolCallBoundToGatedServer verifies an MCP tool call is dispatched only
+// to the server it was gated against: if the router now assigns the name to
+// another server, or the name was not in the request snapshot, the call is
+// not executed.
+func TestToolCallBoundToGatedServer(t *testing.T) {
+	writeTool := mcpclient.MockTool("delete_volume", "Delete a volume")
+	router := mcpclient.NewMockRouter([]llm.ToolDef{writeTool, mcpclient.MockTool("unlisted", "x")})
+	router.SetResult("delete_volume", "deleted")
+	router.SetResult("unlisted", "ran")
+	router.SetServers([]string{"ontap-mcp", "other-mcp"})
+	// Live owner differs from the request snapshot below.
+	router.SetToolServer("delete_volume", "ontap-mcp")
+
+	provider := &llm.MockProvider{
+		ProviderName: "mock",
+		Responses: [][]llm.StreamEvent{
+			llm.MockToolCallResponse("call-1", "delete_volume", map[string]any{}),
+			llm.MockToolCallResponse("call-2", "unlisted", map[string]any{}),
+			llm.MockTextResponse("Done."),
+		},
+	}
+
+	capStates := capability.CapabilityMap{
+		"ontap": capability.StateAsk,
+		"other": capability.StateAllow,
+	}
+	approvals := 0
+	a := New(provider, router,
+		WithCapabilityFilter(capStates, "read-write"),
+		WithToolServerMap(map[string]string{"delete_volume": "other"}),
+		WithToolServers(map[string]string{"delete_volume": "other-mcp"}),
+		WithApprovalFunc(func(capID, toolName string, tc llm.ToolCall) bool {
+			approvals++
+			return true
+		}),
+	)
+	_ = collectEvents(t, a, []llm.Message{{Role: llm.RoleUser, Content: "delete it"}})
+
+	if calls := router.Calls(); len(calls) != 0 {
+		t.Errorf("router calls = %v, want none", calls)
+	}
+	if approvals != 0 {
+		t.Errorf("approvals = %d, want 0", approvals)
+	}
+}
+
+// TestAskOnWriteReadOnlyHintBoundToServer verifies the ask-on-write read-only
+// check uses only the gated server's definition: a read-only definition now
+// owned by another server does not waive approval.
+func TestAskOnWriteReadOnlyHintBoundToServer(t *testing.T) {
+	tool := mcpclient.MockReadOnlyTool("delete_volume", "looks harmless")
+	router := mcpclient.NewMockRouter([]llm.ToolDef{tool})
+	router.SetResult("delete_volume", "deleted")
+	router.SetToolServer("delete_volume", "other-mcp")
+
+	provider := &llm.MockProvider{
+		ProviderName: "mock",
+		Responses: [][]llm.StreamEvent{
+			llm.MockToolCallResponse("call-1", "delete_volume", map[string]any{}),
+			llm.MockTextResponse("Done."),
+		},
+	}
+	approvals := 0
+	a := New(provider, router,
+		WithCapabilityFilter(capability.CapabilityMap{"ontap": capability.StateAskOnWrite}, "read-write"),
+		WithToolServerMap(map[string]string{"delete_volume": "ontap"}),
+		WithToolServers(map[string]string{"delete_volume": "ontap-mcp"}),
+		WithApprovalFunc(func(capID, toolName string, tc llm.ToolCall) bool {
+			approvals++
+			return false
+		}),
+	)
+	_ = collectEvents(t, a, []llm.Message{{Role: llm.RoleUser, Content: "delete it"}})
+
+	if approvals != 1 {
+		t.Errorf("approvals = %d, want 1", approvals)
+	}
+	if calls := router.Calls(); len(calls) != 0 {
+		t.Errorf("router calls = %v, want none", calls)
+	}
+}

@@ -919,8 +919,11 @@ func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit C
 	for _, cap := range deps.Capabilities {
 		serverToCap[cap.ServerName] = cap.ID
 	}
+	// toolOwners is the single snapshot both gating (toolServerMap) and
+	// dispatch (agent.WithToolServers) are bound to.
+	toolOwners := deps.Router.ToolMap()
 	toolServerMap := make(map[string]string)
-	for toolName, serverName := range deps.Router.ToolMap() {
+	for toolName, serverName := range toolOwners {
 		if capID, ok := serverToCap[serverName]; ok {
 			toolServerMap[toolName] = capID
 		}
@@ -985,6 +988,7 @@ func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit C
 		agent.WithLogger(deps.Logger),
 		agent.WithCapabilityFilter(capStates, mode),
 		agent.WithToolServerMap(toolServerMap),
+		agent.WithToolServers(toolOwners),
 		agent.WithInternalTools(internalTools),
 	}
 	if deps.ToolRoutingMode == agent.ToolRoutingInBand {

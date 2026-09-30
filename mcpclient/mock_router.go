@@ -89,6 +89,32 @@ func (m *MockRouter) CallTool(_ context.Context, tc llm.ToolCall) (string, error
 	return "", fmt.Errorf("mock: no result configured for tool %q", tc.Name)
 }
 
+// CallToolOn is CallTool bound to serverName: when a server mapping for the
+// tool is configured (SetToolServer) and names a different server, the call
+// fails without being recorded.
+func (m *MockRouter) CallToolOn(ctx context.Context, serverName string, tc llm.ToolCall) (string, error) {
+	m.mu.RLock()
+	owner, mapped := m.toolServers[tc.Name]
+	m.mu.RUnlock()
+	if mapped && owner != serverName {
+		return "", fmt.Errorf("mock: tool %q is not served by %q", tc.Name, serverName)
+	}
+	return m.CallTool(ctx, tc)
+}
+
+// ResolveTool returns the configured server (SetToolServer) and definition
+// for the tool name.
+func (m *MockRouter) ResolveTool(name string) (string, llm.ToolDef, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, t := range m.tools {
+		if t.Name == name {
+			return m.toolServers[name], t, true
+		}
+	}
+	return "", llm.ToolDef{}, false
+}
+
 // ConnectedServers returns the simulated server names.
 func (m *MockRouter) ConnectedServers() []string {
 	m.mu.RLock()
@@ -160,6 +186,10 @@ var _ ToolRouter = (*MockRouter)(nil)
 type ToolRouter interface {
 	Tools() []llm.ToolDef
 	CallTool(ctx context.Context, tc llm.ToolCall) (string, error)
+	// CallToolOn routes the call only if serverName currently owns tc.Name.
+	CallToolOn(ctx context.Context, serverName string, tc llm.ToolCall) (string, error)
+	// ResolveTool returns the owning server and definition of a tool name.
+	ResolveTool(name string) (serverName string, def llm.ToolDef, ok bool)
 	ConnectedServers() []string
 	ToolMap() map[string]string
 	CollectForwardableHeaders(src http.Header) map[string]string

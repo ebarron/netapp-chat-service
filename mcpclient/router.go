@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -237,12 +238,23 @@ func (r *Router) Tools() []llm.ToolDef {
 func (r *Router) CallTool(ctx context.Context, tc llm.ToolCall) (string, error) {
 	r.mu.RLock()
 	serverName, ok := r.toolMap[tc.Name]
+	r.mu.RUnlock()
 	if !ok {
-		r.mu.RUnlock()
 		return "", fmt.Errorf("unknown tool: %q", tc.Name)
 	}
-	sc := r.servers[serverName]
-	r.mu.RUnlock()
+	return r.CallToolOn(ctx, serverName, tc)
+}
+
+// CallToolOn is CallTool bound to the server the caller resolved (and gated)
+// tc.Name against. The call is sent only if serverName still owns tc.Name,
+// both before the call and before a stale-session retry, so an index rebuild
+// between the caller's decision and dispatch can never route the call to a
+// different server.
+func (r *Router) CallToolOn(ctx context.Context, serverName string, tc llm.ToolCall) (string, error) {
+	sc, err := r.ownedConn(serverName, tc.Name)
+	if err != nil {
+		return "", err
+	}
 
 	// Parse input arguments.
 	var args map[string]any
@@ -266,13 +278,13 @@ func (r *Router) CallTool(ctx context.Context, tc llm.ToolCall) (string, error) 
 			return "", fmt.Errorf("tool call %q failed and reconnect failed (%v): %w",
 				tc.Name, rcErr, err)
 		}
-		// Re-fetch sc — Connect replaced the underlying session.
-		r.mu.RLock()
-		sc = r.servers[serverName]
-		r.mu.RUnlock()
-		if sc == nil {
-			return "", fmt.Errorf("tool call %q failed: server %q vanished after reconnect: %w",
-				tc.Name, serverName, err)
+		// Re-fetch sc — Connect replaced the underlying session — and
+		// re-check that the server still owns the tool after the rebuild.
+		var rfErr error
+		sc, rfErr = r.ownedConn(serverName, tc.Name)
+		if rfErr != nil {
+			return "", fmt.Errorf("tool call %q failed after reconnect (%v): %w",
+				tc.Name, rfErr, err)
 		}
 		result, err = sc.session.CallTool(ctx, params)
 	}
@@ -285,6 +297,42 @@ func (r *Router) CallTool(ctx context.Context, tc llm.ToolCall) (string, error) 
 	}
 
 	return extractText(result), nil
+}
+
+// ownedConn returns the connection for serverName if it is connected and
+// currently owns the tool name.
+func (r *Router) ownedConn(serverName, tool string) (*serverConn, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	owner, ok := r.toolMap[tool]
+	if !ok {
+		return nil, fmt.Errorf("unknown tool: %q", tool)
+	}
+	if owner != serverName {
+		return nil, fmt.Errorf("tool %q is not served by %q", tool, serverName)
+	}
+	sc := r.servers[serverName]
+	if sc == nil || sc.session == nil {
+		return nil, fmt.Errorf("tool %q: server %q is not connected", tool, serverName)
+	}
+	return sc, nil
+}
+
+// ResolveTool returns the server that currently owns the tool name and its
+// definition, read under a single lock so the two are consistent.
+func (r *Router) ResolveTool(name string) (string, llm.ToolDef, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	serverName, ok := r.toolMap[name]
+	if !ok {
+		return "", llm.ToolDef{}, false
+	}
+	for _, def := range r.toolDefs {
+		if def.Name == name {
+			return serverName, def, true
+		}
+	}
+	return "", llm.ToolDef{}, false
 }
 
 // isStaleSessionErr reports whether an error from the MCP transport indicates
@@ -428,19 +476,41 @@ func (r *Router) Close() error {
 
 // rebuildToolIndex rebuilds the merged tool list and routing map.
 // Must be called with r.mu held.
+//
+// Tool names are the routing and gating key, so each must identify exactly
+// one server. A name published by more than one connected server is
+// ambiguous and is dropped from every server that publishes it (logged as an
+// error), rather than handed to whichever server a map iteration visits
+// first. Servers are visited in name order so the result is deterministic.
 func (r *Router) rebuildToolIndex() {
 	r.toolMap = make(map[string]string)
 	r.toolDefs = nil
 
-	for name, sc := range r.servers {
+	names := make([]string, 0, len(r.servers))
+	for name := range r.servers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	publishers := make(map[string][]string)
+	for _, name := range names {
+		for _, tool := range r.servers[name].tools {
+			publishers[tool.Name] = append(publishers[tool.Name], name)
+		}
+	}
+
+	for _, name := range names {
+		sc := r.servers[name]
 		allowSet := make(map[string]bool, len(sc.cfg.ReadOnlyTools))
 		for _, t := range sc.cfg.ReadOnlyTools {
 			allowSet[t] = true
 		}
 		for _, tool := range sc.tools {
-			if prev, exists := r.toolMap[tool.Name]; exists {
-				r.logger.Warn("duplicate MCP tool name, skipping",
-					"tool", tool.Name, "server", name, "kept", prev)
+			if servers := publishers[tool.Name]; len(servers) > 1 {
+				if servers[0] == name {
+					r.logger.Error("MCP tool name published by multiple servers, disabling it on all of them",
+						"tool", tool.Name, "servers", servers)
+				}
 				continue
 			}
 			r.toolMap[tool.Name] = name

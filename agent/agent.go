@@ -201,6 +201,11 @@ type Agent struct {
 	// ToolServerMap maps tool name -> capability ID for ask-mode routing.
 	// Populated at agent creation from the router.
 	ToolServerMap map[string]string
+	// ToolServers maps tool name -> MCP server name, taken from the same
+	// router snapshot as ToolServerMap. When set, each MCP tool call is gated
+	// and dispatched against the server recorded here, and fails if that
+	// server no longer owns the name; tools absent from it are not called.
+	ToolServers map[string]string
 	// ApprovalFunc is called when a tool requires user approval (Ask mode).
 	// It returns true if approved. If nil, ask-mode tools are auto-approved.
 	ApprovalFunc func(capID, toolName string, tc llm.ToolCall) bool
@@ -326,6 +331,12 @@ func WithCapabilityFilter(states capability.CapabilityMap, mode string) Option {
 // WithToolServerMap sets the tool-to-capability mapping for ask-mode routing.
 func WithToolServerMap(m map[string]string) Option {
 	return func(a *Agent) { a.ToolServerMap = m }
+}
+
+// WithToolServers sets the tool-to-server snapshot that MCP tool calls are
+// bound to (see Agent.ToolServers).
+func WithToolServers(m map[string]string) Option {
+	return func(a *Agent) { a.ToolServers = m }
 }
 
 // WithApprovalFunc sets the callback for ask-mode tool approval.
@@ -648,6 +659,31 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 					return
 				}
 
+				// Bind the call to the server it is gated against, so a
+				// router rebuild cannot hand the name to another server
+				// between the approval decision and dispatch.
+				serverName, bound := "", false
+				if a.ToolServers != nil {
+					srv, ok := a.ToolServers[tc.Name]
+					if !ok {
+						errMsg := fmt.Sprintf("tool %q is not available in this request", tc.Name)
+						tr.events = append(tr.events, Event{
+							Type:     EventToolError,
+							ToolName: tc.Name,
+							Error:    errMsg,
+						})
+						tr.message = llm.Message{
+							Role:       llm.RoleTool,
+							Content:    fmt.Sprintf("Error executing tool %s: %s", tc.Name, errMsg),
+							ToolCallID: tc.ID,
+						}
+						tr.isError = true
+						results[idx] = tr
+						return
+					}
+					serverName, bound = srv, true
+				}
+
 				// Determine the capability for this tool.
 				capID := ""
 				if a.ToolServerMap != nil {
@@ -661,7 +697,7 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 				if a.CapStates != nil && capID != "" {
 					state, ok := a.CapStates[capID]
 					needsApproval := ok && (state == capability.StateAsk ||
-						(state == capability.StateAskOnWrite && !a.isReadOnlyTool(tc.Name)))
+						(state == capability.StateAskOnWrite && !a.isReadOnlyTool(tc.Name, serverName, bound)))
 					if needsApproval {
 						if a.ApprovalFunc != nil {
 							approved := a.ApprovalFunc(capID, tc.Name, tc)
@@ -691,7 +727,13 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 					Capability: capID,
 				})
 
-				result, err := a.Router.CallTool(ctx, tc)
+				var result string
+				var err error
+				if bound {
+					result, err = a.Router.CallToolOn(ctx, serverName, tc)
+				} else {
+					result, err = a.Router.CallTool(ctx, tc)
+				}
 				if err != nil {
 					a.Logger.Warn("tool call failed",
 						"tool", tc.Name,
@@ -1385,8 +1427,14 @@ func marshalToolInput(input json.RawMessage) string {
 // isReadOnlyTool reports whether the tool with the given name is annotated
 // as read-only by the connected MCP server. Tools that are not present
 // (e.g. internal tools) are reported as not read-only so that ask-on-write
-// errs on the side of prompting.
-func (a *Agent) isReadOnlyTool(name string) bool {
+// errs on the side of prompting. When bound, the hint is read only from
+// serverName's definition; if another server (or none) now owns the name the
+// tool is reported as not read-only.
+func (a *Agent) isReadOnlyTool(name, serverName string, bound bool) bool {
+	if bound {
+		srv, def, ok := a.Router.ResolveTool(name)
+		return ok && srv == serverName && def.ReadOnlyHint
+	}
 	for _, t := range a.Router.Tools() {
 		if t.Name == name {
 			return t.ReadOnlyHint
