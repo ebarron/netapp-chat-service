@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -70,23 +71,49 @@ func TestStateChangingEndpointsRejectNonJSON(t *testing.T) {
 		})
 	}
 
+	// Control endpoints: the session, pending approval and active turn they
+	// act on must all survive a forged request.
+	const sessionID, approvalID = "csrf-session", "csrf-approval"
 	srv, _ := limitsServer()
-	for _, rt := range []struct{ method, path string }{
-		{http.MethodDelete, "/chat/session"},
-		{http.MethodPost, "/chat/approve"},
-		{http.MethodPost, "/chat/deny"},
-		{http.MethodPost, "/chat/stop"},
-	} {
-		t.Run(rt.path, func(t *testing.T) {
-			req := httptest.NewRequest(rt.method, rt.path,
-				strings.NewReader(`{"session_id":"s","approval_id":"a"}`))
-			req.Header.Set("Content-Type", "text/plain")
-			w := httptest.NewRecorder()
-			srv.Handler().ServeHTTP(w, req)
-			if w.Code != http.StatusUnsupportedMediaType {
-				t.Errorf("%s %s status = %d, want 415", rt.method, rt.path, w.Code)
-			}
-		})
+	srv.deps.Sessions.GetOrCreate(sessionID)
+	approval := &PendingApproval{ID: approvalID, resultCh: make(chan bool, 1)}
+	pendingApprovals.Store(approvalID, approval)
+	defer pendingApprovals.Delete(approvalID)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	activeContexts.Store(sessionID, cancel)
+	defer activeContexts.Delete(sessionID)
+
+	for _, ct := range nonJSONContentTypes {
+		for _, rt := range []struct{ method, path string }{
+			{http.MethodDelete, "/chat/session"},
+			{http.MethodPost, "/chat/approve"},
+			{http.MethodPost, "/chat/deny"},
+			{http.MethodPost, "/chat/stop"},
+		} {
+			t.Run(rt.path+"/"+ct, func(t *testing.T) {
+				req := httptest.NewRequest(rt.method, rt.path,
+					strings.NewReader(`{"session_id":"`+sessionID+`","approval_id":"`+approvalID+`"}`))
+				if ct != "" {
+					req.Header.Set("Content-Type", ct)
+				}
+				w := httptest.NewRecorder()
+				srv.Handler().ServeHTTP(w, req)
+				if w.Code != http.StatusUnsupportedMediaType {
+					t.Errorf("%s %s status = %d, want 415", rt.method, rt.path, w.Code)
+				}
+			})
+		}
+	}
+
+	if srv.deps.Sessions.Get(sessionID) == nil {
+		t.Error("forged request deleted the session")
+	}
+	if _, ok := pendingApprovals.Load(approvalID); !ok || len(approval.resultCh) != 0 {
+		t.Error("forged request resolved the pending approval")
+	}
+	if _, ok := activeContexts.Load(sessionID); !ok || ctx.Err() != nil {
+		t.Error("forged request stopped the active chat")
 	}
 }
 
