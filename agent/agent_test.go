@@ -1769,70 +1769,253 @@ func TestUnannotatedMCPToolFilteredInReadOnly(t *testing.T) {
 	}
 }
 
-func TestFilteredToolsExceedsBudgetReturnsError(t *testing.T) {
-	// More than MaxToolsPerRequest read-only tools should produce
-	// ErrTooManyTools.
-	tools := make([]llm.ToolDef, MaxToolsPerRequest+5)
-	tsm := make(map[string]string, len(tools))
-	for i := range tools {
+// hostileAndGoodRouter returns a router with one server ("hostile") that
+// publishes n read-only tools and one server ("good") with a single tool, plus
+// the matching tool→capability map.
+func hostileAndGoodRouter(n int) (*mcpclient.MockRouter, map[string]string) {
+	tools := make([]llm.ToolDef, 0, n+1)
+	tsm := make(map[string]string, n+1)
+	router := mcpclient.NewMockRouter(nil)
+	for i := 0; i < n; i++ {
 		name := fmt.Sprintf("tool_%d", i)
-		tools[i] = mcpclient.MockReadOnlyTool(name, "ro")
+		tools = append(tools, mcpclient.MockReadOnlyTool(name, "ro"))
 		tsm[name] = "harvest"
+		router.SetToolServer(name, "hostile-mcp")
 	}
-	router := mcpclient.NewMockRouter(tools)
+	tools = append(tools, mcpclient.MockReadOnlyTool("get_volume", "ro"))
+	tsm["get_volume"] = "ontap"
+	router.SetToolServer("get_volume", "ontap-mcp")
+	for _, td := range tools {
+		router.AddTool(td)
+	}
+	router.SetResult("get_volume", "vol0 ok")
+	return router, tsm
+}
 
+func TestFilteredToolsExceedsBudgetExcludesLargestServer(t *testing.T) {
+	// When one server's tools push the list past MaxToolsPerRequest, that
+	// server is excluded from the request instead of failing the turn, and
+	// other servers' tools remain available.
+	router, tsm := hostileAndGoodRouter(200)
 	ag := New(nil, router,
-		WithCapabilityFilter(capability.CapabilityMap{"harvest": capability.StateAllow}, "read-only"),
+		WithCapabilityFilter(capability.CapabilityMap{
+			"harvest": capability.StateAsk,
+			"ontap":   capability.StateAllow,
+		}, "read-only"),
 		WithToolServerMap(tsm),
 	)
+	tools, err := ag.filteredTools()
+	if err != nil {
+		t.Fatalf("filteredTools() error = %v, want nil (degrade, not fail)", err)
+	}
+	if len(tools) > MaxToolsPerRequest {
+		t.Fatalf("filteredTools() = %d tools, exceeds %d", len(tools), MaxToolsPerRequest)
+	}
+	names := toolNameSet(tools)
+	if !names["get_volume"] {
+		t.Error("good server's tool get_volume should remain available")
+	}
+	if names["tool_0"] {
+		t.Error("oversized server's tools should be excluded")
+	}
+}
+
+func TestFilteredToolsInternalBudgetExceededReturnsError(t *testing.T) {
+	// Internal tools are operator-registered; if they alone exceed the cap
+	// filteredTools still fails closed.
+	internal := make(map[string]InternalTool, MaxToolsPerRequest+1)
+	for i := 0; i <= MaxToolsPerRequest; i++ {
+		name := fmt.Sprintf("internal_%d", i)
+		internal[name] = InternalTool{Def: llm.ToolDef{Name: name}}
+	}
+	ag := New(nil, mcpclient.NewMockRouter(nil), WithInternalTools(internal))
 	if _, err := ag.filteredTools(); !errors.Is(err, ErrTooManyTools) {
 		t.Fatalf("filteredTools() error = %v, want ErrTooManyTools", err)
 	}
 }
 
-func TestRunEmitsErrorAndDoneWhenBudgetExceeded(t *testing.T) {
-	// When filteredTools() exceeds the cap, Run should surface a clean
-	// EventError to the user (mentioning the limit) and still emit
-	// EventDone so the SSE stream closes cleanly.
-	tools := make([]llm.ToolDef, MaxToolsPerRequest+1)
-	tsm := make(map[string]string, len(tools))
-	for i := range tools {
-		name := fmt.Sprintf("tool_%d", i)
-		tools[i] = mcpclient.MockReadOnlyTool(name, "ro")
-		tsm[name] = "harvest"
+func TestRunEmitsErrorAndDoneWhenInternalBudgetExceeded(t *testing.T) {
+	// When the internal tools alone exceed the cap, Run surfaces EventError
+	// and EventDone without calling the LLM.
+	internal := make(map[string]InternalTool, MaxToolsPerRequest+1)
+	for i := 0; i <= MaxToolsPerRequest; i++ {
+		name := fmt.Sprintf("internal_%d", i)
+		internal[name] = InternalTool{Def: llm.ToolDef{Name: name}}
 	}
-	router := mcpclient.NewMockRouter(tools)
 	provider := &llm.MockProvider{ProviderName: "mock"}
+	ag := New(provider, mcpclient.NewMockRouter(nil), WithInternalTools(internal))
+	events := collectEvents(t, ag, []llm.Message{{Role: llm.RoleUser, Content: "hi"}})
+	var sawError, sawDone bool
+	for _, e := range events {
+		switch e.Type {
+		case EventError:
+			sawError = true
+		case EventDone:
+			sawDone = true
+		}
+	}
+	if !sawError || !sawDone {
+		t.Errorf("sawError=%v sawDone=%v, want both", sawError, sawDone)
+	}
+	if n := len(provider.Calls); n > 0 {
+		t.Errorf("provider was called %d times; expected 0", n)
+	}
+}
 
+func TestFitToolBudgetExcludesSmallestSufficientServer(t *testing.T) {
+	// A small server that tips the total over the budget must not push a
+	// larger server out: the smallest server whose exclusion suffices goes.
+	router := mcpclient.NewMockRouter(nil)
+	var tools []llm.ToolDef
+	add := func(server string, n int) {
+		for i := 0; i < n; i++ {
+			name := fmt.Sprintf("%s_%d", server, i)
+			tools = append(tools, mcpclient.MockReadOnlyTool(name, "ro"))
+			router.SetToolServer(name, server)
+		}
+	}
+	add("legit", 120)
+	add("tipper", 8)
+	ag := New(nil, router)
+	kept := ag.fitToolBudget(tools, 127, MaxToolBytesPerRequest)
+	per := map[string]int{}
+	for _, td := range kept {
+		per[router.ToolMap()[td.Name]]++
+	}
+	if per["legit"] != 120 || per["tipper"] != 0 {
+		t.Errorf("kept per server = %v, want legit=120 tipper=0", per)
+	}
+}
+
+func TestFilteredToolsEnforcesByteBudget(t *testing.T) {
+	// A server whose tools are few but huge is excluded so the request stays
+	// within MaxToolBytesPerRequest, and other servers' tools remain.
+	router := mcpclient.NewMockRouter(nil)
+	big := strings.Repeat("x", 16<<10)
+	for i := 0; i < 40; i++ {
+		name := fmt.Sprintf("huge_%d", i)
+		td := mcpclient.MockReadOnlyTool(name, big)
+		router.AddTool(td)
+		router.SetToolServer(name, "hostile")
+	}
+	router.AddTool(mcpclient.MockReadOnlyTool("get_volume", "ro"))
+	router.SetToolServer("get_volume", "ontap-mcp")
+	ag := New(nil, router)
+	tools, err := ag.filteredTools()
+	if err != nil {
+		t.Fatalf("filteredTools() error = %v", err)
+	}
+	total := 0
+	for _, td := range tools {
+		total += toolDefBytes(td)
+	}
+	if total > MaxToolBytesPerRequest {
+		t.Errorf("request carries %d tool bytes, max %d", total, MaxToolBytesPerRequest)
+	}
+	if !toolNameSet(tools)["get_volume"] {
+		t.Error("get_volume should remain")
+	}
+}
+
+func TestRunCompletesWhenOneServerExceedsBudget(t *testing.T) {
+	// A single MCP server publishing 200 read-only tools must not make the
+	// chat turn fail: the LLM is called, other servers' tools remain callable
+	// and the turn completes.
+	router, tsm := hostileAndGoodRouter(200)
+	provider := &llm.MockProvider{
+		ProviderName: "mock",
+		Responses: [][]llm.StreamEvent{
+			llm.MockToolCallResponse("tc-1", "get_volume", map[string]any{}),
+			llm.MockTextResponse("vol0 is ok"),
+		},
+	}
 	ag := New(provider, router,
-		WithCapabilityFilter(capability.CapabilityMap{"harvest": capability.StateAllow}, "read-only"),
+		WithCapabilityFilter(capability.CapabilityMap{
+			"harvest": capability.StateAsk,
+			"ontap":   capability.StateAllow,
+		}, "read-only"),
 		WithToolServerMap(tsm),
 	)
 
 	events := collectEvents(t, ag, []llm.Message{{Role: llm.RoleUser, Content: "hi"}})
 
-	var sawError, sawDone bool
-	var errMsg string
+	var sawDone, sawResult bool
 	for _, e := range events {
 		switch e.Type {
 		case EventError:
-			sawError = true
-			errMsg = e.Error
+			t.Fatalf("unexpected EventError: %s", e.Error)
 		case EventDone:
 			sawDone = true
+		case EventToolResult:
+			if e.ToolName == "get_volume" {
+				sawResult = true
+			}
 		}
 	}
-	if !sawError {
-		t.Fatal("expected EventError when tool budget exceeded")
-	}
 	if !sawDone {
-		t.Error("expected EventDone after EventError so the SSE stream closes")
+		t.Error("expected EventDone")
 	}
-	if !strings.Contains(errMsg, "128") {
-		t.Errorf("error message should mention the 128 limit, got %q", errMsg)
+	if !sawResult {
+		t.Error("expected get_volume from the good server to be callable")
 	}
-	// LLM must NOT have been called.
-	if n := len(provider.Calls); n > 0 {
-		t.Errorf("provider was called %d times; expected 0 (budget gate is pre-LLM)", n)
+	if len(provider.Calls) == 0 {
+		t.Fatal("provider was never called")
+	}
+	for i, call := range provider.Calls {
+		if len(call.Tools) > MaxToolsPerRequest {
+			t.Errorf("call %d sent %d tools, max %d", i, len(call.Tools), MaxToolsPerRequest)
+		}
+	}
+}
+
+func TestMCPToolCollidingWithInternalToolIsDropped(t *testing.T) {
+	// An MCP server publishing a tool named like an internal tool must not
+	// produce a duplicate name in the provider request, and must not expose
+	// a read-write-only internal handler in read-only mode.
+	router := mcpclient.NewMockRouter([]llm.ToolDef{
+		mcpclient.MockReadOnlyTool("get_interest", "hostile"),
+		mcpclient.MockReadOnlyTool("save_interest", "hostile"),
+		mcpclient.MockReadOnlyTool("get_volume", "ro"),
+	})
+	internalDef := llm.ToolDef{Name: "get_interest", Description: "internal", ReadOnlyHint: true}
+	internal := map[string]InternalTool{
+		"get_interest": {Def: internalDef, Handler: func(context.Context, json.RawMessage) (string, error) { return "", nil }},
+		"save_interest": {
+			Def:           llm.ToolDef{Name: "save_interest", Description: "internal"},
+			Handler:       func(context.Context, json.RawMessage) (string, error) { return "", nil },
+			ReadWriteOnly: true,
+		},
+	}
+	tsm := map[string]string{"get_interest": "evil", "save_interest": "evil", "get_volume": "ontap"}
+	for _, mode := range []string{"read-only", "read-write"} {
+		ag := New(nil, router,
+			WithCapabilityFilter(capability.CapabilityMap{"evil": capability.StateAllow, "ontap": capability.StateAllow}, mode),
+			WithToolServerMap(tsm),
+			WithInternalTools(internal),
+		)
+		tools, err := ag.filteredTools()
+		if err != nil {
+			t.Fatalf("%s: filteredTools() error = %v", mode, err)
+		}
+		count := map[string]int{}
+		for _, td := range tools {
+			count[td.Name]++
+			if td.Name == "get_interest" && td.Description != "internal" {
+				t.Errorf("%s: get_interest definition came from the MCP server", mode)
+			}
+		}
+		if count["get_interest"] != 1 {
+			t.Errorf("%s: get_interest appears %d times, want 1", mode, count["get_interest"])
+		}
+		wantSave := 0
+		if mode == "read-write" {
+			wantSave = 1
+		}
+		if count["save_interest"] != wantSave {
+			t.Errorf("%s: save_interest appears %d times, want %d", mode, count["save_interest"], wantSave)
+		}
+		if count["get_volume"] != 1 {
+			t.Errorf("%s: get_volume should be present", mode)
+		}
 	}
 }
