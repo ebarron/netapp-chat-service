@@ -228,6 +228,8 @@ const api = createChatAPI('/api', {
 
 All transport — including the SSE stream — routes through `ChatAPI.stream()` so a single config covers both REST and streaming endpoints uniformly.
 
+State-changing endpoints (`POST /chat/message`, `/chat/capabilities`, `/chat/approve`, `/chat/deny`, `/chat/stop`, `DELETE /chat/session`) reject any request whose `Content-Type` is not `application/json` with `415`. This is the service's CSRF defence for cookie / HTTP-auth deployments: a cross-origin `application/json` request always requires a CORS preflight, so a hostile page cannot forge these calls with the victim's ambient credentials. `createChatAPI` already sets the header; custom `ChatAPI` implementations must too. A fronting proxy that adds CORS headers must only allow trusted origins.
+
 ```
 User → [Host Auth Proxy] → netapp-chat-service
          (validates token,     (trusts the proxy,

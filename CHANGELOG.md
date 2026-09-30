@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **State-changing endpoints require `Content-Type: application/json`.**
+  `POST /chat/message`, `POST /chat/capabilities`, `POST /chat/approve`,
+  `POST /chat/deny`, `POST /chat/stop` and `DELETE /chat/session` decoded any
+  body regardless of Content-Type, so a hostile page could forge them
+  cross-site with a preflight-free `text/plain` fetch or HTML form carrying the
+  victim's cookies or cached HTTP auth — switching capabilities to `allow` for
+  everyone and running a read-write agent turn as the victim. Other
+  Content-Types are now rejected with `415` before the body is read or any
+  state changes. The shipped `createChatAPI` client already sends
+  `application/json`; custom `ChatAPI` implementations must do the same.
 - Canvas fences are now schema-validated and normalized before a
   `canvas_open` event is emitted. Incomplete known panels (including an
   `action-button` without its required `buttons` array), malformed JSON, and

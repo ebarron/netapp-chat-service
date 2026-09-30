@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"mime"
 	"net/http"
 	"strings"
 	"sync"
@@ -253,6 +254,29 @@ func writeTooLarge(w http.ResponseWriter, max int64) {
 	})
 }
 
+// requireJSON rejects state-changing requests whose Content-Type is not
+// application/json, writing 415 and returning false.
+//
+// This is the service's cross-site request forgery defence. The JSON decoder
+// ignores Content-Type, so without this check a hostile page could reach these
+// handlers with a CORS "simple request" (text/plain fetch or an HTML form),
+// which the browser sends with the victim's ambient credentials (cookies,
+// cached HTTP auth) and without a preflight. A cross-origin request carrying
+// application/json always triggers a CORS preflight, which this service does
+// not answer, so requiring it confines these endpoints to same-origin callers
+// (or origins a fronting proxy explicitly allows via CORS). It must run before
+// the body is read or any state is touched.
+func requireJSON(w http.ResponseWriter, r *http.Request) bool {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{
+			"message": "Content-Type must be application/json",
+		})
+		return false
+	}
+	return true
+}
+
 // ChatEmitter is called for each SSE event.
 type ChatEmitter func(event string, data any)
 
@@ -321,6 +345,9 @@ func (s *Server) Handler() http.Handler {
 
 // PostChatMessage streams agent responses as SSE events.
 func (s *Server) PostChatMessage(w http.ResponseWriter, r *http.Request) {
+	if !requireJSON(w, r) {
+		return
+	}
 	// Bound the body before decoding, and the canvas payload before anything
 	// is done with it: both feed system-prompt construction, which runs
 	// synchronously on this goroutine before the first LLM call. Rejecting
@@ -443,6 +470,9 @@ func (s *Server) PostChatMessage(w http.ResponseWriter, r *http.Request) {
 
 // DeleteChatSession clears a session's conversation history.
 func (s *Server) DeleteChatSession(w http.ResponseWriter, r *http.Request) {
+	if !requireJSON(w, r) {
+		return
+	}
 	limitBody(w, r, maxControlBodyBytes)
 
 	var body struct {
@@ -558,6 +588,9 @@ func (s *Server) GetChatCapabilities(w http.ResponseWriter, r *http.Request) {
 // Returns 409 with a helpful message when the change would blow the budget,
 // without mutating server state.
 func (s *Server) PostChatCapabilities(w http.ResponseWriter, r *http.Request) {
+	if !requireJSON(w, r) {
+		return
+	}
 	limitBody(w, r, maxControlBodyBytes)
 
 	var body struct {
@@ -732,6 +765,9 @@ func effectiveToolBudget(total int, perCap map[string]int, routingOn bool) int {
 
 // PostChatApprove approves a pending tool call.
 func (s *Server) PostChatApprove(w http.ResponseWriter, r *http.Request) {
+	if !requireJSON(w, r) {
+		return
+	}
 	limitBody(w, r, maxControlBodyBytes)
 
 	var body struct {
@@ -758,6 +794,9 @@ func (s *Server) PostChatApprove(w http.ResponseWriter, r *http.Request) {
 
 // PostChatDeny denies a pending tool call.
 func (s *Server) PostChatDeny(w http.ResponseWriter, r *http.Request) {
+	if !requireJSON(w, r) {
+		return
+	}
 	limitBody(w, r, maxControlBodyBytes)
 
 	var body struct {
@@ -784,6 +823,9 @@ func (s *Server) PostChatDeny(w http.ResponseWriter, r *http.Request) {
 
 // PostChatStop cancels an in-progress chat.
 func (s *Server) PostChatStop(w http.ResponseWriter, r *http.Request) {
+	if !requireJSON(w, r) {
+		return
+	}
 	limitBody(w, r, maxControlBodyBytes)
 
 	var body struct {
