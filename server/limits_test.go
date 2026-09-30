@@ -34,6 +34,7 @@ func limitsServer() (*Server, *llm.MockProvider) {
 
 func postChatMessage(srv *Server, body []byte) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/chat/message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.PostChatMessage(w, req)
 	return w
@@ -305,6 +306,7 @@ func TestControlEndpointsBoundBodies(t *testing.T) {
 	for path, h := range handlers {
 		t.Run(path, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(oversized))
+			req.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
 			h(w, req)
 			if w.Code != http.StatusRequestEntityTooLarge {

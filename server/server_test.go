@@ -127,6 +127,7 @@ func TestPostCapabilitiesRejectsOverBudget(t *testing.T) {
 		"mode":         "read-only",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/chat/capabilities", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.PostChatCapabilities(w, req)
 
@@ -154,6 +155,7 @@ func TestPostCapabilitiesAcceptsWithinBudget(t *testing.T) {
 		"capabilities": map[string]string{"harvest": "allow"},
 	})
 	req := httptest.NewRequest(http.MethodPost, "/chat/capabilities", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.PostChatCapabilities(w, req)
 
@@ -244,6 +246,7 @@ func TestPostCapabilitiesRoutingAllowsOverSumBudget(t *testing.T) {
 		"mode":         "read-write",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/chat/capabilities", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.PostChatCapabilities(w, req)
 
@@ -254,7 +257,9 @@ func TestPostCapabilitiesRoutingAllowsOverSumBudget(t *testing.T) {
 	// Without routing the same enable must be rejected (sum exceeds the cap).
 	srvOff := routingBudgetServer(per, capability.StateOff, false)
 	wOff := httptest.NewRecorder()
-	srvOff.PostChatCapabilities(wOff, httptest.NewRequest(http.MethodPost, "/chat/capabilities", bytes.NewReader(body)))
+	reqOff := httptest.NewRequest(http.MethodPost, "/chat/capabilities", bytes.NewReader(body))
+	reqOff.Header.Set("Content-Type", "application/json")
+	srvOff.PostChatCapabilities(wOff, reqOff)
 	if wOff.Code != http.StatusConflict {
 		t.Fatalf("non-routed status = %d, want 409", wOff.Code)
 	}
@@ -341,6 +346,7 @@ func TestPostCapabilitiesRoutingRejectsIrreducibleServer(t *testing.T) {
 		"mode":         "read-write",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/chat/capabilities", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.PostChatCapabilities(w, req)
 
