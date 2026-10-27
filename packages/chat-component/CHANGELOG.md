@@ -4,6 +4,15 @@ All notable changes to `@edjbarron/netapp-chat-component` are documented in this
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.4] - 2026-10-27
+
+### Added
+- `action-form` select options can now declare `dependsOn` constraints on
+  earlier fields. The renderer filters those options as upstream values change,
+  clears invalid downstream selections, and supports `autoSelect` for
+  recommendation-first cascades such as cluster → SVM → aggregate. Existing
+  string options remain fully backward compatible.
+
 ## [0.4.3] - 2026-09-12
 
 ### Fixed

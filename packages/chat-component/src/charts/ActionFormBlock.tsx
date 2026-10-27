@@ -1,11 +1,53 @@
 import { useState } from 'react';
 import { Stack, Group, Button, TextInput, Select, Switch, Divider, SimpleGrid } from '@mantine/core';
-import type { ActionFormData } from './chartTypes';
+import type { ActionFormData, ActionFormField, ActionFormSelectOption } from './chartTypes';
 
 interface ActionFormBlockProps {
   data: ActionFormData;
   onAction?: (message: string) => void;
   readOnly?: boolean;
+}
+
+interface SelectOption {
+  value: string;
+  label: string;
+  dependsOn?: ActionFormSelectOption['dependsOn'];
+}
+
+function normalizedOptions(field: ActionFormField): SelectOption[] {
+  return (field.options ?? []).map((option) => (
+    typeof option === 'string'
+      ? { value: option, label: option }
+      : { value: option.value, label: option.label ?? option.value, dependsOn: option.dependsOn }
+  ));
+}
+
+function availableOptions(field: ActionFormField, values: Record<string, string>): SelectOption[] {
+  const seen = new Set<string>();
+  return normalizedOptions(field).filter((option) => {
+    const matches = Object.entries(option.dependsOn ?? {}).every(([key, accepted]) => (
+      Array.isArray(accepted)
+        ? accepted.includes(values[key] ?? '')
+        : accepted === (values[key] ?? '')
+    ));
+    if (!matches || seen.has(option.value)) return false;
+    seen.add(option.value);
+    return true;
+  });
+}
+
+function reconcileSelectValues(
+  fields: ActionFormField[],
+  current: Record<string, string>,
+): Record<string, string> {
+  const next = { ...current };
+  for (const field of fields) {
+    if (field.type !== 'select') continue;
+    const options = availableOptions(field, next);
+    if (options.some((option) => option.value === next[field.key])) continue;
+    next[field.key] = field.autoSelect && options.length > 0 ? options[0].value : '';
+  }
+  return next;
 }
 
 export function ActionFormBlock({ data, onAction, readOnly }: ActionFormBlockProps) {
@@ -23,7 +65,7 @@ export function ActionFormBlock({ data, onAction, readOnly }: ActionFormBlockPro
     for (const field of fields) {
       init[field.key] = field.defaultValue ?? '';
     }
-    return init;
+    return reconcileSelectValues(fields, init);
   });
 
   const requiredMissing = fields.some(
@@ -54,26 +96,38 @@ export function ActionFormBlock({ data, onAction, readOnly }: ActionFormBlockPro
   };
 
   const setField = (key: string, val: string) =>
-    setValues((prev) => ({ ...prev, [key]: val }));
+    setValues((prev) => reconcileSelectValues(fields, { ...prev, [key]: val }));
 
   // Render every field in the same responsive grid; checkboxes flow inline
   // with selects/text inputs so the form stays compact.
   const allFields = fields;
 
-  const renderField = (field: typeof fields[number]) =>
-    field.type === 'select' ? (
-      <Select
-        key={field.key}
-        label={field.label}
-        placeholder={field.placeholder}
-        data={[...new Set(field.options ?? [])]}
-        value={values[field.key] || null}
-        onChange={(v) => setField(field.key, v ?? '')}
-        clearable
-        size="sm"
-        comboboxProps={{ transitionProps: { duration: 0 } }}
-      />
-    ) : field.type === 'checkbox' ? (
+  const renderField = (field: typeof fields[number]) => {
+    if (field.type === 'select') {
+      const available = availableOptions(field, values);
+      const options = available.map(({ value, label }) => ({ value, label }));
+      // Mantine caches Combobox option labels. Remount this one Select when its
+      // dependency branch changes so an identical submitted value on two
+      // branches (for example the "default" policy on two clusters) keeps the
+      // label and remains selectable.
+      const optionSetKey = available
+        .map(({ value, label, dependsOn }) => `${value}\u0000${label}\u0000${JSON.stringify(dependsOn ?? {})}`)
+        .join('\u0001');
+      return (
+        <Select
+          key={`${field.key}:${optionSetKey}`}
+          label={field.label}
+          placeholder={field.placeholder}
+          data={options}
+          value={values[field.key] || null}
+          onChange={(v) => setField(field.key, v ?? '')}
+          clearable={!field.autoSelect}
+          size="sm"
+          comboboxProps={{ transitionProps: { duration: 0 } }}
+        />
+      );
+    }
+    return field.type === 'checkbox' ? (
       <Switch
         key={field.key}
         label={field.label}
@@ -92,6 +146,7 @@ export function ActionFormBlock({ data, onAction, readOnly }: ActionFormBlockPro
         size="sm"
       />
     );
+  };
 
   return (
     <Stack gap="sm" role="group" aria-label="Provisioning form" maw={560}>

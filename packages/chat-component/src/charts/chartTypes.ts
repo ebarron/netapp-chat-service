@@ -152,7 +152,26 @@ export interface ActionFormField {
   placeholder?: string;
   required?: boolean;
   defaultValue?: string;
-  options?: string[];
+  /**
+   * Static strings remain supported. Object options can depend on values of
+   * earlier fields, allowing one declarative form to express cascades such as
+   * cluster → SVM → aggregate without host-specific rendering code.
+   */
+  options?: Array<string | ActionFormSelectOption>;
+  /** Select the first available option when the current value becomes invalid. */
+  autoSelect?: boolean;
+}
+
+export interface ActionFormSelectOption {
+  /** Value submitted to the action tool. */
+  value: string;
+  /** Human-readable text; defaults to value. */
+  label?: string;
+  /**
+   * Every dependency must match for this option to be available. A string is
+   * one accepted value; an array allows any listed value.
+   */
+  dependsOn?: Record<string, string | string[]>;
 }
 
 export interface ActionFormData {
@@ -756,6 +775,54 @@ function normalizePanelValue(
           addIssue(issues, mode, 'invalid_form_field', `${path}.fields[${index}]`);
           return [];
         }
+        const options = optionalArray(field, 'options', `${path}.fields[${index}]`, issues)
+          .flatMap((option, optionIndex): Array<string | ActionFormSelectOption> => {
+            if (typeof option === 'string') return [option];
+            if (!isRecord(option) || typeof option.value !== 'string') {
+              addIssue(
+                issues,
+                mode,
+                'invalid_form_option',
+                `${path}.fields[${index}].options[${optionIndex}]`,
+              );
+              return [];
+            }
+            let dependsOn: Record<string, string | string[]> | undefined;
+            if (option.dependsOn !== undefined) {
+              if (!isRecord(option.dependsOn)) {
+                addIssue(
+                  issues,
+                  mode,
+                  'invalid_form_option_dependencies',
+                  `${path}.fields[${index}].options[${optionIndex}].dependsOn`,
+                );
+                return [];
+              }
+              dependsOn = {};
+              for (const [dependencyKey, accepted] of Object.entries(option.dependsOn)) {
+                if (typeof accepted === 'string') {
+                  dependsOn[dependencyKey] = accepted;
+                  continue;
+                }
+                if (Array.isArray(accepted) && accepted.every((item) => typeof item === 'string')) {
+                  dependsOn[dependencyKey] = accepted;
+                  continue;
+                }
+                addIssue(
+                  issues,
+                  mode,
+                  'invalid_form_option_dependency',
+                  `${path}.fields[${index}].options[${optionIndex}].dependsOn.${dependencyKey}`,
+                );
+                return [];
+              }
+            }
+            return [{
+              value: option.value,
+              label: typeof option.label === 'string' ? option.label : undefined,
+              dependsOn,
+            }];
+          });
         return [{
           key: field.key,
           label: field.label,
@@ -763,8 +830,8 @@ function normalizePanelValue(
           placeholder: typeof field.placeholder === 'string' ? field.placeholder : undefined,
           required: typeof field.required === 'boolean' ? field.required : undefined,
           defaultValue: typeof field.defaultValue === 'string' ? field.defaultValue : undefined,
-          options: optionalArray(field, 'options', `${path}.fields[${index}]`, issues)
-            .filter((option): option is string => typeof option === 'string'),
+          options,
+          autoSelect: typeof field.autoSelect === 'boolean' ? field.autoSelect : undefined,
         }];
       });
       if (

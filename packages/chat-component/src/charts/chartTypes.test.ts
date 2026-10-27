@@ -191,6 +191,65 @@ describe('parseDashboard', () => {
     });
   });
 
+  it('normalizes dependent action-form select options', () => {
+    const result = normalizeDashboardPayload({
+      title: 'Placement',
+      panels: [{
+        type: 'action-form',
+        fields: [{
+          key: 'svm',
+          label: 'SVM',
+          type: 'select',
+          autoSelect: true,
+          options: [
+            'anywhere',
+            {
+              value: 'svm-a',
+              label: 'SVM A',
+              dependsOn: { cluster: 'cluster-a', protocol: ['nfs', 'smb'] },
+            },
+          ],
+        }],
+        submit: { label: 'Apply', tool: 'apply' },
+      }],
+    });
+
+    expect(result.value).not.toBeNull();
+    expect(result.value!.panels[0]).toMatchObject({
+      fields: [{
+        key: 'svm',
+        autoSelect: true,
+        options: [
+          'anywhere',
+          {
+            value: 'svm-a',
+            label: 'SVM A',
+            dependsOn: { cluster: 'cluster-a', protocol: ['nfs', 'smb'] },
+          },
+        ],
+      }],
+    });
+  });
+
+  it('rejects malformed dependent action-form options in strict mode', () => {
+    const result = normalizeDashboardPayload({
+      title: 'Placement',
+      panels: [{
+        type: 'action-form',
+        fields: [{
+          key: 'svm',
+          label: 'SVM',
+          type: 'select',
+          options: [{ value: 'svm-a', dependsOn: { cluster: 12 } }],
+        }],
+        submit: { label: 'Apply', tool: 'apply' },
+      }],
+    });
+
+    expect(result.value).toBeNull();
+    expect(result.issues.some((issue) => issue.code === 'invalid_form_option_dependency')).toBe(true);
+  });
+
   it('accepts valid dashboards both with and without actions', () => {
     const withoutActions = normalizeCanvasContent({
       type: 'dashboard',

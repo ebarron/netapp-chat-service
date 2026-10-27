@@ -74,6 +74,28 @@ describe('ActionFormBlock', () => {
     expect(screen.getByText('Provision on cluster-east').closest('button')!.disabled).toBe(false);
   });
 
+  it('keeps legacy required selects clearable when autoSelect is not enabled', () => {
+    const data: ActionFormData = {
+      ...baseData,
+      fields: [
+        {
+          key: 'cluster',
+          label: 'Cluster',
+          type: 'select',
+          required: true,
+          defaultValue: 'cluster-a',
+          options: ['cluster-a', 'cluster-b'],
+        },
+      ],
+    };
+    const { container } = render(<ActionFormBlock data={data} />);
+    const clearButton = container.querySelector('.mantine-Select-root button');
+    expect(clearButton).not.toBeNull();
+    fireEvent.click(clearButton!);
+    expect((screen.getByRole('textbox', { name: 'Cluster' }) as HTMLInputElement).value).toBe('');
+    expect(screen.getByText('Provision on cluster-east').closest('button')!.disabled).toBe(true);
+  });
+
   it('calls onAction for secondary button', async () => {
     const user = userEvent.setup();
     const onAction = vi.fn();
@@ -108,6 +130,127 @@ describe('ActionFormBlock', () => {
     expect(onAction).toHaveBeenCalledWith(
       'Run create_volume with svm=svm_prod, aggregate=aggr1, size=2TB, volume_name=my_vol, export_policy=nfs-open'
     );
+  });
+
+  it('filters and auto-selects dependent options when an upstream select changes', async () => {
+    const user = userEvent.setup();
+    const onAction = vi.fn();
+    const data: ActionFormData = {
+      type: 'action-form',
+      fields: [
+        {
+          key: 'cluster',
+          label: 'Cluster',
+          type: 'select',
+          required: true,
+          autoSelect: true,
+          defaultValue: 'cluster-a',
+          options: ['cluster-a', 'cluster-b'],
+        },
+        {
+          key: 'svm',
+          label: 'SVM',
+          type: 'select',
+          required: true,
+          autoSelect: true,
+          defaultValue: 'svm-a',
+          options: [
+            { value: 'svm-a', dependsOn: { cluster: 'cluster-a' } },
+            { value: 'svm-b', label: 'SVM B', dependsOn: { cluster: ['cluster-b'] } },
+          ],
+        },
+        {
+          key: 'aggregate',
+          label: 'Aggregate',
+          type: 'select',
+          required: true,
+          autoSelect: true,
+          defaultValue: 'aggr-a',
+          options: [
+            { value: 'aggr-a', dependsOn: { cluster: 'cluster-a', svm: 'svm-a' } },
+            { value: 'aggr-b', dependsOn: { cluster: 'cluster-b', svm: 'svm-b' } },
+          ],
+        },
+      ],
+      submit: { label: 'Provision', tool: 'provision_volume' },
+    };
+
+    render(<ActionFormBlock data={data} onAction={onAction} />);
+    expect((screen.getByRole('textbox', { name: 'SVM' }) as HTMLInputElement).value).toBe('svm-a');
+    expect(screen.queryByRole('option', { name: 'SVM B', hidden: true })).toBeNull();
+
+    await pickSelectOption(user, 'Cluster', 'cluster-b');
+
+    expect((screen.getByRole('textbox', { name: 'SVM' }) as HTMLInputElement).value).toBe('SVM B');
+    expect((screen.getByRole('textbox', { name: 'Aggregate' }) as HTMLInputElement).value).toBe('aggr-b');
+    await user.click(screen.getByText('Provision'));
+    expect(onAction).toHaveBeenCalledWith(
+      'Run provision_volume with cluster=cluster-b, svm=svm-b, aggregate=aggr-b'
+    );
+  });
+
+  it('clears an invalid dependent option when autoSelect is disabled', async () => {
+    const user = userEvent.setup();
+    const data: ActionFormData = {
+      type: 'action-form',
+      fields: [
+        {
+          key: 'cluster',
+          label: 'Cluster',
+          type: 'select',
+          defaultValue: 'cluster-a',
+          options: ['cluster-a', 'cluster-b'],
+        },
+        {
+          key: 'svm',
+          label: 'SVM',
+          type: 'select',
+          required: true,
+          defaultValue: 'svm-a',
+          options: [
+            { value: 'svm-a', dependsOn: { cluster: 'cluster-a' } },
+            { value: 'svm-b', dependsOn: { cluster: 'cluster-b' } },
+          ],
+        },
+      ],
+      submit: { label: 'Provision', tool: 'provision_volume' },
+    };
+
+    render(<ActionFormBlock data={data} />);
+    await pickSelectOption(user, 'Cluster', 'cluster-b');
+    expect((screen.getByRole('textbox', { name: 'SVM' }) as HTMLInputElement).value).toBe('');
+    expect(screen.getByText('Provision').closest('button')!.disabled).toBe(true);
+  });
+
+  it('keeps duplicate values when they belong to different dependency branches', async () => {
+    const user = userEvent.setup();
+    const data: ActionFormData = {
+      type: 'action-form',
+      fields: [
+        {
+          key: 'cluster',
+          label: 'Cluster',
+          type: 'select',
+          defaultValue: 'cluster-a',
+          options: ['cluster-a', 'cluster-b'],
+        },
+        {
+          key: 'policy',
+          label: 'Policy',
+          type: 'select',
+          options: [
+            { value: 'default', dependsOn: { cluster: 'cluster-a' } },
+            { value: 'default', dependsOn: { cluster: 'cluster-b' } },
+          ],
+        },
+      ],
+      submit: { label: 'Apply', tool: 'apply' },
+    };
+
+    render(<ActionFormBlock data={data} />);
+    await pickSelectOption(user, 'Policy', 'default');
+    await pickSelectOption(user, 'Cluster', 'cluster-b');
+    expect((screen.getByRole('textbox', { name: 'Policy' }) as HTMLInputElement).value).toBe('default');
   });
 
   describe('checkbox field type', () => {
