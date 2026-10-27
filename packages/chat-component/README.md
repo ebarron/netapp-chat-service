@@ -77,6 +77,32 @@ Supports React 18 and 19, Mantine 8.x and 9.x. For everything beyond this — do
 mode, the workspace shell, canvas portals, layout modes, and auth — see the
 [**User Guide**](./UserGuide.md).
 
+## Host panel extensions
+
+Version 0.5 adds an opt-in, build-time registry for host-owned panel renderers.
+The wire format stays fallback-first: a validated built-in panel such as a
+`callout` may carry `extension: { kind, schemaVersion, data }`. Older clients
+render the callout; 0.5 clients render a matching host registration only after
+its required normalizer accepts the opaque data.
+
+```tsx
+const registry = createPanelExtensionRegistry([{
+  kind: 'acme.availability',
+  schemaVersion: 1,
+  normalize: normalizeAvailability,
+  render: AvailabilityDisclosure,
+}]);
+
+<ChatRenderExtensionProvider registry={registry}>
+  <App />
+</ChatRenderExtensionProvider>
+```
+
+No provider, unknown kind/version, rejected data, or renderer failure
+deterministically renders the built-in fallback. Extensions receive only their
+normalized data plus `readOnly` and the controlled `sendMessage` action when it
+is available. The package does not render raw HTML or load remote modules.
+
 ## Documentation
 
 - [**User Guide**](./UserGuide.md) — installation, integration, and full prop reference
@@ -87,11 +113,12 @@ mode, the workspace shell, canvas portals, layout modes, and auth — see the
 
 ## Exports
 
-- Components: `ChatPanel`, `CanvasPanel`, `ChatAppShell`, `ModeToggle`, `CapabilityControls`, `ActionConfirmation`, `ToolStatusCard`
+- Components: `ChatPanel`, `CanvasPanel`, `ChatAppShell`, `ModeToggle`, `CapabilityControls`, `ActionConfirmation`, `ToolStatusCard`, `ChatRenderExtensionProvider`
 - Charts: `ChartBlock`, `DashboardBlock`, `ObjectDetailBlock`, `AutoJsonBlock`
 - API: `createChatAPI`, `ChatAPIProvider`, `useChatAPI`
+- Extensions: `createPanelExtensionRegistry`
 - Hook: `useChatPanel`
-- Types: `ChatMessage`, `Capability`, `PendingApproval`, `ChatMode`, `CanvasTab`, `CanvasEventInfo`, `CanvasTabSummary`, `HostCanvasTabInput`, `ChatPanelHandle`, `PanelData`, `DashboardData`, `ChartData`, `PanelWidth`, `ObjectDetailData`, `ChatAppShellProps`
+- Types include `PanelExtensionDefinition`, `PanelExtensionMetadata`, `PanelExtensionContext`, and `PanelExtensionRegistry`
 
 ## Backend
 

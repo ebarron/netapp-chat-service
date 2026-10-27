@@ -3,6 +3,8 @@
  * Spec ref: §5.2 (chart schemas), §4.7 (interest-specific types), §4.4 (dashboard block)
  */
 
+import type { PanelExtensionMetadata } from '../PanelExtensions';
+
 // --- Basic Chart Types (§5.2) ---
 
 export interface SeriesDefinition {
@@ -113,6 +115,8 @@ export interface CalloutData {
   icon?: string;
   title: string;
   body: string;
+  /** Optional host-rendered enhancement; the callout remains the wire fallback. */
+  extension?: PanelExtensionMetadata;
 }
 
 export interface ProposalData {
@@ -429,6 +433,36 @@ function normalizeWidth(width: unknown): PanelWidth | undefined {
   return width === 'full' || width === 'half' || width === 'third' ? width : undefined;
 }
 
+function normalizePanelExtension(
+  value: unknown,
+  path: string,
+  issues: PayloadValidationIssue[],
+): PanelExtensionMetadata | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (
+    !isRecord(value)
+    || typeof value.kind !== 'string'
+    || value.kind.trim().length === 0
+    || !Number.isSafeInteger(value.schemaVersion)
+    || (value.schemaVersion as number) < 1
+    || !Object.prototype.hasOwnProperty.call(value, 'data')
+  ) {
+    // Extension metadata is always optional. A malformed enhancement must not
+    // invalidate or replace the already validated built-in fallback.
+    issues.push({
+      code: 'invalid_panel_extension',
+      path,
+      severity: 'warning',
+    });
+    return undefined;
+  }
+  return {
+    kind: value.kind,
+    schemaVersion: value.schemaVersion as number,
+    data: value.data,
+  };
+}
+
 function normalizeRecordArray(
   values: unknown[],
   path: string,
@@ -726,13 +760,18 @@ function normalizePanelValue(
       const title = requiredString(value, 'title', path, mode, issues);
       const body = requiredString(value, 'body', path, mode, issues);
       if (title === null || body === null) return null;
+      const extension = normalizePanelExtension(
+        value.extension,
+        `${path}.extension`,
+        issues,
+      );
       return {
-        ...value,
         type,
         title,
         width,
         body,
         icon: typeof value.icon === 'string' ? value.icon : undefined,
+        ...(extension ? { extension } : {}),
       } as CalloutData;
     }
     case 'proposal': {

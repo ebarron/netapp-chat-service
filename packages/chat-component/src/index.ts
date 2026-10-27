@@ -22,6 +22,18 @@ export { BookmarkPrompts } from './BookmarkPrompts';
 export type { BookmarkPrompt } from './BookmarkPrompts';
 export { ActionConfirmation } from './ActionConfirmation';
 export { ToolStatusCard } from './ToolStatusCard';
+export {
+  ChatRenderExtensionProvider,
+  createPanelExtensionRegistry,
+} from './PanelExtensions';
+export type {
+  ChatRenderExtensionProviderProps,
+  PanelExtensionContext,
+  PanelExtensionDefinition,
+  PanelExtensionMetadata,
+  PanelExtensionRegistry,
+  PanelExtensionRendererProps,
+} from './PanelExtensions';
 
 // Hook
 export { useChatPanel } from './useChatPanel';

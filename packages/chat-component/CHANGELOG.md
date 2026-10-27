@@ -4,6 +4,26 @@ All notable changes to `@edjbarron/netapp-chat-component` are documented in this
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-10-27
+
+### Added
+- A generic, opt-in `ChatRenderExtensionProvider` and immutable
+  `createPanelExtensionRegistry` let hosts register build-time panel renderers by
+  exact `kind` + integer `schemaVersion`.
+- Built-in callouts can carry optional fallback-first
+  `extension: { kind, schemaVersion, data }` metadata. Every registration must
+  normalize/validate opaque data before rendering; renderers receive only the
+  normalized value plus `readOnly` and the existing controlled message action.
+
+### Security
+- Missing providers or registrations, version mismatch, malformed/rejected
+  data, normalizer errors, and renderer exceptions all render the validated
+  built-in fallback. Per-extension error boundaries isolate host renderers.
+- Extension metadata is never passed to the Markdown fallback renderer. The
+  protocol adds no raw HTML, remote module loading, or server-supplied code.
+  Existing panels, chart types, strict streamed-canvas validation, and 0.4.x
+  fallback rendering remain compatible.
+
 ## [0.4.4] - 2026-10-27
 
 ### Added

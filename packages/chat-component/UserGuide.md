@@ -523,13 +523,68 @@ remount (0.4.1).
 
 ---
 
+## Host panel extensions
+
+Hosts can register trusted renderers at build time without adding executable
+content to the chat wire protocol. Keep a complete built-in fallback and add
+opaque metadata to it:
+
+```json
+{
+  "type": "callout",
+  "title": "Availability details",
+  "body": "Expanded Markdown fallback for every unavailable item.",
+  "extension": {
+    "kind": "acme.storage-class-availability",
+    "schemaVersion": 1,
+    "data": { "unavailable": [] }
+  }
+}
+```
+
+Register the matching renderer above the tree that contains the chat UI:
+
+```tsx
+import {
+  ChatRenderExtensionProvider,
+  createPanelExtensionRegistry,
+  type PanelExtensionDefinition,
+} from '@edjbarron/netapp-chat-component';
+
+const availability: PanelExtensionDefinition<AvailabilityData> = {
+  kind: 'acme.storage-class-availability',
+  schemaVersion: 1,
+  normalize: normalizeAvailability, // unknown -> normalized data or null
+  render: AvailabilityDisclosure,
+};
+
+const registry = createPanelExtensionRegistry([availability]);
+
+<ChatRenderExtensionProvider registry={registry}>
+  <Router />
+</ChatRenderExtensionProvider>
+```
+
+Registrations are keyed by the exact `kind` and positive integer
+`schemaVersion`; duplicates throw during registry creation. The renderer gets
+only normalized data and `{ readOnly, sendMessage? }`. It does not receive the
+wire panel, fallback Markdown, arbitrary tool execution, raw HTML, or a module
+loader. No provider, no exact registration, rejected/throwing normalization, or
+a render exception uses the validated built-in fallback.
+
+This is additive. Existing panels and consumers need no provider, and 0.4.x
+clients ignore the optional metadata while continuing to render the callout.
+
+---
+
 ## Exports
 
-- Components: `ChatPanel`, `CanvasPanel`, `ModeToggle`, `CapabilityControls`, `ActionConfirmation`, `ToolStatusCard`, `ChatAppShell`
+- Components: `ChatPanel`, `CanvasPanel`, `ModeToggle`, `CapabilityControls`, `ActionConfirmation`, `ToolStatusCard`, `ChatAppShell`, `ChatRenderExtensionProvider`
 - Charts: `ChartBlock`, `DashboardBlock`, `ObjectDetailBlock`, `AutoJsonBlock`
 - API: `createChatAPI`, `ChatAPIProvider`, `useChatAPI`
+- Extensions: `createPanelExtensionRegistry`
 - Hook: `useChatPanel`
-- Types: `ChatMessage`, `Capability`, `PendingApproval`, `ChatMode`, `CanvasTab`, `CanvasEventInfo`, `CanvasTabSummary`, `CanvasControlOptions`, `HostCanvasTabInput`, `ChatPanelHandle`, `PanelData`, `DashboardData`, `ChartData`, `PanelWidth`, `ObjectDetailData`, `BookmarkPrompt`, `ChatAppShellProps`, `ChatAppShellDestination`, `ChatAppShellHeaderApi`, `ChatAppShellNavApi`, `ChatAppShellDestinationApi`
+- Types also include `PanelExtensionDefinition`, `PanelExtensionMetadata`, `PanelExtensionContext`, `PanelExtensionRegistry`, and `PanelExtensionRendererProps`
 
 ---
 

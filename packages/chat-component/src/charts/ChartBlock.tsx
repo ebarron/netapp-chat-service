@@ -14,7 +14,8 @@ import { CalloutBlock } from './CalloutBlock';
 import { ProposalBlock } from './ProposalBlock';
 import { ActionButtonBlock } from './ActionButtonBlock';
 import { ActionFormBlock } from './ActionFormBlock';
-import type { PanelData } from './chartTypes';
+import { PanelExtensionSlot } from '../PanelExtensions';
+import type { CalloutData, PanelData } from './chartTypes';
 
 interface ChartBlockProps {
   json: string;
@@ -42,6 +43,35 @@ interface PanelRendererProps {
   readOnly?: boolean;
 }
 
+function ExtensionAwareCallout({
+  data,
+  onAction,
+  readOnly,
+}: {
+  data: CalloutData;
+  onAction?: (message: string) => void;
+  readOnly?: boolean;
+}) {
+  // Keep opaque extension metadata out of the Markdown fallback renderer.
+  const fallbackData: CalloutData = {
+    type: 'callout',
+    title: data.title,
+    body: data.body,
+    width: data.width,
+    icon: data.icon,
+  };
+  const fallback = <CalloutBlock data={fallbackData} />;
+  if (!data.extension) return fallback;
+  return (
+    <PanelExtensionSlot
+      extension={data.extension}
+      fallback={fallback}
+      onAction={onAction}
+      readOnly={readOnly}
+    />
+  );
+}
+
 /** Renders a single panel by type. Exported for use by DashboardBlock too. */
 export function PanelRenderer({ data, onAction, onExecute, readOnly }: PanelRendererProps) {
   switch (data.type) {
@@ -64,7 +94,13 @@ export function PanelRenderer({ data, onAction, onExecute, readOnly }: PanelRend
     case 'alert-list':
       return <AlertListBlock data={data} onAction={onAction} />;
     case 'callout':
-      return <CalloutBlock data={data} />;
+      return (
+        <ExtensionAwareCallout
+          data={data}
+          onAction={onAction}
+          readOnly={readOnly}
+        />
+      );
     case 'proposal':
       return <ProposalBlock data={data} />;
     case 'action-button':
