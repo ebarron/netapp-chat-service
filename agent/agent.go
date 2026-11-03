@@ -124,12 +124,12 @@ type InternalTool struct {
 // Event is emitted by the agent loop to inform the caller about progress.
 // The caller (typically the SSE handler) converts these to SSE events.
 type Event struct {
-	Type       EventType      `json:"type"`
-	Text       string         `json:"text,omitempty"`        // for EventText
-	ToolCall   *llm.ToolCall  `json:"tool_call,omitempty"`   // for EventToolStart
-	ToolName   string         `json:"tool_name,omitempty"`   // for EventToolResult / EventToolError
-	ToolResult string         `json:"tool_result,omitempty"` // for EventToolResult
-	Error      string         `json:"error,omitempty"`       // for EventToolError, EventError
+	Type       EventType       `json:"type"`
+	Text       string          `json:"text,omitempty"`        // for EventText
+	ToolCall   *llm.ToolCall   `json:"tool_call,omitempty"`   // for EventToolStart
+	ToolName   string          `json:"tool_name,omitempty"`   // for EventToolResult / EventToolError
+	ToolResult string          `json:"tool_result,omitempty"` // for EventToolResult
+	Error      string          `json:"error,omitempty"`       // for EventToolError, EventError
 	Capability string          `json:"capability,omitempty"`  // MCP capability ID (Phase 2)
 	ApprovalID string          `json:"approval_id,omitempty"` // for EventToolApprovalRequired (Phase 2)
 	Canvas     *CanvasPayload  `json:"canvas,omitempty"`      // for EventCanvasOpen
@@ -185,6 +185,11 @@ const (
 	// so navigation-by-prompt drives the same host machinery as a manual nav
 	// selection. The destination is an opaque, host-defined string.
 	EventOpenNav
+	// EventAssistantCheckpoint asks the host to commit Event.Text as a hidden
+	// assistant history checkpoint before EventDone. Terminal interactive
+	// renders use it to preserve valid alternating conversation history
+	// without displaying redundant narration.
+	EventAssistantCheckpoint
 )
 
 // Agent runs the tool-use loop. It holds the LLM provider and MCP router.
@@ -207,6 +212,9 @@ type Agent struct {
 	// InternalTools are handled locally by the agent, not routed through MCP.
 	// Keyed by tool name.
 	InternalTools map[string]InternalTool
+	// terminalToolPolicy opts selected tools into terminal interactive-render
+	// completion. Nil preserves the historical continue-after-tool behavior.
+	terminalToolPolicy func(toolName string) bool
 
 	// --- In-band tool routing (S7a). Active only when ToolRoutingMode is
 	// ToolRoutingInBand; otherwise these are inert and behavior is identical
@@ -339,6 +347,33 @@ func WithInternalTools(tools map[string]InternalTool) Option {
 	return func(a *Agent) { a.InternalTools = tools }
 }
 
+// WithTerminalToolPolicy opts selected tools into terminal interactive-render
+// completion. A matching tool terminates the turn without another provider
+// call only when its result contains a valid canvas open/update and every
+// sibling tool in the same provider batch also succeeds. Errors and invalid
+// canvas payloads continue to the provider for explanation or recovery.
+//
+// A nil policy is inert. The callback must be safe for concurrent use because
+// tools in one provider response execute in parallel.
+func WithTerminalToolPolicy(policy func(toolName string) bool) Option {
+	return func(a *Agent) { a.terminalToolPolicy = policy }
+}
+
+// WithTerminalTools is a convenience for opting a fixed set of tool names into
+// terminal interactive-render completion.
+func WithTerminalTools(toolNames ...string) Option {
+	names := make(map[string]struct{}, len(toolNames))
+	for _, name := range toolNames {
+		if name != "" {
+			names[name] = struct{}{}
+		}
+	}
+	return WithTerminalToolPolicy(func(toolName string) bool {
+		_, ok := names[toolName]
+		return ok
+	})
+}
+
 // WithToolRouting configures the in-band supervisor (S7a). mode selects the
 // routing strategy (ToolRoutingOff disables it). groups is the auto-derived
 // group menu for this turn (from capability.BuildGroups). alwaysOn lists
@@ -374,7 +409,17 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 	// Wrap emit with a canvas fence interceptor so that canvas-object-detail
 	// and canvas-dashboard code fences are converted to EventCanvasOpen events.
 	originalEmit := emit
-	interceptor := newCanvasFenceInterceptor(originalEmit)
+	var lastCanvasFlush time.Time
+	trackedEmit := func(evt Event) {
+		originalEmit(evt)
+		if evt.Type == EventCanvasOpen {
+			// The downstream emit is synchronous (including SSE Flush in the
+			// stock server), so this timestamp starts after the canvas event
+			// has been handed off to the host.
+			lastCanvasFlush = time.Now()
+		}
+	}
+	interceptor := newCanvasFenceInterceptor(trackedEmit)
 	emit = func(evt Event) {
 		if evt.Type == EventText {
 			interceptor.HandleToken(evt.Text)
@@ -382,7 +427,7 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 		}
 		// Flush any buffered text before emitting non-text events.
 		interceptor.Flush()
-		originalEmit(evt)
+		trackedEmit(evt)
 	}
 	// Defer a final flush in case the stream ends mid-buffer.
 	defer interceptor.Flush()
@@ -576,10 +621,12 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 		// parallel execution is safe and significantly faster for
 		// multi-tool rounds like dashboard builds.
 		type toolResult struct {
-			index   int
-			message llm.Message
-			events  []Event
-			isError bool
+			index            int
+			message          llm.Message
+			events           []Event
+			isError          bool
+			terminalEligible bool
+			terminalCanvas   *CanvasPayload
 		}
 
 		results := make([]toolResult, len(pendingToolCalls))
@@ -591,6 +638,9 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 			go func(idx int, tc llm.ToolCall) {
 				defer wg.Done()
 				tr := toolResult{index: idx}
+				if a.terminalToolPolicy != nil {
+					tr.terminalEligible = a.terminalToolPolicy(tc.Name)
+				}
 				toolStart := time.Now()
 
 				// Check if this is an internal tool (handled locally, not via MCP).
@@ -617,10 +667,25 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 						}
 						tr.isError = true
 					} else {
+						if tr.terminalEligible {
+							tr.terminalCanvas, _ = ParseTerminalCanvasResult(result)
+						}
 						if it.EmitResult {
+							if tr.terminalCanvas != nil {
+								tr.events = append(tr.events, Event{
+									Type:   EventCanvasOpen,
+									Canvas: tr.terminalCanvas,
+								})
+							} else {
+								tr.events = append(tr.events, Event{
+									Type: EventText,
+									Text: result + "\n\n",
+								})
+							}
+						} else if tr.terminalCanvas != nil {
 							tr.events = append(tr.events, Event{
-								Type: EventText,
-								Text: result + "\n\n",
+								Type:   EventCanvasOpen,
+								Canvas: tr.terminalCanvas,
 							})
 						}
 						tr.events = append(tr.events, Event{
@@ -677,6 +742,7 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 									Content:    "User denied this tool call.",
 									ToolCallID: tc.ID,
 								}
+								tr.isError = true
 								results[idx] = tr
 								return
 							}
@@ -710,6 +776,15 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 					}
 					tr.isError = true
 				} else {
+					if tr.terminalEligible {
+						tr.terminalCanvas, _ = ParseTerminalCanvasResult(result)
+					}
+					if tr.terminalCanvas != nil {
+						tr.events = append(tr.events, Event{
+							Type:   EventCanvasOpen,
+							Canvas: tr.terminalCanvas,
+						})
+					}
 					tr.events = append(tr.events, Event{
 						Type:       EventToolResult,
 						ToolName:   tc.Name,
@@ -741,6 +816,63 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 			messages = append(messages, tr.message)
 			if tr.isError {
 				hadError = true
+			}
+		}
+
+		// Terminal interactive-render policy is evaluated only after every
+		// sibling tool has settled and its events/history result have been
+		// emitted in provider order. One or more opted-in tools must each have
+		// produced a validated canvas open/update, and every sibling must have
+		// succeeded. Otherwise the normal provider recovery/explanation round
+		// remains unchanged.
+		var terminalTools []string
+		var invalidTerminalTools []string
+		for _, tr := range results {
+			if !tr.terminalEligible {
+				continue
+			}
+			terminalTools = append(terminalTools, pendingToolCalls[tr.index].Name)
+			if tr.terminalCanvas == nil {
+				invalidTerminalTools = append(invalidTerminalTools, pendingToolCalls[tr.index].Name)
+			}
+		}
+		if len(terminalTools) > 0 {
+			decision := "continue"
+			reason := "invalid_canvas"
+			switch {
+			case hadError:
+				reason = "sibling_error"
+			case ctx.Err() != nil:
+				reason = "context_cancelled"
+			case len(invalidTerminalTools) == 0:
+				decision = "terminate"
+				reason = "validated_canvas"
+			}
+			a.Logger.Info("terminal interactive render policy",
+				"decision", decision,
+				"reason", reason,
+				"tools", terminalTools,
+				"invalid_canvas_tools", invalidTerminalTools,
+				"iteration", iteration+1,
+			)
+			if decision == "terminate" {
+				emit(Event{
+					Type: EventAssistantCheckpoint,
+					Text: "Interactive view rendered successfully.",
+				})
+				emit(Event{Type: EventDone})
+				renderToDone := time.Duration(0)
+				if !lastCanvasFlush.IsZero() {
+					renderToDone = time.Since(lastCanvasFlush)
+				}
+				a.Logger.Info("agent done (terminal interactive render)",
+					"total_duration", time.Since(runStart).Round(time.Millisecond),
+					"render_to_done", renderToDone.Round(time.Millisecond),
+					"iterations", iteration+1,
+					"skipped_provider_rounds", 1,
+					"tools", terminalTools,
+				)
+				return
 			}
 		}
 

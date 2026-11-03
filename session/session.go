@@ -5,6 +5,7 @@
 package session
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"sync"
@@ -24,6 +25,48 @@ type Session struct {
 	UpdatedAt time.Time
 
 	maxMessages int
+	turnMu      sync.Mutex
+	turnActive  bool
+	turnWait    chan struct{}
+}
+
+// AcquireTurn waits until no other turn is running for this session. It
+// returns false without acquiring the session when ctx is cancelled.
+func (s *Session) AcquireTurn(ctx context.Context) bool {
+	for {
+		s.turnMu.Lock()
+		if !s.turnActive {
+			s.turnActive = true
+			s.turnMu.Unlock()
+			return true
+		}
+		if s.turnWait == nil {
+			s.turnWait = make(chan struct{})
+		}
+		wait := s.turnWait
+		s.turnMu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return false
+		case <-wait:
+		}
+	}
+}
+
+// ReleaseTurn allows the next waiting turn for this session to proceed.
+func (s *Session) ReleaseTurn() {
+	s.turnMu.Lock()
+	if !s.turnActive {
+		s.turnMu.Unlock()
+		return
+	}
+	s.turnActive = false
+	if s.turnWait != nil {
+		close(s.turnWait)
+		s.turnWait = nil
+	}
+	s.turnMu.Unlock()
 }
 
 // AddMessage appends a message and trims the window if needed.

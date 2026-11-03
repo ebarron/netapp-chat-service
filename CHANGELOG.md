@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.3.0
+
+### Added
+
+- Hosts can opt selected renderer tools into terminal interactive completion with
+  `agent.WithTerminalToolPolicy` / `agent.WithTerminalTools`, or configure the
+  HTTP server through `server.NewWithOptions` and
+  `server.WithTerminalToolPolicy`. A successful result must be exactly one
+  validated Canvas open/update; errors, invalid payloads, close directives, and
+  failed siblings continue to the provider.
+- Terminal renders emit the Canvas and tool result, then a hidden assistant
+  checkpoint and `done`, without another provider round. Parallel batches settle
+  fully before the decision, and same-session turns are serialized.
+- `agent.ParseTerminalCanvasResult` exposes the same strict Canvas validation to
+  hosts with deterministic pre-provider render paths.
+- Terminal-policy and render-to-done telemetry reports the decision, reason,
+  skipped provider round, and latency after the Canvas event is flushed.
+
 ## v0.2.2
 
 ### Fixed

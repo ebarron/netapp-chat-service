@@ -1,8 +1,10 @@
 package session
 
 import (
+	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ebarron/netapp-chat-service/llm"
 )
@@ -148,6 +150,44 @@ func TestConcurrentAccess(t *testing.T) {
 	if m.Count() != 50 {
 		t.Errorf("count = %d, want 50", m.Count())
 	}
+}
+
+func TestSessionTurnsSerializeAndRespectCancellation(t *testing.T) {
+	s := NewManager(20).GetOrCreate("same-session")
+	if !s.AcquireTurn(context.Background()) {
+		t.Fatal("first turn was not acquired")
+	}
+
+	acquired := make(chan bool, 1)
+	go func() {
+		acquired <- s.AcquireTurn(context.Background())
+	}()
+	select {
+	case <-acquired:
+		t.Fatal("second turn overlapped the first")
+	case <-time.After(10 * time.Millisecond):
+	}
+
+	s.ReleaseTurn()
+	select {
+	case ok := <-acquired:
+		if !ok {
+			t.Fatal("waiting turn was not acquired after release")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting turn did not resume")
+	}
+	s.ReleaseTurn()
+
+	if !s.AcquireTurn(context.Background()) {
+		t.Fatal("turn was not reacquired")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if s.AcquireTurn(ctx) {
+		t.Fatal("cancelled waiter acquired an active session")
+	}
+	s.ReleaseTurn()
 }
 
 func TestGenerateIDUniqueness(t *testing.T) {

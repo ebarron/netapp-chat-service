@@ -287,17 +287,37 @@ var (
 
 // Server is the chat service HTTP server.
 type Server struct {
-	deps   *ChatDeps
-	mux    *http.ServeMux
-	logger *slog.Logger
+	deps           *ChatDeps
+	mux            *http.ServeMux
+	logger         *slog.Logger
+	runChatOptions RunChatOptions
 }
 
-// New creates a new chat service server.
+// Option configures additive HTTP server behavior.
+type Option func(*Server)
+
+// WithTerminalToolPolicy opts selected tools into terminal interactive-render
+// completion for POST /chat/message. Nil preserves the default behavior.
+func WithTerminalToolPolicy(policy func(toolName string) bool) Option {
+	return func(s *Server) {
+		s.runChatOptions.TerminalToolPolicy = policy
+	}
+}
+
+// New creates a new chat service server with default behavior.
 func New(deps *ChatDeps) *Server {
+	return NewWithOptions(deps)
+}
+
+// NewWithOptions creates a chat service server with additive opt-in behavior.
+func NewWithOptions(deps *ChatDeps, opts ...Option) *Server {
 	s := &Server{
 		deps:   deps,
 		mux:    http.NewServeMux(),
 		logger: deps.Logger,
+	}
+	for _, option := range opts {
+		option(s)
 	}
 
 	s.mux.HandleFunc("POST /chat/message", s.PostChatMessage)
@@ -465,7 +485,7 @@ func (s *Server) PostChatMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	RunChat(ctx, s.deps, req, emit, approvalFunc)
+	RunChatWithOptions(ctx, s.deps, req, emit, approvalFunc, s.runChatOptions)
 }
 
 // DeleteChatSession clears a session's conversation history.
@@ -848,8 +868,21 @@ func (s *Server) GetHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// RunChat runs the agent loop for a single user message, emitting SSE events.
+// RunChatOptions configures additive per-run behavior without expanding
+// ChatDeps (which existing embedders may construct with unkeyed literals).
+type RunChatOptions struct {
+	// TerminalToolPolicy opts selected tools into terminal interactive-render
+	// completion. Nil preserves continue-after-tool behavior.
+	TerminalToolPolicy func(toolName string) bool
+}
+
+// RunChat runs the agent loop for a single user message with default behavior.
 func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit ChatEmitter, approvalFunc func(capID, toolName string, tc llm.ToolCall) bool) {
+	RunChatWithOptions(ctx, deps, req, emit, approvalFunc, RunChatOptions{})
+}
+
+// RunChatWithOptions runs the agent loop with additive per-run options.
+func RunChatWithOptions(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit ChatEmitter, approvalFunc func(capID, toolName string, tc llm.ToolCall) bool, runOpts RunChatOptions) {
 	deps.Logger.Info("user prompt", "message", req.Message, "mode", req.Mode, "session", req.SessionID)
 
 	// The canvas caps apply wherever the request came from, not just from
@@ -870,6 +903,12 @@ func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit C
 
 	// Get or create session.
 	sess := deps.Sessions.GetOrCreate(req.SessionID)
+	if !sess.AcquireTurn(ctx) {
+		emit("error", map[string]string{"type": "error", "message": ctx.Err().Error()})
+		emit("done", map[string]string{"type": "done", "session_id": sess.ID})
+		return
+	}
+	defer sess.ReleaseTurn()
 
 	// Append user message.
 	sess.AddMessage(llm.Message{
@@ -992,6 +1031,9 @@ func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit C
 			deps.ToolRoutingMode, groups, deps.ToolRoutingAlwaysOn,
 			deps.ToolRoutingMaxTools, deps.ToolRoutingForceLoad))
 	}
+	if runOpts.TerminalToolPolicy != nil {
+		opts = append(opts, agent.WithTerminalToolPolicy(runOpts.TerminalToolPolicy))
+	}
 	ag := agent.New(deps.Provider, deps.Router, opts...)
 
 	if approvalFunc != nil {
@@ -1003,6 +1045,7 @@ func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit C
 	// concatenation would copy the whole response per delta (quadratic in the
 	// number of deltas) for a response the model, not this code, sizes.
 	var assistantText strings.Builder
+	assistantCheckpointed := false
 
 	// Run agent loop, converting agent events to emitted events.
 	ag.Run(ctx, sess.Messages, func(evt agent.Event) {
@@ -1067,6 +1110,15 @@ func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit C
 				emit("open_nav", evt.OpenNav)
 			}
 
+		case agent.EventAssistantCheckpoint:
+			if !assistantCheckpointed && evt.Text != "" {
+				sess.AddMessage(llm.Message{
+					Role:    llm.RoleAssistant,
+					Content: evt.Text,
+				})
+				assistantCheckpointed = true
+			}
+
 		case agent.EventError:
 			emit("error", map[string]string{
 				"type":    "error",
@@ -1075,7 +1127,7 @@ func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit C
 
 		case agent.EventDone:
 			// Append assistant response to session history.
-			if text := assistantText.String(); text != "" {
+			if text := assistantText.String(); text != "" && !assistantCheckpointed {
 				sess.AddMessage(llm.Message{
 					Role:    llm.RoleAssistant,
 					Content: text,
