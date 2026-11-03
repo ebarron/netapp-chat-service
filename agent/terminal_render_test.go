@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -14,7 +15,7 @@ import (
 )
 
 const terminalCanvas = "```canvas-dashboard\n" +
-	`{"type":"dashboard","title":"Placement","panels":[{"type":"callout","title":"Ready","body":"Choose an action."}]}` +
+	`{"type":"dashboard","title":"Placement","panels":[{"type":"action-button","buttons":[{"label":"Continue","action":"message","message":"continue"}]}]}` +
 	"\n```"
 
 func terminalTool(name, result string, err error) InternalTool {
@@ -100,6 +101,21 @@ func TestTerminalInteractiveRenderStopsAfterValidatedCanvas(t *testing.T) {
 	}
 }
 
+func TestParseTerminalCanvasResultRequiresRuntimeInteractivity(t *testing.T) {
+	result := func(interactive bool) string {
+		return "```canvas-dashboard\n" +
+			`{"type":"dashboard","title":"Gateway","panels":[{"type":"callout","title":"Choose","body":"Select a protocol.","extension":{"kind":"example.gateway","schemaVersion":1,"interactive":` +
+			fmt.Sprint(interactive) + `,"data":{}}}]}` +
+			"\n```"
+	}
+	if _, ok := ParseTerminalCanvasResult(result(false)); ok {
+		t.Fatal("informational extension must not be terminal")
+	}
+	if _, ok := ParseTerminalCanvasResult(result(true)); !ok {
+		t.Fatal("explicitly interactive extension should be terminal")
+	}
+}
+
 func TestTerminalInteractiveRenderDefaultStillContinues(t *testing.T) {
 	provider := &llm.MockProvider{Responses: [][]llm.StreamEvent{
 		llm.MockToolCallResponse("render-1", "render_placement", `{}`),
@@ -153,10 +169,52 @@ func TestTerminalInteractiveRenderEmitsCanvasWithoutEmitResult(t *testing.T) {
 	}
 }
 
+func TestTerminalInteractiveRenderSupportsMCPTools(t *testing.T) {
+	provider := &llm.MockProvider{Responses: [][]llm.StreamEvent{
+		llm.MockToolCallResponse("render-1", "render_placement", `{}`),
+		llm.MockTextResponse("must not be called"),
+	}}
+	router := mcpclient.NewMockRouter([]llm.ToolDef{{
+		Name:   "render_placement",
+		Schema: json.RawMessage(`{"type":"object"}`),
+	}})
+	router.SetResult("render_placement", terminalCanvas)
+	ag := New(provider, router, WithTerminalTools("render_placement"))
+
+	events := collectEvents(t, ag, []llm.Message{{Role: llm.RoleUser, Content: "show placement"}})
+	if len(provider.Calls) != 1 {
+		t.Fatalf("provider calls = %d, want 1", len(provider.Calls))
+	}
+	if len(router.Calls()) != 1 {
+		t.Fatalf("MCP calls = %d, want 1", len(router.Calls()))
+	}
+	if eventIndex(events, EventCanvasOpen, "") < 0 ||
+		eventIndex(events, EventAssistantCheckpoint, "") < 0 ||
+		eventIndex(events, EventDone, "") < 0 {
+		t.Fatalf("missing terminal MCP event sequence: %+v", events)
+	}
+}
+
+func TestParseTerminalCanvasResultAcceptsExplicitInteractiveExtension(t *testing.T) {
+	result := "```canvas-dashboard\n" +
+		`{"type":"dashboard","title":"Gateway","panels":[{"type":"callout","title":"Choose","body":"Continue in the host form.","extension":{"kind":"example.gateway","schemaVersion":1,"interactive":true,"data":{}}}]}` +
+		"\n```"
+	payload, ok := ParseTerminalCanvasResult(result)
+	if !ok || payload == nil {
+		t.Fatal("explicitly interactive host extension was not accepted")
+	}
+
+	informational := strings.Replace(result, `"interactive":true`, `"interactive":false`, 1)
+	if _, ok := ParseTerminalCanvasResult(informational); ok {
+		t.Fatal("informational host extension must not be terminal")
+	}
+}
+
 func TestTerminalInteractiveRenderContinuesOnInvalidCanvasAndClose(t *testing.T) {
 	tests := map[string]string{
-		"invalid": "```canvas-dashboard\n{}\n```",
-		"close":   "```canvas-dashboard\n" + `{"type":"dashboard","title":"Placement","close":true}` + "\n```",
+		"invalid":       "```canvas-dashboard\n{}\n```",
+		"informational": "```canvas-dashboard\n" + `{"type":"dashboard","title":"Placement","panels":[{"type":"callout","title":"Unavailable","body":"No placement is currently available."}]}` + "\n```",
+		"close":         "```canvas-dashboard\n" + `{"type":"dashboard","title":"Placement","close":true}` + "\n```",
 	}
 	for name, result := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -290,8 +348,16 @@ func TestTerminalInteractiveRenderCancellationDoesNotComplete(t *testing.T) {
 		WithTerminalTools("render_placement"),
 	)
 	events := collectEventsWithContext(ag, ctx)
+	if len(provider.Calls) != 1 {
+		t.Fatalf("provider calls = %d, want 1 after cancellation", len(provider.Calls))
+	}
 	if eventIndex(events, EventAssistantCheckpoint, "") >= 0 {
 		t.Fatal("cancelled context must not terminally complete")
+	}
+	for _, typ := range []EventType{EventCanvasOpen, EventToolResult, EventDone} {
+		if eventIndex(events, typ, "") >= 0 {
+			t.Fatalf("cancelled context emitted event type %d: %+v", typ, events)
+		}
 	}
 }
 

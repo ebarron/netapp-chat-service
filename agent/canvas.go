@@ -193,10 +193,9 @@ func (c *canvasFenceInterceptor) emitCanvasEvent(jsonContent string) {
 }
 
 // ParseTerminalCanvasResult parses a successful tool result that is exactly
-// one complete, valid canvas open/update fence. Close directives are excluded:
-// tools that remove content generally require a conversational confirmation
-// and must continue through the provider unless the host chooses another
-// policy.
+// one complete, valid, actionable canvas open/update fence. Informational
+// views and close directives are excluded: they generally require explanation
+// or confirmation and must continue through the provider.
 //
 // Hosts with a deterministic pre-provider render path may use this helper to
 // enforce the same validation contract as Agent.Run.
@@ -218,6 +217,9 @@ func ParseTerminalCanvasResult(result string) (*CanvasPayload, bool) {
 		if json.Unmarshal(normalized, &payload) != nil || payload.Close {
 			return nil, false
 		}
+		if !hasInteractiveCanvasControl(normalized) {
+			return nil, false
+		}
 		return &CanvasPayload{
 			TabID:     meta.TabID,
 			Title:     meta.Title,
@@ -227,6 +229,51 @@ func ParseTerminalCanvasResult(result string) (*CanvasPayload, bool) {
 		}, true
 	}
 	return nil, false
+}
+
+// hasInteractiveCanvasControl distinguishes a self-contained interactive view
+// from a valid informational/error Canvas. Built-in forms/buttons are detected
+// structurally. Host extensions opt in per result with
+// `extension.interactive: true`, allowing a renderer to keep its error/empty
+// states nonterminal while marking its actionable state.
+func hasInteractiveCanvasControl(normalized json.RawMessage) bool {
+	var root any
+	if json.Unmarshal(normalized, &root) != nil {
+		return false
+	}
+	var visit func(any) bool
+	visit = func(value any) bool {
+		switch typed := value.(type) {
+		case []any:
+			for _, item := range typed {
+				if visit(item) {
+					return true
+				}
+			}
+		case map[string]any:
+			panelType, _ := typed["type"].(string)
+			if panelType == "action-form" || panelType == "action-button" {
+				return true
+			}
+			if extension, ok := typed["extension"].(map[string]any); ok {
+				if interactive, _ := extension["interactive"].(bool); interactive {
+					return true
+				}
+			}
+			if toggle, ok := typed["toggle"].(map[string]any); ok {
+				if message, _ := toggle["message"].(string); message != "" {
+					return true
+				}
+			}
+			for _, child := range typed {
+				if visit(child) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return visit(root)
 }
 
 // canvasPartialMatch returns true if the end of s could still become a

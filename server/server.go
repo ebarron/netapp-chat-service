@@ -448,7 +448,21 @@ func (s *Server) PostChatMessage(w http.ResponseWriter, r *http.Request) {
 		emitMu.Unlock()
 	}
 
+	// Resolve and acquire the session exactly once. Only the acquired turn is
+	// registered as stoppable; a same-session waiter must never replace the
+	// active turn's cancel function.
 	sess := s.deps.Sessions.GetOrCreate(req.SessionID)
+	if !sess.AcquireTurn(ctx) {
+		message := "session is no longer available"
+		if err := ctx.Err(); err != nil {
+			message = err.Error()
+		}
+		emit("error", map[string]string{"type": "error", "message": message})
+		emit("done", map[string]string{"type": "done", "session_id": sess.ID})
+		return
+	}
+	defer sess.ReleaseTurn()
+
 	activeContexts.Store(sess.ID, cancel)
 	defer activeContexts.Delete(sess.ID)
 
@@ -485,7 +499,7 @@ func (s *Server) PostChatMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	RunChatWithOptions(ctx, s.deps, req, emit, approvalFunc, s.runChatOptions)
+	runChatWithOptions(ctx, s.deps, req, emit, approvalFunc, s.runChatOptions, sess, true)
 }
 
 // DeleteChatSession clears a session's conversation history.
@@ -507,7 +521,13 @@ func (s *Server) DeleteChatSession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "session_id is required"})
 		return
 	}
-	s.deps.Sessions.Delete(body.SessionID)
+	if cancel, ok := activeContexts.LoadAndDelete(body.SessionID); ok {
+		cancel.(context.CancelFunc)()
+	}
+	if !s.deps.Sessions.DeleteContext(r.Context(), body.SessionID) {
+		writeJSON(w, http.StatusRequestTimeout, map[string]string{"message": "session clear cancelled"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "session cleared"})
 }
 
@@ -872,7 +892,8 @@ func (s *Server) GetHealth(w http.ResponseWriter, r *http.Request) {
 // ChatDeps (which existing embedders may construct with unkeyed literals).
 type RunChatOptions struct {
 	// TerminalToolPolicy opts selected tools into terminal interactive-render
-	// completion. Nil preserves continue-after-tool behavior.
+	// completion when their result is a validated actionable Canvas. Nil
+	// preserves continue-after-tool behavior.
 	TerminalToolPolicy func(toolName string) bool
 }
 
@@ -883,6 +904,10 @@ func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit C
 
 // RunChatWithOptions runs the agent loop with additive per-run options.
 func RunChatWithOptions(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit ChatEmitter, approvalFunc func(capID, toolName string, tc llm.ToolCall) bool, runOpts RunChatOptions) {
+	runChatWithOptions(ctx, deps, req, emit, approvalFunc, runOpts, nil, false)
+}
+
+func runChatWithOptions(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit ChatEmitter, approvalFunc func(capID, toolName string, tc llm.ToolCall) bool, runOpts RunChatOptions, sess *session.Session, turnAcquired bool) {
 	deps.Logger.Info("user prompt", "message", req.Message, "mode", req.Mode, "session", req.SessionID)
 
 	// The canvas caps apply wherever the request came from, not just from
@@ -901,14 +926,24 @@ func RunChatWithOptions(ctx context.Context, deps *ChatDeps, req ChatMessageRequ
 		mode = "read-only"
 	}
 
-	// Get or create session.
-	sess := deps.Sessions.GetOrCreate(req.SessionID)
-	if !sess.AcquireTurn(ctx) {
-		emit("error", map[string]string{"type": "error", "message": ctx.Err().Error()})
-		emit("done", map[string]string{"type": "done", "session_id": sess.ID})
-		return
+	// Public callers resolve and acquire here. The HTTP handler passes its
+	// already-acquired session so empty IDs are not resolved twice and only
+	// the running turn is registered for stop/delete.
+	if sess == nil {
+		sess = deps.Sessions.GetOrCreate(req.SessionID)
 	}
-	defer sess.ReleaseTurn()
+	if !turnAcquired {
+		if !sess.AcquireTurn(ctx) {
+			message := "session is no longer available"
+			if err := ctx.Err(); err != nil {
+				message = err.Error()
+			}
+			emit("error", map[string]string{"type": "error", "message": message})
+			emit("done", map[string]string{"type": "done", "session_id": sess.ID})
+			return
+		}
+		defer sess.ReleaseTurn()
+	}
 
 	// Append user message.
 	sess.AddMessage(llm.Message{
@@ -1045,7 +1080,9 @@ func RunChatWithOptions(ctx context.Context, deps *ChatDeps, req ChatMessageRequ
 	// concatenation would copy the whole response per delta (quadratic in the
 	// number of deltas) for a response the model, not this code, sizes.
 	var assistantText strings.Builder
-	assistantCheckpointed := false
+	var assistantCheckpoint string
+	turnDone := false
+	historyCommitted := false
 
 	// Run agent loop, converting agent events to emitted events.
 	ag.Run(ctx, sess.Messages, func(evt agent.Event) {
@@ -1111,12 +1148,8 @@ func RunChatWithOptions(ctx context.Context, deps *ChatDeps, req ChatMessageRequ
 			}
 
 		case agent.EventAssistantCheckpoint:
-			if !assistantCheckpointed && evt.Text != "" {
-				sess.AddMessage(llm.Message{
-					Role:    llm.RoleAssistant,
-					Content: evt.Text,
-				})
-				assistantCheckpointed = true
+			if assistantCheckpoint == "" && evt.Text != "" {
+				assistantCheckpoint = evt.Text
 			}
 
 		case agent.EventError:
@@ -1126,19 +1159,40 @@ func RunChatWithOptions(ctx context.Context, deps *ChatDeps, req ChatMessageRequ
 			})
 
 		case agent.EventDone:
-			// Append assistant response to session history.
-			if text := assistantText.String(); text != "" && !assistantCheckpointed {
-				sess.AddMessage(llm.Message{
-					Role:    llm.RoleAssistant,
-					Content: text,
-				})
+			// Commit visible assistant output when present; otherwise use the
+			// hidden terminal checkpoint. This happens synchronously before the
+			// done event, preserving both UI/history consistency and valid role
+			// alternation for the next turn.
+			text := assistantText.String()
+			if text == "" {
+				text = assistantCheckpoint
 			}
+			if text == "" {
+				text = "The previous turn completed without a text response."
+			}
+			sess.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: text})
+			historyCommitted = true
+			turnDone = true
 			emit("done", map[string]string{
 				"type":       "done",
 				"session_id": sess.ID,
 			})
 		}
 	})
+
+	// Provider failures and cancellation can end the loop without EventDone.
+	// Still close the persisted user/assistant role pair so a resumed provider
+	// request is valid. Do not emit a synthetic done for a cancelled stream.
+	if !turnDone && !historyCommitted {
+		text := assistantText.String()
+		if text == "" {
+			text = "The previous turn did not complete."
+			if ctx.Err() != nil {
+				text = "The previous turn was cancelled."
+			}
+		}
+		sess.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: text})
+	}
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

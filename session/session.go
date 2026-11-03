@@ -28,6 +28,7 @@ type Session struct {
 	turnMu      sync.Mutex
 	turnActive  bool
 	turnWait    chan struct{}
+	turnClosed  bool
 }
 
 // AcquireTurn waits until no other turn is running for this session. It
@@ -35,6 +36,10 @@ type Session struct {
 func (s *Session) AcquireTurn(ctx context.Context) bool {
 	for {
 		s.turnMu.Lock()
+		if s.turnClosed {
+			s.turnMu.Unlock()
+			return false
+		}
 		if !s.turnActive {
 			s.turnActive = true
 			s.turnMu.Unlock()
@@ -67,6 +72,30 @@ func (s *Session) ReleaseTurn() {
 		s.turnWait = nil
 	}
 	s.turnMu.Unlock()
+}
+
+// Close prevents new turns from acquiring this session and waits for the
+// active turn, if any, to release it. Waiting turns are awakened by the active
+// turn's release and fail their acquisition because the session is closed.
+func (s *Session) Close(ctx context.Context) bool {
+	s.turnMu.Lock()
+	s.turnClosed = true
+	if !s.turnActive {
+		s.turnMu.Unlock()
+		return true
+	}
+	if s.turnWait == nil {
+		s.turnWait = make(chan struct{})
+	}
+	wait := s.turnWait
+	s.turnMu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-wait:
+		return true
+	}
 }
 
 // AddMessage appends a message and trims the window if needed.
@@ -176,11 +205,43 @@ func (m *Manager) GetOrCreate(id string) *Session {
 	return s
 }
 
-// Delete removes a session.
+// Delete removes a session after its active turn has completed.
 func (m *Manager) Delete(id string) {
+	_ = m.DeleteContext(context.Background(), id)
+}
+
+// DeleteContext closes a session, waits for its active turn to complete, and
+// removes that exact session from the manager. Closing before removal prevents
+// waiters on the old object from overlapping a newly created same-ID session.
+func (m *Manager) DeleteContext(ctx context.Context, id string) bool {
+	m.mu.RLock()
+	s := m.sessions[id]
+	m.mu.RUnlock()
+	if s == nil {
+		return true
+	}
+	if !s.Close(ctx) {
+		// Closing is irreversible: keep the old object unavailable and finish
+		// removing it after its active turn eventually releases. This prevents
+		// a cancelled delete request from stranding a permanently closed entry
+		// or recreating the same ID while the old turn is still running.
+		go func() {
+			if s.Close(context.Background()) {
+				m.deleteSessionIfSame(id, s)
+			}
+		}()
+		return false
+	}
+	m.deleteSessionIfSame(id, s)
+	return true
+}
+
+func (m *Manager) deleteSessionIfSame(id string, s *Session) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.sessions, id)
+	if m.sessions[id] == s {
+		delete(m.sessions, id)
+	}
+	m.mu.Unlock()
 }
 
 // Count returns the number of active sessions.

@@ -130,6 +130,27 @@ describe('useChatPanel interactive submission queue', () => {
     });
   });
 
+  it('serializes ordinary same-render sends with a synchronous request lock', async () => {
+    const first = controlledResponse();
+    const stream = vi.fn().mockResolvedValueOnce(first.response);
+    const { result } = renderHook(() => useChatPanel(), {
+      api: createMockChatAPI({ stream }),
+    });
+
+    act(() => {
+      void result.current.sendMessage('first');
+      void result.current.sendMessage('must not overlap');
+    });
+    expect(stream).toHaveBeenCalledTimes(1);
+    expect((stream.mock.calls[0][1] as Record<string, unknown>).message).toBe('first');
+
+    act(() => {
+      first.done();
+      first.close();
+    });
+    await waitFor(() => expect(result.current.streaming).toBe(false));
+  });
+
   it('drops the queued slot on unmount and session clear', async () => {
     for (const scenario of ['unmount', 'clear'] as const) {
       const first = controlledResponse();
@@ -162,9 +183,83 @@ describe('useChatPanel interactive submission queue', () => {
       expect(stream).toHaveBeenCalledTimes(1);
       if (scenario === 'clear') {
         expect(hook.result.current.interactiveSubmissionState).toBe('idle');
+        expect(hook.result.current.sessionId).toBeUndefined();
+        expect(hook.result.current.messages).toEqual([]);
       }
       if (scenario !== 'unmount') hook.unmount();
     }
+  });
+
+  it('drops queued work when the active request is stopped', async () => {
+    const first = controlledResponse();
+    const stream = vi.fn().mockResolvedValueOnce(first.response);
+    const post = vi.fn().mockResolvedValue({});
+    const { result } = renderHook(
+      () => useChatPanel({ queueInteractiveSubmissions: true }),
+      { api: createMockChatAPI({ stream, post }) },
+    );
+
+    act(() => {
+      void result.current.sendMessage('first');
+    });
+    await waitFor(() => expect(result.current.streaming).toBe(true));
+    act(() => {
+      expect(result.current.sendInteractiveMessage('must be cancelled')).toBe(true);
+    });
+    await act(async () => {
+      await result.current.stop();
+    });
+
+    expect(result.current.streaming).toBe(false);
+    expect(result.current.interactiveSubmissionState).toBe('idle');
+    act(() => {
+      first.done();
+      first.close();
+    });
+    await Promise.resolve();
+    expect(stream).toHaveBeenCalledTimes(1);
+  });
+
+  it('survives React StrictMode effect replay', async () => {
+    const response = controlledResponse();
+    const stream = vi.fn().mockResolvedValueOnce(response.response);
+    const { result } = renderHook(
+      () => useChatPanel({ queueInteractiveSubmissions: true }),
+      { api: createMockChatAPI({ stream }), strict: true },
+    );
+
+    act(() => {
+      expect(result.current.sendInteractiveMessage('strict action')).toBe(true);
+    });
+    await waitFor(() => {
+      expect(result.current.streaming).toBe(true);
+      expect(result.current.interactiveSubmissionState).toBe('continuing');
+    });
+    act(() => {
+      response.done();
+      response.close();
+    });
+    await waitFor(() => {
+      expect(result.current.streaming).toBe(false);
+      expect(result.current.interactiveSubmissionState).toBe('idle');
+    });
+  });
+
+  it('removes an empty assistant placeholder for a Canvas-only terminal turn', async () => {
+    const stream = vi.fn().mockResolvedValue(doneResponse());
+    const { result } = renderHook(() => useChatPanel(), {
+      api: createMockChatAPI({ stream }),
+    });
+
+    act(() => {
+      void result.current.sendMessage('open canvas');
+    });
+    await waitFor(() => expect(result.current.streaming).toBe(false));
+    expect(result.current.messages).toHaveLength(1);
+    expect(result.current.messages[0]).toMatchObject({
+      role: 'user',
+      content: 'open canvas',
+    });
   });
 
   it('continues the queued action after the prior request fails', async () => {
@@ -191,6 +286,29 @@ describe('useChatPanel interactive submission queue', () => {
     await waitFor(() => expect(stream).toHaveBeenCalledTimes(2));
     expect((stream.mock.calls[1][1] as Record<string, unknown>).message)
       .toBe('continue after failure');
+  });
+
+  it('drops queued work when SSE closes without a committed done event', async () => {
+    const first = controlledResponse();
+    const stream = vi.fn().mockResolvedValueOnce(first.response);
+    const { result } = renderHook(
+      () => useChatPanel({ queueInteractiveSubmissions: true }),
+      { api: createMockChatAPI({ stream }) },
+    );
+
+    act(() => {
+      void result.current.sendMessage('first');
+    });
+    await waitFor(() => expect(result.current.streaming).toBe(true));
+    act(() => {
+      expect(result.current.sendInteractiveMessage('must not dispatch')).toBe(true);
+      first.close();
+    });
+    await waitFor(() => {
+      expect(result.current.streaming).toBe(false);
+      expect(result.current.interactiveSubmissionState).toBe('idle');
+    });
+    expect(stream).toHaveBeenCalledTimes(1);
   });
 
   it('preserves legacy drop-while-streaming behavior unless opted in', async () => {

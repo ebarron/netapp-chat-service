@@ -10,8 +10,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - `queueInteractiveSubmissions` on `ChatPanel` and `ChatAppShell` enables an
   opt-in one-slot queue for Canvas action forms and host panel extensions.
   Actions clicked during an active SSE turn capture an immutable message
-  snapshot and dispatch exactly once after that stream closes and its session
-  checkpoint is committed.
+  snapshot and dispatch exactly once after that request settles and its stream
+  closes; successful `done` processing commits the session before dispatch.
 - Interactive renderers receive an `idle`, `queued`, or `continuing` submission
   state. Built-in action forms display queued progress and reject duplicate
   clicks while preserving their existing read-only and validation gates.
@@ -19,8 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 ### Compatibility
 - Queueing defaults off. Ordinary typed chat and hosts that omit the new prop
   retain the existing drop-while-streaming behavior.
-- Queued work is discarded on unmount or conversation clear, never overlaps a
-  same-session turn, and proceeds after a failed prior request.
+- Queued work is discarded on Stop, unmount, or conversation clear, never
+  overlaps a same-session turn, and proceeds after a failed prior request.
 
 ## [0.5.0] - 2026-10-27
 

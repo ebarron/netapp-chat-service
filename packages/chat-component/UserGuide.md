@@ -134,9 +134,13 @@ closing:
 The first interactive click captures its exact message payload in a one-slot
 queue. The control shows `Queued` and then `Continuing…`; duplicate clicks are
 rejected, and the action dispatches only after the prior SSE stream closes with
-its committed session ID. Queued work is discarded if the component unmounts or
-the conversation is cleared. A failed prior request still releases the queued
-action.
+its committed session ID when `done` was received. A failed prior request still
+releases the queued action after its stream settles. Explicit Stop, Clear, and
+unmount discard queued work.
+
+Host panel extensions receive the same `idle | queued | continuing` value as
+`context.submissionState`, allowing extension-owned controls to show or disable
+their queued handoff consistently.
 
 This option defaults to `false`. Ordinary typed messages are never queued, and
 existing hosts retain their current drop-while-streaming behavior until they opt

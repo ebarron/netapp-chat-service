@@ -350,8 +350,9 @@ func WithInternalTools(tools map[string]InternalTool) Option {
 // WithTerminalToolPolicy opts selected tools into terminal interactive-render
 // completion. A matching tool terminates the turn without another provider
 // call only when its result contains a valid canvas open/update and every
-// sibling tool in the same provider batch also succeeds. Errors and invalid
-// canvas payloads continue to the provider for explanation or recovery.
+// sibling tool in the same provider batch also succeeds. Informational,
+// error-only, and invalid canvas payloads continue to the provider for
+// explanation or recovery.
 //
 // A nil policy is inert. The callback must be safe for concurrent use because
 // tools in one provider response execute in parallel.
@@ -487,6 +488,13 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 	}
 
 	for iteration := 0; iteration < maxIter; iteration++ {
+		if ctx.Err() != nil {
+			a.Logger.Info("agent stopped before provider call",
+				"reason", "context_cancelled",
+				"iteration", iteration+1,
+			)
+			return
+		}
 		iterStart := time.Now()
 		req := llm.ChatRequest{
 			Messages: messages,
@@ -561,6 +569,17 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 			// Non-retryable error or retries exhausted.
 			a.Logger.Error("llm stream error", "error", streamErr, "iteration", iteration)
 			emit(Event{Type: EventError, Error: streamErr.Error()})
+			return
+		}
+
+		// A provider may finish its stream cleanly at the same time the caller
+		// cancels. Do not treat that partial response as a completed turn or
+		// begin any requested tools after cancellation.
+		if ctx.Err() != nil {
+			a.Logger.Info("agent stopped after provider stream",
+				"reason", "context_cancelled",
+				"iteration", iteration+1,
+			)
 			return
 		}
 
@@ -808,6 +827,19 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 		wg.Wait()
 		toolsDuration := time.Since(toolsStart)
 
+		// Tool handlers are cooperatively cancellable and may return a result
+		// after the request has been stopped. Their events are buffered, so
+		// discard the entire post-cancel batch and never start another provider
+		// round or emit a misleading Canvas/done sequence.
+		if ctx.Err() != nil {
+			a.Logger.Info("agent stopped after tool settlement",
+				"reason", "context_cancelled",
+				"iteration", iteration+1,
+				"tools_duration", toolsDuration.Round(time.Millisecond),
+			)
+			return
+		}
+
 		// Emit events and collect messages in original order.
 		for _, tr := range results {
 			for _, ev := range tr.events {
@@ -842,8 +874,6 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 			switch {
 			case hadError:
 				reason = "sibling_error"
-			case ctx.Err() != nil:
-				reason = "context_cancelled"
 			case len(invalidTerminalTools) == 0:
 				decision = "terminate"
 				reason = "validated_canvas"

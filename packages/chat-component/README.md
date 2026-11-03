@@ -118,9 +118,11 @@ narrow interval before the prior SSE stream closes:
 ```
 
 One immutable action payload is queued, displayed as queued/continuing, and sent
-after the previous stream commits its `done` session ID. Duplicate clicks and
-overlapping same-session turns are prevented. Typed-chat behavior is unchanged,
-and omitting the prop preserves the legacy default.
+after the previous request settles and its SSE stream closes. A normal `done`
+updates the session before dispatch; an HTTP/transport failure also releases the
+queued action. Explicit Stop, Clear, and unmount discard it. Duplicate clicks
+and overlapping same-session turns are prevented. Typed-chat behavior is
+unchanged, and omitting the prop preserves the legacy default.
 
 ## Documentation
 

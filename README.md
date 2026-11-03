@@ -38,9 +38,10 @@ text, interests, and any custom render tools via config (standalone) or
 - **Canvas rendering** — `canvas-object-detail` / `canvas-dashboard` fences are
   converted to `canvas_open` SSE events so content opens in a pinned side panel.
 - **Terminal interactive renders (opt-in)** — selected renderer tools can finish
-  immediately after a validated Canvas open/update, committing a hidden history
-  checkpoint and skipping the redundant follow-on provider round. Errors and
-  invalid/close payloads keep the normal recovery path.
+  immediately after a validated, actionable Canvas open/update, committing a
+  hidden history checkpoint and skipping the redundant follow-on provider
+  round. Informational/error, invalid, and close payloads keep the normal
+  recovery path.
 - **Agentic-forward UI seams (opt-in, additive)** — a set of generic seams for
   building a docked assistant + canvas workspace: host-rendered content in a
   canvas tab (portal slot), a canvas **context provider** (`CanvasTabSummary`
@@ -111,7 +112,8 @@ srv := server.NewWithOptions(deps,
 
 The lower-level equivalents are `agent.WithTerminalToolPolicy` and
 `agent.WithTerminalTools`. Only successful results containing exactly one valid
-Canvas open/update terminate; all sibling tools settle first.
+Canvas open/update with a built-in form/button (or a host extension marked
+`interactive: true`) terminate; all sibling tools settle first.
 
 ## Configuration
 
