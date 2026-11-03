@@ -94,11 +94,23 @@ export function CanvasPanel({
             // Host-content tab (C2–C4): the component renders an empty mount
             // node and hands it to the host, which portals its own React tree
             // in. No ScrollArea wrapper — the host owns the body's layout.
-            <Tabs.Panel key={tab.tabId} value={tab.tabId} style={{ flex: 1, minHeight: 0 }}>
+            <Tabs.Panel
+              key={tab.tabId}
+              value={tab.tabId}
+              data-canvas-tab-id={tab.tabId}
+              tabIndex={-1}
+              style={{ flex: 1, minHeight: 0 }}
+            >
               <HostTabMount tabId={tab.tabId} onHostTabPortal={onHostTabPortal} />
             </Tabs.Panel>
           ) : (
-            <Tabs.Panel key={tab.tabId} value={tab.tabId} style={{ flex: 1, minHeight: 0 }}>
+            <Tabs.Panel
+              key={tab.tabId}
+              value={tab.tabId}
+              data-canvas-tab-id={tab.tabId}
+              tabIndex={-1}
+              style={{ flex: 1, minHeight: 0 }}
+            >
               <ScrollArea style={{ height: '100%' }} p="sm">
                 <CanvasTabContent
                   tab={tab}

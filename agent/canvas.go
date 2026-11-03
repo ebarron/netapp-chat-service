@@ -200,6 +200,45 @@ func (c *canvasFenceInterceptor) emitCanvasEvent(jsonContent string) {
 // Hosts with a deterministic pre-provider render path may use this helper to
 // enforce the same validation contract as Agent.Run.
 func ParseTerminalCanvasResult(result string) (*CanvasPayload, bool) {
+	payload, _, ok := parseCompleteCanvasResult(result)
+	if !ok || !hasInteractiveCanvasControl(payload.Content) {
+		return nil, false
+	}
+	return payload, true
+}
+
+// ParseTerminalCanvasResultWithHandoff validates a complete Canvas result
+// against renderer-owned handoff metadata. Forms must contain an actionable
+// control; results must contain a nonempty, non-error destination. The
+// validated metadata is attached only to the emitted Canvas event and is not
+// persisted as assistant prose.
+func ParseTerminalCanvasResultWithHandoff(
+	result string,
+) (*CanvasPayload, bool) {
+	payload, embeddedHandoff, ok := parseCompleteCanvasResult(result)
+	if !ok {
+		return nil, false
+	}
+	normalizedHandoff, ok := normalizedCanvasHandoff(embeddedHandoff)
+	if !ok {
+		return nil, false
+	}
+	switch normalizedHandoff.Kind {
+	case CanvasHandoffForm:
+		ok = hasInteractiveCanvasControl(payload.Content)
+	case CanvasHandoffResults:
+		ok = hasResultCanvasContent(payload.Content)
+	default:
+		ok = false
+	}
+	if !ok {
+		return nil, false
+	}
+	payload.Handoff = normalizedHandoff
+	return payload, true
+}
+
+func parseCompleteCanvasResult(result string) (*CanvasPayload, *CanvasHandoff, bool) {
 	trimmed := strings.TrimSpace(result)
 	for _, prefix := range canvasFencePrefixes {
 		opening := prefix + "\n"
@@ -209,16 +248,29 @@ func ParseTerminalCanvasResult(result string) (*CanvasPayload, bool) {
 		raw := strings.TrimSpace(trimmed[len(opening) : len(trimmed)-len("\n```")])
 		normalized, meta, err := normalizeCanvasPayload(raw)
 		if err != nil {
-			return nil, false
+			return nil, nil, false
 		}
-		var payload struct {
-			Close bool `json:"close"`
+		var envelope struct {
+			Close   bool           `json:"close"`
+			Handoff *CanvasHandoff `json:"handoff,omitempty"`
 		}
-		if json.Unmarshal(normalized, &payload) != nil || payload.Close {
-			return nil, false
+		if json.Unmarshal(normalized, &envelope) != nil || envelope.Close {
+			return nil, nil, false
 		}
-		if !hasInteractiveCanvasControl(normalized) {
-			return nil, false
+		if envelope.Handoff != nil {
+			var content map[string]json.RawMessage
+			if json.Unmarshal(normalized, &content) != nil {
+				return nil, nil, false
+			}
+			delete(content, "handoff")
+			cleaned, err := json.Marshal(content)
+			if err != nil {
+				return nil, nil, false
+			}
+			normalized, meta, err = normalizeCanvasPayload(string(cleaned))
+			if err != nil {
+				return nil, nil, false
+			}
 		}
 		return &CanvasPayload{
 			TabID:     meta.TabID,
@@ -226,9 +278,67 @@ func ParseTerminalCanvasResult(result string) (*CanvasPayload, bool) {
 			Kind:      meta.Kind,
 			Qualifier: meta.Qualifier,
 			Content:   normalized,
-		}, true
+		}, envelope.Handoff, true
 	}
-	return nil, false
+	return nil, nil, false
+}
+
+// hasResultCanvasContent rejects structurally empty and explicit error
+// destinations while accepting valid informational dashboards/details. It
+// intentionally does not infer form-vs-results from the top-level envelope.
+func hasResultCanvasContent(normalized json.RawMessage) bool {
+	var root map[string]any
+	if json.Unmarshal(normalized, &root) != nil || canvasContainsError(root) {
+		return false
+	}
+	for _, key := range []string{"panels", "sections", "items", "rows", "data"} {
+		switch value := root[key].(type) {
+		case []any:
+			if len(value) > 0 {
+				return true
+			}
+		case map[string]any:
+			if len(value) > 0 {
+				return true
+			}
+		}
+	}
+	if extension, ok := root["extension"].(map[string]any); ok {
+		return len(extension) > 0
+	}
+	return false
+}
+
+func canvasContainsError(value any) bool {
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			if canvasContainsError(item) {
+				return true
+			}
+		}
+	case map[string]any:
+		if errValue, ok := typed["error"]; ok && errValue != nil {
+			if text, stringValue := errValue.(string); !stringValue || strings.TrimSpace(text) != "" {
+				return true
+			}
+		}
+		if status, ok := typed["status"].(string); ok {
+			switch strings.ToLower(strings.TrimSpace(status)) {
+			case "error", "failed", "failure":
+				return true
+			}
+		}
+		if valueType, ok := typed["type"].(string); ok && strings.EqualFold(valueType, "error") {
+			return true
+		}
+		for _, child := range typed {
+			if canvasContainsError(child) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // hasInteractiveCanvasControl distinguishes a self-contained interactive view

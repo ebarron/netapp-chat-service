@@ -50,11 +50,15 @@ func TestRunChatWithOptionsCommitsTerminalCheckpointBeforeDoneAndResumes(t *test
 	}
 
 	var firstEvents []string
+	var terminalCanvasEvent *agent.CanvasPayload
 	RunChatWithOptions(
 		context.Background(),
 		deps,
 		ChatMessageRequest{Message: "show placement", SessionID: "terminal-session"},
-		func(event string, _ any) {
+		func(event string, data any) {
+			if event == "canvas_open" {
+				terminalCanvasEvent, _ = data.(*agent.CanvasPayload)
+			}
 			if event == "done" {
 				msgs := deps.Sessions.Get("terminal-session").Messages
 				if len(msgs) != 2 || msgs[1].Role != llm.RoleAssistant {
@@ -78,6 +82,9 @@ func TestRunChatWithOptionsCommitsTerminalCheckpointBeforeDoneAndResumes(t *test
 		if firstEvents[i] != wantEvents[i] {
 			t.Fatalf("events = %v, want %v", firstEvents, wantEvents)
 		}
+	}
+	if terminalCanvasEvent == nil || !terminalCanvasEvent.TerminalInteractive {
+		t.Fatalf("terminal canvas metadata = %+v, want terminal_interactive", terminalCanvasEvent)
 	}
 	msgs := deps.Sessions.Get("terminal-session").Messages
 	if got := msgs[len(msgs)-1]; got.Role != llm.RoleAssistant ||
@@ -169,6 +176,9 @@ func TestNewWithOptionsAppliesTerminalPolicyThroughHTTP(t *testing.T) {
 		if !strings.Contains(body, event) {
 			t.Fatalf("HTTP stream missing %q:\n%s", event, body)
 		}
+	}
+	if !strings.Contains(body, `"terminal_interactive":true`) {
+		t.Fatalf("HTTP stream missing terminal handoff metadata:\n%s", body)
 	}
 }
 
