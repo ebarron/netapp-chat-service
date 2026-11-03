@@ -120,6 +120,29 @@ describe('ActionFormBlock', () => {
     expect(onAction).not.toHaveBeenCalled();
   });
 
+  it('shows queued progress and prevents duplicate submission clicks', async () => {
+    const user = userEvent.setup();
+    const onAction = vi.fn();
+    const data = {
+      ...baseData,
+      fields: baseData.fields.map((field) => (
+        field.key === 'volume_name' ? { ...field, defaultValue: 'vol1' } : field
+      )),
+    };
+    const { rerender } = render(
+      <ActionFormBlock data={data} onAction={onAction} interactiveSubmissionState="queued" />,
+    );
+    const queued = screen.getByRole('button', { name: 'Queued' });
+    expect(queued).toBeDisabled();
+    await user.click(queued);
+    expect(onAction).not.toHaveBeenCalled();
+
+    rerender(
+      <ActionFormBlock data={data} onAction={onAction} interactiveSubmissionState="continuing" />,
+    );
+    expect(screen.getByRole('button', { name: 'Continuing…' })).toBeDisabled();
+  });
+
   it('includes select values in submit params when selected', async () => {
     const user = userEvent.setup();
     const onAction = vi.fn();

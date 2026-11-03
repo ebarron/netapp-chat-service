@@ -1,7 +1,7 @@
 import { Tabs, CloseButton, ScrollArea, Text } from '@mantine/core';
 import { useEffect, useRef } from 'react';
 import { DashboardBlock, ObjectDetailBlock } from './charts';
-import type { CanvasTab } from './useChatPanel';
+import type { CanvasTab, InteractiveSubmissionState } from './useChatPanel';
 import classes from './ChatPanel.module.css';
 
 interface CanvasPanelProps {
@@ -10,6 +10,7 @@ interface CanvasPanelProps {
   onTabChange: (tabId: string) => void;
   onTabClose: (tabId: string) => void;
   onAction?: (message: string) => void;
+  interactiveSubmissionState?: InteractiveSubmissionState;
   readOnly?: boolean;
   /**
    * Called with the portal mount node for a host-content tab (C2–C4) when it
@@ -32,6 +33,7 @@ export function CanvasPanel({
   onTabChange,
   onTabClose,
   onAction,
+  interactiveSubmissionState,
   readOnly,
   onHostTabPortal,
   hideSingleTab = false,
@@ -98,7 +100,12 @@ export function CanvasPanel({
           ) : (
             <Tabs.Panel key={tab.tabId} value={tab.tabId} style={{ flex: 1, minHeight: 0 }}>
               <ScrollArea style={{ height: '100%' }} p="sm">
-                <CanvasTabContent tab={tab} onAction={onAction} readOnly={readOnly} />
+                <CanvasTabContent
+                  tab={tab}
+                  onAction={onAction}
+                  interactiveSubmissionState={interactiveSubmissionState}
+                  readOnly={readOnly}
+                />
               </ScrollArea>
             </Tabs.Panel>
           ),
@@ -133,10 +140,12 @@ function HostTabMount({
 function CanvasTabContent({
   tab,
   onAction,
+  interactiveSubmissionState,
   readOnly,
 }: {
   tab: CanvasTab;
   onAction?: (message: string) => void;
+  interactiveSubmissionState?: InteractiveSubmissionState;
   readOnly?: boolean;
 }) {
   const json = JSON.stringify(tab.content);
@@ -150,12 +159,12 @@ function CanvasTabContent({
   // retaining what the user typed for the previous render, and avoids
   // index-keyed panel reuse bleeding one form's input into another.
   if (content.type === 'object-detail' || content.kind) {
-    return <ObjectDetailBlock key={json} json={json} onAction={onAction} readOnly={readOnly} />;
+    return <ObjectDetailBlock key={json} json={json} onAction={onAction} interactiveSubmissionState={interactiveSubmissionState} readOnly={readOnly} />;
   }
   if (Array.isArray(content.panels)) {
-    return <DashboardBlock key={json} json={json} onAction={onAction} readOnly={readOnly} />;
+    return <DashboardBlock key={json} json={json} onAction={onAction} interactiveSubmissionState={interactiveSubmissionState} readOnly={readOnly} />;
   }
 
   // Fallback: try object-detail first, then dashboard.
-  return <ObjectDetailBlock key={json} json={json} onAction={onAction} readOnly={readOnly} />;
+  return <ObjectDetailBlock key={json} json={json} onAction={onAction} interactiveSubmissionState={interactiveSubmissionState} readOnly={readOnly} />;
 }

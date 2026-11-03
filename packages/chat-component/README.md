@@ -31,6 +31,9 @@ beside the chat.
   switches regions.
 - **Navigation by prompt.** "Open alerting" can drive the same navigation a click
   would, via a host-registered tool and a single SSE event.
+- **Lossless interactive handoff (opt-in).** Canvas forms and host extensions
+  clicked during a finishing stream can occupy a one-slot queue and continue
+  exactly once after the prior session checkpoint commits.
 - **Additive and safe.** Every advanced capability is opt-in; with none of the
   new props used the component behaves exactly as the prior release.
 
@@ -102,6 +105,22 @@ No provider, unknown kind/version, rejected data, or renderer failure
 deterministically renders the built-in fallback. Extensions receive only their
 normalized data plus `readOnly` and the controlled `sendMessage` action when it
 is available. The package does not render raw HTML or load remote modules.
+
+## Interactive submission queue
+
+Enable queueing when Canvas and host-extension actions may be clicked during the
+narrow interval before the prior SSE stream closes:
+
+```tsx
+<ChatPanel queueInteractiveSubmissions />
+// or
+<ChatAppShell queueInteractiveSubmissions />
+```
+
+One immutable action payload is queued, displayed as queued/continuing, and sent
+after the previous stream commits its `done` session ID. Duplicate clicks and
+overlapping same-session turns are prevented. Typed-chat behavior is unchanged,
+and omitting the prop preserves the legacy default.
 
 ## Documentation
 

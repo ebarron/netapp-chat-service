@@ -1,11 +1,13 @@
 import { useState } from 'react';
 import { Stack, Group, Button, TextInput, Select, Switch, Divider, SimpleGrid } from '@mantine/core';
 import type { ActionFormData, ActionFormField, ActionFormSelectOption } from './chartTypes';
+import type { InteractiveSubmissionState } from '../useChatPanel';
 
 interface ActionFormBlockProps {
   data: ActionFormData;
   onAction?: (message: string) => void;
   readOnly?: boolean;
+  interactiveSubmissionState?: InteractiveSubmissionState;
 }
 
 interface SelectOption {
@@ -50,7 +52,12 @@ function reconcileSelectValues(
   return next;
 }
 
-export function ActionFormBlock({ data, onAction, readOnly }: ActionFormBlockProps) {
+export function ActionFormBlock({
+  data,
+  onAction,
+  readOnly,
+  interactiveSubmissionState = 'idle',
+}: ActionFormBlockProps) {
   const fields = Array.isArray(data.fields)
     ? data.fields.filter((field) => (
         typeof field === 'object'
@@ -77,6 +84,7 @@ export function ActionFormBlock({ data, onAction, readOnly }: ActionFormBlockPro
   // when it's read-only-safe — e.g. a picker that only re-renders a dashboard.
   const writeGated = submit?.requiresReadWrite ?? true;
   const lockedReadOnly = !!readOnly && writeGated;
+  const submissionBusy = interactiveSubmissionState !== 'idle';
 
   const handleSubmit = () => {
     if (requiredMissing || !submit) return;
@@ -169,16 +177,21 @@ export function ActionFormBlock({ data, onAction, readOnly }: ActionFormBlockPro
           <Group justify="space-between" align="center" wrap="nowrap">
             <Button
               size="sm"
-              disabled={requiredMissing || lockedReadOnly}
+              disabled={requiredMissing || lockedReadOnly || submissionBusy}
               onClick={handleSubmit}
             >
-              {submit.label}
+              {interactiveSubmissionState === 'queued'
+                ? 'Queued'
+                : interactiveSubmissionState === 'continuing'
+                  ? 'Continuing…'
+                  : submit.label}
             </Button>
             {data.secondary && (
               <Button
                 size="compact-sm"
                 variant="subtle"
                 color="gray"
+                disabled={submissionBusy}
                 onClick={() => onAction?.(data.secondary!.message)}
               >
                 {data.secondary.label}

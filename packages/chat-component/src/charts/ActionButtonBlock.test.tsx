@@ -30,6 +30,19 @@ describe('ActionButtonBlock', () => {
     expect(onAction).toHaveBeenCalledWith('Tell me more');
   });
 
+  it('disables message actions while an interactive submission is queued', () => {
+    const data: ActionButtonData = {
+      type: 'action-button',
+      buttons: [
+        { label: 'Ask More', action: 'message', message: 'Tell me more' },
+        { label: 'Run It', action: 'execute', tool: 'my_tool' },
+      ],
+    };
+    render(<ActionButtonBlock data={data} interactiveSubmissionState="queued" />);
+    expect(screen.getByText('Ask More').closest('button')).toBeDisabled();
+    expect(screen.getByText('Run It').closest('button')).not.toBeDisabled();
+  });
+
   it('calls onExecute for execute-mode buttons', () => {
     const onExecute = vi.fn();
     const data: ActionButtonData = {

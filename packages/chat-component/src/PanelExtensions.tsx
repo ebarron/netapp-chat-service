@@ -6,6 +6,7 @@ import {
   type ReactNode,
   useContext,
 } from 'react';
+import type { InteractiveSubmissionState } from './useChatPanel';
 
 /** Opaque, data-only metadata carried by a validated built-in panel fallback. */
 export interface PanelExtensionMetadata {
@@ -21,6 +22,8 @@ export interface PanelExtensionMetadata {
 export interface PanelExtensionContext {
   readOnly: boolean;
   sendMessage?: (message: string) => void;
+  /** State of the host-enabled one-slot interactive submission queue. */
+  submissionState?: InteractiveSubmissionState;
 }
 
 export interface PanelExtensionRendererProps<T> {
@@ -135,6 +138,7 @@ interface PanelExtensionSlotProps {
   fallback: ReactNode;
   readOnly?: boolean;
   onAction?: (message: string) => void;
+  interactiveSubmissionState?: InteractiveSubmissionState;
 }
 
 /** @internal Resolves, normalizes, and isolates one extension render. */
@@ -143,6 +147,7 @@ export function PanelExtensionSlot({
   fallback,
   readOnly,
   onAction,
+  interactiveSubmissionState,
 }: PanelExtensionSlotProps) {
   const registry = useContext(PanelExtensionRegistryContext);
   const definition = registry?.get(extension.kind, extension.schemaVersion);
@@ -160,6 +165,7 @@ export function PanelExtensionSlot({
   const context: PanelExtensionContext = {
     readOnly: readOnly === true,
     sendMessage: onAction,
+    submissionState: interactiveSubmissionState,
   };
   return (
     <ExtensionErrorBoundary fallback={fallback}>

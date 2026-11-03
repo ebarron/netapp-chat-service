@@ -94,6 +94,8 @@ export interface ChatAppShellProps {
   onPromptConsumed?: () => void;
   /** Busy-state notifier for the host. */
   onBusyChange?: (busy: boolean) => void;
+  /** Queue one Canvas/panel-extension action behind an active stream. */
+  queueInteractiveSubmissions?: boolean;
   /**
    * Canvas open/close notifier. The shell handles the reserved nav tab's manual
    * close internally, and forwards every event here so the host can compose its
@@ -287,6 +289,7 @@ export function ChatAppShell({
   pendingPrompt,
   onPromptConsumed,
   onBusyChange,
+  queueInteractiveSubmissions,
   onCanvasEvent,
   renderHeader,
   headerHeight = 60,
@@ -571,6 +574,7 @@ export function ChatAppShell({
       pendingPrompt={pendingPrompt}
       onPromptConsumed={onPromptConsumed}
       onBusyChange={onBusyChange}
+      queueInteractiveSubmissions={queueInteractiveSubmissions}
       onOpenNav={onOpenNav}
       onHostTabPortal={onHostTabPortal}
       onCanvasEvent={handleCanvasEvent}

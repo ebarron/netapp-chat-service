@@ -54,6 +54,9 @@ export interface PendingApproval {
 /** Chat mode: read-only or read-write. */
 export type ChatMode = 'read-only' | 'read-write';
 
+/** State of the opt-in one-slot interactive action queue. */
+export type InteractiveSubmissionState = 'idle' | 'queued' | 'continuing';
+
 /**
  * A per-tab context summary the host attaches so the LLM stays aware of what
  * is shown in a canvas tab (C5). It mirrors the engine's `CanvasTabSummary`
@@ -201,6 +204,12 @@ export interface UseChatPanelOptions {
    * omitted, the event is a safe no-op.
    */
   onOpenNav?: (destination: string) => void;
+  /**
+   * When true, Canvas and panel-extension actions submitted during an active
+   * stream occupy a one-slot queue and run once after that stream closes.
+   * Ordinary sendMessage behavior is unchanged, and the default is false.
+   */
+  queueInteractiveSubmissions?: boolean;
 }
 
 /** Describes a canvas open/update or close, for `onCanvasEvent`. */
@@ -218,6 +227,12 @@ export function useChatPanel(options?: UseChatPanelOptions) {
   const [sessionId, setSessionId] = useState<string | undefined>();
   const [configured, setConfigured] = useState<boolean>(false);
   const abortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+  const queueGenerationRef = useRef(0);
+  const interactiveActiveRef = useRef(false);
+  const queuedInteractiveRef = useRef<{ message: string; generation: number } | null>(null);
+  const [interactiveSubmissionState, setInteractiveSubmissionState] =
+    useState<InteractiveSubmissionState>('idle');
 
   // Phase 2: Mode toggle
   const [mode, setModeState] = useState<ChatMode>(options?.defaultMode ?? 'read-write');
@@ -248,6 +263,24 @@ export function useChatPanel(options?: UseChatPanelOptions) {
   // Same pattern for the C6 open-nav handler.
   const onOpenNavRef = useRef(options?.onOpenNav);
   onOpenNavRef.current = options?.onOpenNav;
+
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+      queueGenerationRef.current += 1;
+      interactiveActiveRef.current = false;
+      queuedInteractiveRef.current = null;
+      abortRef.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (options?.queueInteractiveSubmissions !== false) return;
+    queueGenerationRef.current += 1;
+    interactiveActiveRef.current = false;
+    queuedInteractiveRef.current = null;
+    setInteractiveSubmissionState('idle');
+  }, [options?.queueInteractiveSubmissions]);
 
   /** Clears the mode auto-disable timer. */
   const clearModeTimer = useCallback(() => {
@@ -654,6 +687,84 @@ export function useChatPanel(options?: UseChatPanelOptions) {
     [sessionId, streaming, mode, setMode, canvasTabs, api]
   );
 
+  /**
+   * Submit a Canvas/extension action. With queueing enabled, one exact message
+   * snapshot can wait behind the active stream; additional clicks are rejected
+   * until that queued turn finishes. With queueing disabled this delegates to
+   * sendMessage and therefore preserves the legacy drop-while-streaming path.
+   */
+  const sendInteractiveMessage = useCallback(
+    (text: string): boolean => {
+      if (!text.trim()) return false;
+      const message = text;
+      if (!options?.queueInteractiveSubmissions) {
+        void sendMessage(message);
+        return !streaming;
+      }
+      if (interactiveActiveRef.current) {
+        return false;
+      }
+      if (!streaming) {
+        const generation = queueGenerationRef.current;
+        interactiveActiveRef.current = true;
+        setInteractiveSubmissionState('continuing');
+        void sendMessage(message).finally(() => {
+          if (
+            mountedRef.current
+            && generation === queueGenerationRef.current
+          ) {
+            interactiveActiveRef.current = false;
+            setInteractiveSubmissionState('idle');
+          }
+        });
+        return true;
+      }
+      interactiveActiveRef.current = true;
+      queuedInteractiveRef.current = {
+        message,
+        generation: queueGenerationRef.current,
+      };
+      setInteractiveSubmissionState('queued');
+      return true;
+    },
+    [
+      interactiveSubmissionState,
+      options?.queueInteractiveSubmissions,
+      sendMessage,
+      streaming,
+    ],
+  );
+
+  // Dispatch the queued immutable snapshot only after the prior SSE reader has
+  // closed and sendMessage's finally block has returned the hook to idle.
+  useEffect(() => {
+    if (streaming || interactiveSubmissionState !== 'queued') return;
+    const queued = queuedInteractiveRef.current;
+    if (!queued) {
+      interactiveActiveRef.current = false;
+      setInteractiveSubmissionState('idle');
+      return;
+    }
+    if (queued.generation !== queueGenerationRef.current) {
+      interactiveActiveRef.current = false;
+      queuedInteractiveRef.current = null;
+      setInteractiveSubmissionState('idle');
+      return;
+    }
+
+    queuedInteractiveRef.current = null;
+    setInteractiveSubmissionState('continuing');
+    void sendMessage(queued.message).finally(() => {
+      if (
+        mountedRef.current
+        && queued.generation === queueGenerationRef.current
+      ) {
+        interactiveActiveRef.current = false;
+        setInteractiveSubmissionState('idle');
+      }
+    });
+  }, [interactiveSubmissionState, sendMessage, streaming]);
+
   /** Handle a single parsed SSE event. */
   const handleSSEEvent = useCallback(
     (eventType: string, data: SSEData, assistantId: string) => {
@@ -845,6 +956,10 @@ export function useChatPanel(options?: UseChatPanelOptions) {
 
   /** Clear conversation. */
   const clear = useCallback(async () => {
+    queueGenerationRef.current += 1;
+    interactiveActiveRef.current = false;
+    queuedInteractiveRef.current = null;
+    setInteractiveSubmissionState('idle');
     if (sessionId) {
       try {
         await api.delete('/chat/session', { session_id: sessionId });
@@ -885,6 +1000,8 @@ export function useChatPanel(options?: UseChatPanelOptions) {
     approveAction,
     denyAction,
     sendMessage,
+    sendInteractiveMessage,
+    interactiveSubmissionState,
     stop,
     clear,
     checkConfigured,

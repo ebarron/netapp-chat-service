@@ -16,24 +16,26 @@ import { ActionButtonBlock } from './ActionButtonBlock';
 import { ActionFormBlock } from './ActionFormBlock';
 import { PanelExtensionSlot } from '../PanelExtensions';
 import type { CalloutData, PanelData } from './chartTypes';
+import type { InteractiveSubmissionState } from '../useChatPanel';
 
 interface ChartBlockProps {
   json: string;
   onAction?: (message: string) => void;
   onExecute?: (tool: string, params?: Record<string, unknown>) => void;
   readOnly?: boolean;
+  interactiveSubmissionState?: InteractiveSubmissionState;
 }
 
 /**
  * Dispatches a standalone chart JSON to the correct renderer.
  * Falls back to a plain code block on parse failure.
  */
-export function ChartBlock({ json, onAction, onExecute, readOnly }: ChartBlockProps) {
+export function ChartBlock({ json, onAction, onExecute, readOnly, interactiveSubmissionState }: ChartBlockProps) {
   const data = parseChart(json);
   if (!data) {
     return <Code block>{json}</Code>;
   }
-  return <PanelRenderer data={data} onAction={onAction} onExecute={onExecute} readOnly={readOnly} />;
+  return <PanelRenderer data={data} onAction={onAction} onExecute={onExecute} readOnly={readOnly} interactiveSubmissionState={interactiveSubmissionState} />;
 }
 
 interface PanelRendererProps {
@@ -41,16 +43,19 @@ interface PanelRendererProps {
   onAction?: (message: string) => void;
   onExecute?: (tool: string, params?: Record<string, unknown>) => void;
   readOnly?: boolean;
+  interactiveSubmissionState?: InteractiveSubmissionState;
 }
 
 function ExtensionAwareCallout({
   data,
   onAction,
   readOnly,
+  interactiveSubmissionState,
 }: {
   data: CalloutData;
   onAction?: (message: string) => void;
   readOnly?: boolean;
+  interactiveSubmissionState?: InteractiveSubmissionState;
 }) {
   // Keep opaque extension metadata out of the Markdown fallback renderer.
   const fallbackData: CalloutData = {
@@ -68,12 +73,13 @@ function ExtensionAwareCallout({
       fallback={fallback}
       onAction={onAction}
       readOnly={readOnly}
+      interactiveSubmissionState={interactiveSubmissionState}
     />
   );
 }
 
 /** Renders a single panel by type. Exported for use by DashboardBlock too. */
-export function PanelRenderer({ data, onAction, onExecute, readOnly }: PanelRendererProps) {
+export function PanelRenderer({ data, onAction, onExecute, readOnly, interactiveSubmissionState }: PanelRendererProps) {
   switch (data.type) {
     case 'area':
       return <AreaChartBlock data={data} />;
@@ -99,14 +105,23 @@ export function PanelRenderer({ data, onAction, onExecute, readOnly }: PanelRend
           data={data}
           onAction={onAction}
           readOnly={readOnly}
+          interactiveSubmissionState={interactiveSubmissionState}
         />
       );
     case 'proposal':
       return <ProposalBlock data={data} />;
     case 'action-button':
-      return <ActionButtonBlock data={data} onAction={onAction} onExecute={onExecute} readOnly={readOnly} />;
+      return (
+        <ActionButtonBlock
+          data={data}
+          onAction={onAction}
+          onExecute={onExecute}
+          readOnly={readOnly}
+          interactiveSubmissionState={interactiveSubmissionState}
+        />
+      );
     case 'action-form':
-      return <ActionFormBlock data={data} onAction={onAction} readOnly={readOnly} />;
+      return <ActionFormBlock data={data} onAction={onAction} readOnly={readOnly} interactiveSubmissionState={interactiveSubmissionState} />;
     default:
       return null;
   }

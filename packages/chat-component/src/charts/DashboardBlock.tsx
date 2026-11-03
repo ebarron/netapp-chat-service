@@ -3,12 +3,14 @@ import { parseDashboard } from './chartTypes';
 import type { PanelData, PanelWidth, ResourceTableData } from './chartTypes';
 import { PanelRenderer } from './ChartBlock';
 import classes from './DashboardBlock.module.css';
+import type { InteractiveSubmissionState } from '../useChatPanel';
 
 interface DashboardBlockProps {
   json: string;
   onAction?: (message: string) => void;
   onExecute?: (tool: string, params?: Record<string, unknown>) => void;
   readOnly?: boolean;
+  interactiveSubmissionState?: InteractiveSubmissionState;
 }
 
 function spanForWidth(width?: PanelWidth): number {
@@ -28,7 +30,7 @@ function spanForWidth(width?: PanelWidth): number {
  * Uses a 4-column grid that collapses to 1 column on narrow viewports.
  * Falls back to a plain code block on parse failure.
  */
-export function DashboardBlock({ json, onAction, onExecute, readOnly }: DashboardBlockProps) {
+export function DashboardBlock({ json, onAction, onExecute, readOnly, interactiveSubmissionState }: DashboardBlockProps) {
   const dashboard = parseDashboard(json);
   if (!dashboard) {
     return <Code block>{json}</Code>;
@@ -67,6 +69,7 @@ export function DashboardBlock({ json, onAction, onExecute, readOnly }: Dashboar
                 onAction={onAction}
                 onExecute={onExecute}
                 readOnly={readOnly}
+                interactiveSubmissionState={interactiveSubmissionState}
               />
             </div>
           );
