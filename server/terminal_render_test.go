@@ -116,6 +116,88 @@ func TestRunChatWithOptionsCommitsTerminalCheckpointBeforeDoneAndResumes(t *test
 	}
 }
 
+func TestRunChatInlineTerminalRendersOnceAndRehydratesHistoryWithoutDuplicate(t *testing.T) {
+	inline := "```dashboard\n" +
+		`{"type":"dashboard","title":"Fleet Health","panels":[{"type":"callout","title":"Healthy","body":"All systems operational."}]}` +
+		"\n```"
+	provider := &llm.MockProvider{Responses: [][]llm.StreamEvent{
+		llm.MockToolCallResponse("render-1", "render_fleet_health", `{}`),
+		llm.MockTextResponse("The prior fleet view remains available."),
+	}}
+	handler := func(context.Context, json.RawMessage) (string, error) {
+		return inline, nil
+	}
+	deps := &ChatDeps{
+		Sessions: session.NewManager(20),
+		Provider: provider,
+		Router:   mcpclient.NewMockRouter(nil),
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ExtraTools: map[string]agent.InternalTool{
+			"render_fleet_health": {
+				Def: llm.ToolDef{
+					Name:   "render_fleet_health",
+					Schema: json.RawMessage(`{"type":"object"}`),
+				},
+				Handler:    agent.WithInlineRenderCompletion(handler),
+				EmitResult: true,
+			},
+		},
+	}
+
+	var firstVisible strings.Builder
+	var canvasEvents int
+	RunChat(
+		context.Background(),
+		deps,
+		ChatMessageRequest{
+			Message: "what is the health of my fleet?", SessionID: "inline-terminal",
+		},
+		func(event string, data any) {
+			switch event {
+			case "message":
+				payload := data.(map[string]string)
+				firstVisible.WriteString(payload["content"])
+			case "canvas_open":
+				canvasEvents++
+			}
+		},
+		nil,
+	)
+
+	if len(provider.Calls) != 1 {
+		t.Fatalf("first turn provider calls = %d, want 1", len(provider.Calls))
+	}
+	if canvasEvents != 0 {
+		t.Fatalf("inline result emitted %d Canvas handoff event(s)", canvasEvents)
+	}
+	if got := strings.Count(firstVisible.String(), "```dashboard"); got != 1 {
+		t.Fatalf("live inline dashboard count = %d, want 1: %q", got, firstVisible.String())
+	}
+	history := deps.Sessions.Get("inline-terminal").Messages
+	if len(history) != 2 ||
+		strings.Count(history[1].Content, "```dashboard") != 1 {
+		t.Fatalf("terminal history = %+v, want one persisted inline dashboard", history)
+	}
+
+	RunChat(
+		context.Background(),
+		deps,
+		ChatMessageRequest{
+			Message: "is that still current?", SessionID: "inline-terminal",
+		},
+		func(string, any) {},
+		nil,
+	)
+	if len(provider.Calls) != 2 {
+		t.Fatalf("provider calls after resume = %d, want 2", len(provider.Calls))
+	}
+	resumed := provider.Calls[1].Messages
+	if len(resumed) < 3 ||
+		strings.Count(resumed[len(resumed)-2].Content, "```dashboard") != 1 {
+		t.Fatalf("rehydrated history duplicated inline dashboard: %+v", resumed)
+	}
+}
+
 func TestNewWithOptionsConfiguresTerminalPolicyWithoutChangingNew(t *testing.T) {
 	deps := &ChatDeps{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	if got := New(deps).runChatOptions.TerminalToolPolicy; got != nil {

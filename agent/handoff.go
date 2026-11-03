@@ -14,10 +14,13 @@ const (
 	maxHandoffActionRunes  = 80
 )
 
+const terminalRenderMetadataKey = "_terminal_render"
+
 // WithCanvasHandoff wraps a renderer so its successful complete Canvas result
-// carries renderer-owned transcript metadata. Invalid metadata, errors, prose,
-// and non-Canvas results pass through unchanged. The agent extracts and
-// validates this envelope before terminal completion; default tools are inert.
+// carries explicit Canvas presentation metadata and renderer-owned transcript
+// copy. Invalid metadata, errors, prose, and non-Canvas results pass through
+// unchanged. The agent extracts and validates this envelope before terminal
+// completion; default tools are inert.
 func WithCanvasHandoff(
 	handler InternalToolHandler,
 	handoff CanvasHandoff,
@@ -28,13 +31,36 @@ func WithCanvasHandoff(
 		if err != nil || !valid {
 			return result, err
 		}
-		return embedCanvasHandoff(result, *normalized), nil
+		return embedTerminalRenderMetadata(result, TerminalRenderMetadata{
+			Presentation: TerminalRenderPresentationCanvas,
+			Handoff:      normalized,
+		}, canvasFencePrefixes), nil
 	}
 }
 
-func embedCanvasHandoff(result string, handoff CanvasHandoff) string {
+// WithInlineRenderCompletion marks a renderer's complete inline dashboard or
+// object-detail as a self-contained terminal result. Inline results remain in
+// the transcript, carry no Canvas handoff, and end the turn without another
+// provider call after validation.
+func WithInlineRenderCompletion(handler InternalToolHandler) InternalToolHandler {
+	return func(ctx context.Context, input json.RawMessage) (string, error) {
+		result, err := handler(ctx, input)
+		if err != nil {
+			return result, err
+		}
+		return embedTerminalRenderMetadata(result, TerminalRenderMetadata{
+			Presentation: TerminalRenderPresentationInline,
+		}, inlineRenderFencePrefixes), nil
+	}
+}
+
+func embedTerminalRenderMetadata(
+	result string,
+	metadata TerminalRenderMetadata,
+	prefixes []string,
+) string {
 	trimmed := strings.TrimSpace(result)
-	for _, prefix := range canvasFencePrefixes {
+	for _, prefix := range prefixes {
 		opening := prefix + "\n"
 		if !strings.HasPrefix(trimmed, opening) || !strings.HasSuffix(trimmed, "\n```") {
 			continue
@@ -44,7 +70,7 @@ func embedCanvasHandoff(result string, handoff CanvasHandoff) string {
 		if json.Unmarshal([]byte(raw), &payload) != nil {
 			return result
 		}
-		payload["handoff"] = handoff
+		payload[terminalRenderMetadataKey] = metadata
 		encoded, err := json.Marshal(payload)
 		if err != nil {
 			return result

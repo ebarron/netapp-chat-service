@@ -165,6 +165,23 @@ type CanvasHandoff struct {
 	ActionLabel string            `json:"action_label"`
 }
 
+// TerminalRenderPresentation identifies where a validated renderer result is
+// presented. Inline results remain in the chat transcript and never carry a
+// Canvas handoff. Canvas results open a separate destination and require one.
+type TerminalRenderPresentation string
+
+const (
+	TerminalRenderPresentationInline TerminalRenderPresentation = "inline"
+	TerminalRenderPresentationCanvas TerminalRenderPresentation = "canvas"
+)
+
+// TerminalRenderMetadata is embedded in a renderer result by the opt-in
+// wrappers. The engine strips it before emitting user-visible content.
+type TerminalRenderMetadata struct {
+	Presentation TerminalRenderPresentation `json:"presentation"`
+	Handoff      *CanvasHandoff             `json:"handoff,omitempty"`
+}
+
 // OpenNavPayload holds the data for an open_nav SSE event (C6). Destination
 // is an opaque, host-defined string (e.g. a route or a stable screen id); the
 // engine never interprets it — it merely relays the value the host tool
@@ -232,8 +249,9 @@ type Agent struct {
 	// InternalTools are handled locally by the agent, not routed through MCP.
 	// Keyed by tool name.
 	InternalTools map[string]InternalTool
-	// terminalToolPolicy opts selected tools into terminal interactive-render
-	// completion. Nil preserves the historical continue-after-tool behavior.
+	// terminalToolPolicy is the legacy name-based opt-in for interactive
+	// Canvas completion. Renderer-owned inline/Canvas metadata is detected
+	// independently. Nil preserves the historical behavior for unmarked tools.
 	terminalToolPolicy func(toolName string) bool
 
 	// --- In-band tool routing (S7a). Active only when ToolRoutingMode is
@@ -665,6 +683,7 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 			events           []Event
 			isError          bool
 			terminalEligible bool
+			terminalValid    bool
 			terminalCanvas   *CanvasPayload
 		}
 
@@ -706,11 +725,13 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 						}
 						tr.isError = true
 					} else {
-						if canvas, ok := ParseTerminalCanvasResultWithHandoff(result); ok {
-							tr.terminalCanvas = canvas
+						if terminal, ok := ParseTerminalRenderResult(result); ok {
+							result = terminal.Result
 							tr.terminalEligible = true
+							tr.terminalValid = true
+							tr.terminalCanvas = terminal.Canvas
 						} else if tr.terminalEligible {
-							tr.terminalCanvas, _ = ParseTerminalCanvasResult(result)
+							tr.terminalCanvas, tr.terminalValid = ParseTerminalCanvasResult(result)
 						}
 						if it.EmitResult {
 							if tr.terminalCanvas != nil {
@@ -818,11 +839,13 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 					}
 					tr.isError = true
 				} else {
-					if canvas, ok := ParseTerminalCanvasResultWithHandoff(result); ok {
-						tr.terminalCanvas = canvas
+					if terminal, ok := ParseTerminalRenderResult(result); ok {
+						result = terminal.Result
 						tr.terminalEligible = true
+						tr.terminalValid = true
+						tr.terminalCanvas = terminal.Canvas
 					} else if tr.terminalEligible {
-						tr.terminalCanvas, _ = ParseTerminalCanvasResult(result)
+						tr.terminalCanvas, tr.terminalValid = ParseTerminalCanvasResult(result)
 					}
 					if tr.terminalCanvas != nil {
 						tr.events = append(tr.events, Event{
@@ -866,9 +889,9 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 			return
 		}
 
-		// Decide terminal completion before flushing the buffered batch so the
-		// validated Canvas event can carry deterministic client metadata. The
-		// field remains absent for default/nonterminal/error paths.
+		// Decide terminal completion before flushing the buffered batch so a
+		// validated Canvas event can carry deterministic client metadata and an
+		// inline result can be emitted once without another provider round.
 		var terminalTools []string
 		var invalidTerminalTools []string
 		for _, tr := range results {
@@ -879,7 +902,7 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 				continue
 			}
 			terminalTools = append(terminalTools, pendingToolCalls[tr.index].Name)
-			if tr.terminalCanvas == nil {
+			if !tr.terminalValid {
 				invalidTerminalTools = append(invalidTerminalTools, pendingToolCalls[tr.index].Name)
 			}
 		}
@@ -902,12 +925,12 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 			messages = append(messages, tr.message)
 		}
 
-		// Terminal interactive-render policy is evaluated only after every
+		// Terminal render completion is evaluated only after every
 		// sibling tool has settled and its events/history result have been
-		// emitted in provider order. One or more opted-in tools must each have
-		// produced a validated canvas open/update, and every sibling must have
-		// succeeded. Otherwise the normal provider recovery/explanation round
-		// remains unchanged.
+		// emitted in provider order. One or more metadata-marked or legacy
+		// opted-in tools must each have produced a validated result, and every
+		// sibling must have succeeded. Otherwise the normal provider
+		// recovery/explanation round remains unchanged.
 		if len(terminalTools) > 0 {
 			decision := "continue"
 			reason := "invalid_canvas"
@@ -916,9 +939,9 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 				reason = "sibling_error"
 			case terminalComplete:
 				decision = "terminate"
-				reason = "validated_canvas"
+				reason = "validated_render"
 			}
-			a.Logger.Info("terminal interactive render policy",
+			a.Logger.Info("terminal render policy",
 				"decision", decision,
 				"reason", reason,
 				"tools", terminalTools,
@@ -935,7 +958,7 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 				if !lastCanvasFlush.IsZero() {
 					renderToDone = time.Since(lastCanvasFlush)
 				}
-				a.Logger.Info("agent done (terminal interactive render)",
+				a.Logger.Info("agent done (terminal render)",
 					"total_duration", time.Since(runStart).Round(time.Millisecond),
 					"render_to_done", renderToDone.Round(time.Millisecond),
 					"iterations", iteration+1,
