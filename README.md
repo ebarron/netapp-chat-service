@@ -37,11 +37,12 @@ text, interests, and any custom render tools via config (standalone) or
   relying on the LLM to assemble JSON.
 - **Canvas rendering** — `canvas-object-detail` / `canvas-dashboard` fences are
   converted to `canvas_open` SSE events so content opens in a pinned side panel.
-- **Terminal interactive renders (opt-in)** — selected renderer tools can finish
-  immediately after a validated, actionable Canvas open/update, committing a
-  hidden history checkpoint and skipping the redundant follow-on provider
-  round. Informational/error, invalid, and close payloads keep the normal
-  recovery path.
+- **Terminal renders (opt-in)** — renderer-owned metadata explicitly declares
+  whether a self-contained result is presented inline or in a separate Canvas
+  destination. Valid inline dashboards/details render once in the transcript;
+  Canvas destinations carry renderer-owned handoff copy. Both commit history
+  and skip the redundant follow-on provider round. Informational/error,
+  invalid, and close payloads keep the normal recovery path.
 - **Agentic-forward UI seams (opt-in, additive)** — a set of generic seams for
   building a docked assistant + canvas workspace: host-rendered content in a
   canvas tab (portal slot), a canvas **context provider** (`CanvasTabSummary`
@@ -99,8 +100,30 @@ srv := server.New(&server.ChatDeps{
 mux.Handle("/", srv.Handler())
 ```
 
-Hosts with self-contained interactive renderers can opt them into render→done
-completion without changing `ChatDeps`:
+Hosts should attach terminal behavior at the renderer. Inline results stay in
+the transcript and never receive a Canvas handoff:
+
+```go
+tools["render_fleet_health"].Handler =
+    agent.WithInlineRenderCompletion(tools["render_fleet_health"].Handler)
+```
+
+Renderers that open a separate Canvas destination attach interest-owned handoff
+copy:
+
+```go
+tools["render_volume_detail"].Handler = agent.WithCanvasHandoff(
+    tools["render_volume_detail"].Handler,
+    agent.CanvasHandoff{
+        Kind: agent.CanvasHandoffResults,
+        Heading: "Volume details are ready.",
+        ActionLabel: "View results.",
+    },
+)
+```
+
+Legacy hosts can still opt selected interactive Canvas renderers into
+render→done completion by tool name without changing `ChatDeps`:
 
 ```go
 srv := server.NewWithOptions(deps,
@@ -111,9 +134,10 @@ srv := server.NewWithOptions(deps,
 ```
 
 The lower-level equivalents are `agent.WithTerminalToolPolicy` and
-`agent.WithTerminalTools`. Only successful results containing exactly one valid
-Canvas open/update with a built-in form/button (or a host extension marked
-`interactive: true`) terminate; all sibling tools settle first.
+`agent.WithTerminalTools`. That legacy policy accepts only successful results
+containing exactly one valid Canvas open/update with a built-in form/button (or
+a host extension marked `interactive: true`). All terminal paths settle sibling
+tools first.
 
 ## Configuration
 

@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.3.2
+
+### Added
+
+- `agent.WithInlineRenderCompletion` lets a deterministic renderer mark one
+  complete inline `dashboard` or `object-detail` result as self-contained. The
+  result is emitted exactly once in the transcript, committed to history, and
+  ends the turn without a follow-on provider call.
+- Terminal render metadata now declares its presentation explicitly as
+  `inline` or `canvas`. Inline results never carry handoff UI; separate Canvas
+  destinations continue to require renderer-owned form/results handoff copy.
+
+### Fixed
+
+- Self-contained inline renderers no longer need a second model round that can
+  echo or modify the dashboard and append redundant prose.
+- Protocol metadata is stripped from both inline and Canvas output before it is
+  emitted or committed to history.
+
 ## v0.3.0
 
 ### Added

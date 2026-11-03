@@ -172,6 +172,48 @@ func TestRendererOwnedHandoffClassifiesFormAndResults(t *testing.T) {
 	}
 }
 
+func TestInlineTerminalRenderEmitsOnceWithoutCanvasHandoffOrProviderFollowUp(t *testing.T) {
+	inline := "```dashboard\n" +
+		`{"type":"dashboard","title":"Fleet Health","panels":[{"type":"callout","title":"Healthy","body":"All systems operational."}]}` +
+		"\n```"
+	provider := &llm.MockProvider{Responses: [][]llm.StreamEvent{
+		llm.MockToolCallResponse("render-1", "render_fleet_health", `{}`),
+		llm.MockTextResponse("must not be called"),
+	}}
+	tool := terminalTool("render_fleet_health", inline, nil)
+	tool.Handler = WithInlineRenderCompletion(tool.Handler)
+	ag := New(provider, mcpclient.NewMockRouter(nil), WithInternalTools(
+		map[string]InternalTool{"render_fleet_health": tool},
+	))
+
+	events := collectEvents(t, ag, []llm.Message{{
+		Role: llm.RoleUser, Content: "what is the health of my fleet?",
+	}})
+
+	if len(provider.Calls) != 1 {
+		t.Fatalf("provider calls = %d, want exactly the tool-call round", len(provider.Calls))
+	}
+	var visible strings.Builder
+	for _, event := range events {
+		switch event.Type {
+		case EventText:
+			visible.WriteString(event.Text)
+		case EventCanvasOpen:
+			t.Fatalf("inline terminal result opened Canvas or handoff UI: %+v", event)
+		}
+	}
+	if got := strings.Count(visible.String(), "```dashboard"); got != 1 {
+		t.Fatalf("inline dashboard count = %d, want 1: %q", got, visible.String())
+	}
+	if strings.Contains(visible.String(), terminalRenderMetadataKey) {
+		t.Fatalf("protocol metadata leaked into inline result: %q", visible.String())
+	}
+	if eventIndex(events, EventAssistantCheckpoint, "") < 0 ||
+		eventIndex(events, EventDone, "") < 0 {
+		t.Fatalf("terminal checkpoint/done missing: %+v", events)
+	}
+}
+
 func TestRendererOwnedHandoffRejectsWrongKindEmptyErrorAndUnsafeCopy(t *testing.T) {
 	results := map[string]string{
 		"form_without_control": "```canvas-dashboard\n" +

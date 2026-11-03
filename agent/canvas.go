@@ -26,6 +26,11 @@ var canvasFencePrefixes = []string{
 	"```canvas-dashboard",
 }
 
+var inlineRenderFencePrefixes = []string{
+	"```object-detail",
+	"```dashboard",
+}
+
 // newCanvasFenceInterceptor creates an interceptor that wraps emit.
 func newCanvasFenceInterceptor(emit func(Event)) *canvasFenceInterceptor {
 	return &canvasFenceInterceptor{
@@ -200,8 +205,20 @@ func (c *canvasFenceInterceptor) emitCanvasEvent(jsonContent string) {
 // Hosts with a deterministic pre-provider render path may use this helper to
 // enforce the same validation contract as Agent.Run.
 func ParseTerminalCanvasResult(result string) (*CanvasPayload, bool) {
-	payload, _, ok := parseCompleteCanvasResult(result)
-	if !ok || !hasInteractiveCanvasControl(payload.Content) {
+	parsed, ok := parseCompleteRenderResult(
+		result,
+		canvasFencePrefixes,
+		TerminalRenderPresentationCanvas,
+	)
+	if !ok {
+		return nil, false
+	}
+	if parsed.metadata != nil &&
+		parsed.metadata.Presentation != TerminalRenderPresentationCanvas {
+		return nil, false
+	}
+	payload := parsed.payload
+	if !hasInteractiveCanvasControl(payload.Content) {
 		return nil, false
 	}
 	return payload, true
@@ -215,14 +232,20 @@ func ParseTerminalCanvasResult(result string) (*CanvasPayload, bool) {
 func ParseTerminalCanvasResultWithHandoff(
 	result string,
 ) (*CanvasPayload, bool) {
-	payload, embeddedHandoff, ok := parseCompleteCanvasResult(result)
+	parsed, ok := parseCompleteRenderResult(
+		result,
+		canvasFencePrefixes,
+		TerminalRenderPresentationCanvas,
+	)
+	if !ok || parsed.metadata == nil ||
+		parsed.metadata.Presentation != TerminalRenderPresentationCanvas {
+		return nil, false
+	}
+	normalizedHandoff, ok := normalizedCanvasHandoff(parsed.metadata.Handoff)
 	if !ok {
 		return nil, false
 	}
-	normalizedHandoff, ok := normalizedCanvasHandoff(embeddedHandoff)
-	if !ok {
-		return nil, false
-	}
+	payload := parsed.payload
 	switch normalizedHandoff.Kind {
 	case CanvasHandoffForm:
 		ok = hasInteractiveCanvasControl(payload.Content)
@@ -238,9 +261,80 @@ func ParseTerminalCanvasResultWithHandoff(
 	return payload, true
 }
 
-func parseCompleteCanvasResult(result string) (*CanvasPayload, *CanvasHandoff, bool) {
+// TerminalRenderResult is a validated self-contained renderer result. Result
+// is the clean user-visible fence with protocol metadata removed. Canvas is
+// populated only for the separate Canvas presentation; inline results remain
+// transcript text and never carry handoff UI.
+type TerminalRenderResult struct {
+	Presentation TerminalRenderPresentation
+	Result       string
+	Canvas       *CanvasPayload
+}
+
+// ParseTerminalRenderResult validates explicit renderer-owned terminal
+// presentation metadata. Inline results must be nonempty, non-error structured
+// output without a handoff. Canvas results require a validated form/results
+// handoff whose kind matches the destination content.
+func ParseTerminalRenderResult(result string) (*TerminalRenderResult, bool) {
+	if parsed, ok := parseCompleteRenderResult(
+		result,
+		canvasFencePrefixes,
+		TerminalRenderPresentationCanvas,
+	); ok && parsed.metadata != nil &&
+		parsed.metadata.Presentation == TerminalRenderPresentationCanvas {
+		handoff, valid := normalizedCanvasHandoff(parsed.metadata.Handoff)
+		if !valid {
+			return nil, false
+		}
+		switch handoff.Kind {
+		case CanvasHandoffForm:
+			valid = hasInteractiveCanvasControl(parsed.payload.Content)
+		case CanvasHandoffResults:
+			valid = hasResultCanvasContent(parsed.payload.Content)
+		default:
+			valid = false
+		}
+		if !valid {
+			return nil, false
+		}
+		parsed.payload.Handoff = handoff
+		return &TerminalRenderResult{
+			Presentation: TerminalRenderPresentationCanvas,
+			Result:       parsed.cleanResult,
+			Canvas:       parsed.payload,
+		}, true
+	}
+
+	if parsed, ok := parseCompleteRenderResult(
+		result,
+		inlineRenderFencePrefixes,
+		TerminalRenderPresentationInline,
+	); ok && parsed.metadata != nil &&
+		parsed.metadata.Presentation == TerminalRenderPresentationInline &&
+		parsed.metadata.Handoff == nil &&
+		hasResultCanvasContent(parsed.payload.Content) {
+		return &TerminalRenderResult{
+			Presentation: TerminalRenderPresentationInline,
+			Result:       parsed.cleanResult,
+		}, true
+	}
+
+	return nil, false
+}
+
+type parsedRenderResult struct {
+	payload     *CanvasPayload
+	metadata    *TerminalRenderMetadata
+	cleanResult string
+}
+
+func parseCompleteRenderResult(
+	result string,
+	prefixes []string,
+	presentation TerminalRenderPresentation,
+) (*parsedRenderResult, bool) {
 	trimmed := strings.TrimSpace(result)
-	for _, prefix := range canvasFencePrefixes {
+	for _, prefix := range prefixes {
 		opening := prefix + "\n"
 		if !strings.HasPrefix(trimmed, opening) || !strings.HasSuffix(trimmed, "\n```") {
 			continue
@@ -248,39 +342,48 @@ func parseCompleteCanvasResult(result string) (*CanvasPayload, *CanvasHandoff, b
 		raw := strings.TrimSpace(trimmed[len(opening) : len(trimmed)-len("\n```")])
 		normalized, meta, err := normalizeCanvasPayload(raw)
 		if err != nil {
-			return nil, nil, false
+			return nil, false
 		}
 		var envelope struct {
-			Close   bool           `json:"close"`
-			Handoff *CanvasHandoff `json:"handoff,omitempty"`
+			Close          bool                    `json:"close"`
+			TerminalRender *TerminalRenderMetadata `json:"_terminal_render,omitempty"`
 		}
 		if json.Unmarshal(normalized, &envelope) != nil || envelope.Close {
-			return nil, nil, false
+			return nil, false
 		}
-		if envelope.Handoff != nil {
+		if envelope.TerminalRender != nil {
 			var content map[string]json.RawMessage
 			if json.Unmarshal(normalized, &content) != nil {
-				return nil, nil, false
+				return nil, false
 			}
-			delete(content, "handoff")
+			delete(content, terminalRenderMetadataKey)
 			cleaned, err := json.Marshal(content)
 			if err != nil {
-				return nil, nil, false
+				return nil, false
 			}
 			normalized, meta, err = normalizeCanvasPayload(string(cleaned))
 			if err != nil {
-				return nil, nil, false
+				return nil, false
 			}
 		}
-		return &CanvasPayload{
+		payload := &CanvasPayload{
 			TabID:     meta.TabID,
 			Title:     meta.Title,
 			Kind:      meta.Kind,
 			Qualifier: meta.Qualifier,
 			Content:   normalized,
-		}, envelope.Handoff, true
+		}
+		if envelope.TerminalRender != nil &&
+			envelope.TerminalRender.Presentation != presentation {
+			return nil, false
+		}
+		return &parsedRenderResult{
+			payload:     payload,
+			metadata:    envelope.TerminalRender,
+			cleanResult: opening + string(normalized) + "\n```",
+		}, true
 	}
-	return nil, nil, false
+	return nil, false
 }
 
 // hasResultCanvasContent rejects structurally empty and explicit error
