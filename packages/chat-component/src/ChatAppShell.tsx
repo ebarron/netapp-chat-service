@@ -594,6 +594,7 @@ export function ChatAppShell({
       mobileLayout={mobileLayout}
       mobileBreakpoint={mobileBreakpoint}
       mobileRegion={mobileRegion}
+      onMobileRegionChange={setMobileRegion}
     />
   );
 

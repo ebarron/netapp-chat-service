@@ -8,13 +8,27 @@ import {
 /** A message in the chat conversation. */
 export interface ChatMessage {
   id: string;
-  role: 'user' | 'assistant' | 'tool';
+  role: 'user' | 'assistant' | 'tool' | 'handoff';
   content: string;
   toolName?: string;
   toolStatus?: 'executing' | 'completed' | 'failed';
   toolParams?: unknown;
   toolResult?: string;
   capability?: string;
+  /** Local-only deterministic form handoff; never sent to model history. */
+  canvasTabId?: string;
+  handoffKind?: CanvasHandoffKind;
+  handoffHeading?: string;
+  handoffActionLabel?: string;
+}
+
+/** Validated renderer-owned transcript handoff metadata. */
+export type CanvasHandoffKind = 'form' | 'results';
+
+export interface CanvasHandoff {
+  kind: CanvasHandoffKind;
+  heading: string;
+  actionLabel: string;
 }
 
 /** A capability definition returned by the backend. */
@@ -118,6 +132,10 @@ export interface CanvasTab {
   evictable?: boolean;
   /** Host-attached context summary forwarded to the LLM (C5). */
   summary?: CanvasTabSummary;
+  /** True only for a validated terminal interactive-render event. */
+  terminalInteractive?: boolean;
+  /** Renderer-owned deterministic transcript copy for this destination. */
+  handoff?: CanvasHandoff;
 }
 
 /**
@@ -210,6 +228,12 @@ export interface UseChatPanelOptions {
    * Ordinary sendMessage behavior is unchanged, and the default is false.
    */
   queueInteractiveSubmissions?: boolean;
+  /**
+   * Preserve the legacy narrow behavior that renders engine Canvas content
+   * inline in the transcript. Defaults to true. ChatPanel disables this when
+   * its opt-in mobile Canvas region is active.
+   */
+  inlineCanvasOnNarrow?: boolean;
 }
 
 /** Describes a canvas open/update or close, for `onCanvasEvent`. */
@@ -218,6 +242,55 @@ export interface CanvasEventInfo {
   tabId: string;
   title: string;
   kind: string;
+  terminalInteractive?: boolean;
+  handoff?: CanvasHandoff;
+}
+
+function reconcileInteractiveHandoff(
+  messages: ChatMessage[],
+  tabId: string,
+  handoff?: CanvasHandoff,
+): ChatMessage[] {
+  const existing = messages.findIndex(
+    (message) => message.role === 'handoff' && message.canvasTabId === tabId,
+  );
+  if (!handoff) {
+    return existing < 0 ? messages : messages.filter((_, index) => index !== existing);
+  }
+  const message: ChatMessage = {
+    id: existing >= 0 ? messages[existing].id : nextId(),
+    role: 'handoff',
+    content: '',
+    canvasTabId: tabId,
+    handoffKind: handoff.kind,
+    handoffHeading: handoff.heading,
+    handoffActionLabel: handoff.actionLabel,
+  };
+  if (existing < 0) return [...messages, message];
+  const updated = [...messages];
+  updated[existing] = message;
+  return updated;
+}
+
+const MAX_HANDOFF_HEADING_LENGTH = 160;
+const MAX_HANDOFF_ACTION_LENGTH = 80;
+
+function parseCanvasHandoff(value: unknown): CanvasHandoff | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const kind = record.kind;
+  const heading = typeof record.heading === 'string' ? record.heading.trim() : '';
+  const actionLabel =
+    typeof record.action_label === 'string' ? record.action_label.trim() : '';
+  if (kind !== 'form' && kind !== 'results') return undefined;
+  if (!isSafeHandoffText(heading, MAX_HANDOFF_HEADING_LENGTH)) return undefined;
+  if (!isSafeHandoffText(actionLabel, MAX_HANDOFF_ACTION_LENGTH)) return undefined;
+  return { kind, heading, actionLabel };
+}
+
+function isSafeHandoffText(value: string, maxLength: number): boolean {
+  if (!value || Array.from(value).length > maxLength) return false;
+  return !/[\u0000-\u001f\u007f-\u009f]/u.test(value);
 }
 
 export function useChatPanel(options?: UseChatPanelOptions) {
@@ -266,6 +339,8 @@ export function useChatPanel(options?: UseChatPanelOptions) {
   // Same pattern for the C6 open-nav handler.
   const onOpenNavRef = useRef(options?.onOpenNav);
   onOpenNavRef.current = options?.onOpenNav;
+  const inlineCanvasOnNarrowRef = useRef(options?.inlineCanvasOnNarrow !== false);
+  inlineCanvasOnNarrowRef.current = options?.inlineCanvasOnNarrow !== false;
 
   useEffect(() => {
     // React StrictMode replays mount effects in development. Restore the
@@ -538,6 +613,7 @@ export function useChatPanel(options?: UseChatPanelOptions) {
       });
       return filtered;
     });
+    setMessages((prev) => reconcileInteractiveHandoff(prev, tabId));
   }, []);
 
   /** Send a message and process the SSE stream. */
@@ -960,6 +1036,10 @@ export function useChatPanel(options?: UseChatPanelOptions) {
             kind: typeof d.kind === 'string' ? d.kind : '',
             qualifier: typeof d.qualifier === 'string' ? d.qualifier : '',
             content: normalized.value,
+            terminalInteractive: d.terminal_interactive === true,
+            handoff: d.terminal_interactive === true
+              ? parseCanvasHandoff(d.handoff)
+              : undefined,
           };
           // A canvas whose content carries `close: true` is a directive to
           // CLOSE the matching tab (e.g. after the underlying object was
@@ -981,23 +1061,36 @@ export function useChatPanel(options?: UseChatPanelOptions) {
             tabId: tab.tabId,
             title: tab.title,
             kind: tab.kind,
+            ...(tab.terminalInteractive ? { terminalInteractive: true } : {}),
+            ...(tab.handoff ? { handoff: tab.handoff } : {}),
           });
           // On narrow viewports, render canvas content inline in chat
           // instead of opening a canvas tab (canvas panel is hidden).
-          const narrow = typeof window !== 'undefined' && window.innerWidth < 1024;
+          const narrow = inlineCanvasOnNarrowRef.current &&
+            typeof window !== 'undefined' &&
+            window.innerWidth < 1024;
           if (narrow) {
             const fenceType = 'panels' in tab.content ? 'dashboard' : 'object-detail';
             const json = JSON.stringify(tab.content);
             setMessages((prev) =>
               prev.map((m) =>
                 m.id === assistantId
-                  ? { ...m, content: m.content + '\n```' + fenceType + '\n' + json + '\n```\n' }
+                  ? {
+                      ...m,
+                      canvasTabId: tab.tabId,
+                      content: m.content + '\n```' + fenceType + '\n' + json + '\n```\n',
+                    }
                   : m
               )
             );
           } else {
             addOrFocusCanvasTab(tab);
           }
+          setMessages((prev) => reconcileInteractiveHandoff(
+            prev,
+            tab.tabId,
+            tab.handoff,
+          ));
           break;
         }
 

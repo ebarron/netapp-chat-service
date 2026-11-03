@@ -404,3 +404,132 @@ describe('useChatPanel canvas events (onCanvasEvent + close)', () => {
     });
   });
 });
+
+describe('useChatPanel deterministic canvas handoff metadata', () => {
+  beforeEach(() => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1280 });
+  });
+
+  const canvas = (
+    handoff?: Record<string, unknown>,
+    overrides: Record<string, unknown> = {},
+  ) => ({
+    tab_id: 'dashboard::destination::',
+    title: 'Destination',
+    kind: 'dashboard',
+    qualifier: '',
+    terminal_interactive: true,
+    content: {
+      type: 'dashboard',
+      title: 'Destination',
+      panels: [{ type: 'callout', title: 'Ready', body: 'Ready.' }],
+    },
+    ...(handoff ? { handoff } : {}),
+    ...overrides,
+  });
+
+  it.each([
+    ['form', 'Provision volume is ready.', 'Continue in the form.'],
+    ['results', 'Fleet health is ready.', 'View results.'],
+  ])('renders renderer-owned %s handoff without another request', async (
+    kind,
+    heading,
+    actionLabel,
+  ) => {
+    const stream = vi.fn().mockResolvedValue(makeCanvasSSEResponse(canvas({
+      kind,
+      heading,
+      action_label: actionLabel,
+    })));
+    const api = createMockChatAPI({ stream });
+    const { result } = renderHook(() => useChatPanel(), { api });
+
+    await act(async () => {
+      await result.current.sendMessage('show destination');
+    });
+
+    expect(stream).toHaveBeenCalledTimes(1);
+    expect(result.current.messages.filter((message) => message.role === 'handoff')).toEqual([
+      expect.objectContaining({
+        canvasTabId: 'dashboard::destination::',
+        handoffKind: kind,
+        handoffHeading: heading,
+        handoffActionLabel: actionLabel,
+      }),
+    ]);
+  });
+
+  it('preserves default behavior for unclassified, nonterminal, and invalid metadata', async () => {
+    const events = [
+      canvas(undefined),
+      canvas({ kind: 'form', heading: 'Wrong', action_label: 'Wrong' }, {
+        terminal_interactive: false,
+      }),
+      canvas({ kind: 'form', heading: 'Line\nbreak', action_label: 'Continue.' }),
+    ];
+    const api = createMockChatAPI({
+      stream: vi.fn().mockResolvedValue(makeCanvasSequenceSSEResponse(events)),
+    });
+    const { result } = renderHook(() => useChatPanel(), { api });
+
+    await act(async () => {
+      await result.current.sendMessage('show destination');
+    });
+
+    expect(result.current.messages.some((message) => message.role === 'handoff')).toBe(false);
+  });
+
+  it('deduplicates replayed updates by destination and keeps the latest copy', async () => {
+    const api = createMockChatAPI({
+      stream: vi.fn().mockResolvedValue(makeCanvasSequenceSSEResponse([
+        canvas({
+          kind: 'results',
+          heading: 'Fleet health is ready.',
+          action_label: 'View results.',
+        }),
+        canvas({
+          kind: 'results',
+          heading: 'Updated fleet health is ready.',
+          action_label: 'View updated results.',
+        }),
+      ])),
+    });
+    const { result } = renderHook(() => useChatPanel(), { api });
+
+    await act(async () => {
+      await result.current.sendMessage('show destination');
+    });
+
+    const handoffs = result.current.messages.filter((message) => message.role === 'handoff');
+    expect(handoffs).toHaveLength(1);
+    expect(handoffs[0]).toEqual(expect.objectContaining({
+      handoffHeading: 'Updated fleet health is ready.',
+      handoffActionLabel: 'View updated results.',
+    }));
+  });
+
+  it('removes a prior handoff when the destination closes', async () => {
+    const stream = vi
+      .fn()
+      .mockResolvedValueOnce(makeCanvasSSEResponse(canvas({
+        kind: 'form',
+        heading: 'Alert rule is ready.',
+        action_label: 'Continue in the form.',
+      })))
+      .mockResolvedValueOnce(makeCanvasSSEResponse(canvas(undefined, {
+        terminal_interactive: false,
+        content: { type: 'dashboard', title: 'Destination', close: true },
+      })));
+    const api = createMockChatAPI({ stream });
+    const { result } = renderHook(() => useChatPanel(), { api });
+
+    await act(async () => {
+      await result.current.sendMessage('open');
+    });
+    expect(result.current.messages.some((message) => message.role === 'handoff')).toBe(true);
+    await act(async () => {
+      await result.current.sendMessage('close');
+    });
+    expect(result.current.messages.some((message) => message.role === 'handoff')).toBe(false);
+  });
+});

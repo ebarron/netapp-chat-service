@@ -4,6 +4,25 @@ All notable changes to `@edjbarron/netapp-chat-component` are documented in this
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-11-03
+
+### Added
+- Successful terminal Canvas events can carry renderer-owned, bounded
+  plain-text handoff metadata. The transcript displays the exact heading and
+  action label without model prose or another provider call.
+- Handoff actions reveal the existing destination in wide or mobile layouts,
+  select its existing tab, and focus the first relevant control. Read-only
+  results fall back to focusing the destination panel.
+- Readiness is announced through a polite live region. Replayed updates reuse
+  one transcript item per destination, while close/non-handoff events remove
+  stale items.
+
+### Compatibility
+- Handoffs are absent by default. Existing consumers and unclassified Canvas
+  events retain their prior behavior.
+- Metadata is rendered as plain text only and is accepted only on validated
+  terminal events with `form` or `results` classification.
+
 ## [0.6.0] - 2026-11-03
 
 ### Added

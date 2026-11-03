@@ -205,6 +205,8 @@ interface ChatPanelProps {
    * by the shell; unused when `mobileLayout` is off or the viewport is wide.
    */
   mobileRegion?: 'canvas' | 'assistant';
+  /** Notifies a controlling shell when a handoff reveals the Canvas region. */
+  onMobileRegionChange?: (region: 'canvas' | 'assistant') => void;
 }
 
 /**
@@ -273,6 +275,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
   mobileLayout = false,
   mobileBreakpoint = 1024,
   mobileRegion = 'canvas',
+  onMobileRegionChange,
 }: ChatPanelProps, ref) {
   const {
     messages,
@@ -310,6 +313,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
     onCanvasEvent,
     onOpenNav,
     queueInteractiveSubmissions,
+    inlineCanvasOnNarrow: !mobileLayout,
   });
 
   const docked = variant === 'docked';
@@ -330,6 +334,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
   const [input, setInput] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const [handoffMobileRegion, setHandoffMobileRegion] =
+    useState<'canvas' | null>(null);
 
   // Check config and fetch capabilities on open. In docked mode the panel is
   // persistent (not gated by `opened`), so treat it as always active.
@@ -419,6 +425,10 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
   // Reactive breakpoint only when mobileLayout is on.
   const isWide = useViewportWide(mobileBreakpoint, mobileLayout);
   const mobileActive = mobileLayout && !isWide;
+  const effectiveMobileRegion = handoffMobileRegion ?? mobileRegion;
+  useEffect(() => {
+    setHandoffMobileRegion(null);
+  }, [mobileActive, mobileRegion]);
   // When mobileLayout is on, keep the host-portal canvas region mounted at all
   // widths (the central mobile fix). When off, preserve today's remove-on-narrow.
   const hasCanvas = mobileLayout
@@ -496,6 +506,43 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
   const dragStartWidthPxRef = useRef(0);
   const draggingAssistantSplitRef = useRef(false);
   const [storedAssistantWidthPx, setStoredAssistantWidthPx] = useState<number | null>(null);
+
+  const focusCanvasDestination = useCallback((tabId: string) => {
+    if (canvasTabs.some((tab) => tab.tabId === tabId)) {
+      setActiveCanvasTab(tabId);
+    }
+    if (mobileActive && effectiveMobileRegion !== 'canvas') {
+      setHandoffMobileRegion('canvas');
+      onMobileRegionChange?.('canvas');
+    }
+
+    const focusDestination = () => {
+      const root = splitRowRef.current;
+      if (!root) return;
+      const candidates = Array.from(root.querySelectorAll<HTMLElement>(
+        '[data-canvas-tab-id], [data-inline-canvas-tab-id]',
+      ));
+      const destination = candidates.find(
+        (element) =>
+          element.dataset.canvasTabId === tabId ||
+          element.dataset.inlineCanvasTabId === tabId,
+      );
+      if (!destination) return;
+      const control = destination.querySelector<HTMLElement>(
+        '[data-canvas-primary-control], input:not([type="hidden"]):not([disabled]), select:not([disabled]), textarea:not([disabled]), button:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+      );
+      (control ?? destination).focus();
+    };
+
+    // Tab/region updates must commit before querying the visible destination.
+    window.setTimeout(focusDestination, 0);
+  }, [
+    canvasTabs,
+    effectiveMobileRegion,
+    mobileActive,
+    onMobileRegionChange,
+    setActiveCanvasTab,
+  ]);
 
   const assistantWidthCss = useMemo(() => {
     if (isAssistantWidthControlled) {
@@ -788,13 +835,13 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
           placementEnd && !mobileActive ? classes.assistantPlacementEnd : '',
           collapsibleActive && collapsed && !mobileActive ? classes.assistantCollapsed : '',
           mobileActive ? classes.mobileLayout : '',
-          mobileActive && mobileRegion === 'canvas' ? classes.mobileRegionCanvas : '',
-          mobileActive && mobileRegion === 'assistant' ? classes.mobileRegionAssistant : '',
+          mobileActive && effectiveMobileRegion === 'canvas' ? classes.mobileRegionCanvas : '',
+          mobileActive && effectiveMobileRegion === 'assistant' ? classes.mobileRegionAssistant : '',
         ]
           .filter(Boolean)
           .join(' ')}
         style={splitRowStyle}
-        data-mobile-region={mobileActive ? mobileRegion : undefined}
+        data-mobile-region={mobileActive ? effectiveMobileRegion : undefined}
       >
         <div ref={assistantPanelRef} className={classes.panel}>
         {/* Collapse affordance (C8b) — only when the host opts into collapse (wide only). */}
@@ -929,6 +976,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
                 key={msg.id}
                 message={msg}
                 onAction={sendInteractiveMessage}
+                onHandoffActivate={focusCanvasDestination}
                 interactiveSubmissionState={interactiveSubmissionState}
                 readOnly={mode === 'read-only'}
                 isStreaming={messages.indexOf(msg) === lastAssistantIdx}
@@ -1135,6 +1183,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
 interface MessageBubbleProps {
   message: ChatMessage;
   onAction?: (message: string) => void;
+  onHandoffActivate?: (tabId: string) => void;
   interactiveSubmissionState?: InteractiveSubmissionState;
   readOnly?: boolean;
   isStreaming?: boolean;
@@ -1144,6 +1193,7 @@ interface MessageBubbleProps {
 function MessageBubble({
   message,
   onAction,
+  onHandoffActivate,
   interactiveSubmissionState,
   readOnly,
   isStreaming,
@@ -1160,9 +1210,40 @@ function MessageBubble({
     );
   }
 
+  if (message.role === 'handoff') {
+    if (
+      !message.canvasTabId ||
+      !message.handoffHeading ||
+      !message.handoffActionLabel
+    ) return null;
+    return (
+      <div
+        className={classes.handoffMessage}
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        aria-label={message.handoffHeading}
+        data-testid={`canvas-handoff-${message.canvasTabId}`}
+      >
+        <Text fz="sm" fw={600}>{message.handoffHeading}</Text>
+        <Button
+          variant="subtle"
+          size="compact-sm"
+          onClick={() => onHandoffActivate?.(message.canvasTabId!)}
+        >
+          {message.handoffActionLabel}
+        </Button>
+      </div>
+    );
+  }
+
   // Assistant message — render markdown with chart/dashboard code-block handlers.
   return (
-    <div className={classes.assistantMessage}>
+    <div
+      className={classes.assistantMessage}
+      data-inline-canvas-tab-id={message.canvasTabId}
+      tabIndex={message.canvasTabId ? -1 : undefined}
+    >
       <ReactMarkdown
         key={readOnly ? 'ro' : 'rw'}
         remarkPlugins={[remarkGfm]}

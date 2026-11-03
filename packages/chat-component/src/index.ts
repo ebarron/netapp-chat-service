@@ -45,6 +45,8 @@ export type {
   PendingApproval,
   ChatMode,
   InteractiveSubmissionState,
+  CanvasHandoff,
+  CanvasHandoffKind,
   CanvasTab,
   CanvasEventInfo,
   CanvasTabSummary,

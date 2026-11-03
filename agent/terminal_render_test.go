@@ -40,6 +40,15 @@ func eventIndex(events []Event, typ EventType, tool string) int {
 	return -1
 }
 
+func firstCanvas(events []Event) *CanvasPayload {
+	for _, event := range events {
+		if event.Type == EventCanvasOpen {
+			return event.Canvas
+		}
+	}
+	return nil
+}
+
 func TestTerminalInteractiveRenderStopsAfterValidatedCanvas(t *testing.T) {
 	provider := &llm.MockProvider{Responses: [][]llm.StreamEvent{
 		llm.MockToolCallResponse("render-1", "render_placement", `{}`),
@@ -94,10 +103,128 @@ func TestTerminalInteractiveRenderStopsAfterValidatedCanvas(t *testing.T) {
 	if latency := doneAt.Sub(canvasFlushedAt); latency >= 250*time.Millisecond {
 		t.Fatalf("render-to-done latency = %s, target <250ms", latency)
 	}
+	canvas := firstCanvas(events)
+	if canvas == nil || !canvas.TerminalInteractive {
+		t.Fatalf("terminal canvas metadata = %+v, want terminal_interactive", canvas)
+	}
 	for _, event := range events[eventIndex(events, EventCanvasOpen, "")+1:] {
 		if event.Type == EventText || event.Type == EventToolStart {
 			t.Fatalf("unexpected post-render work: %+v", event)
 		}
+	}
+}
+
+func TestRendererOwnedHandoffClassifiesFormAndResults(t *testing.T) {
+	tests := []struct {
+		name     string
+		handoff  CanvasHandoff
+		result   string
+		wantKind CanvasHandoffKind
+	}{
+		{
+			name: "form",
+			handoff: CanvasHandoff{
+				Kind: CanvasHandoffForm, Heading: "Provision volume is ready.",
+				ActionLabel: "Continue in the form.",
+			},
+			result: terminalCanvas, wantKind: CanvasHandoffForm,
+		},
+		{
+			name: "results",
+			handoff: CanvasHandoff{
+				Kind: CanvasHandoffResults, Heading: "Fleet health is ready.",
+				ActionLabel: "View results.",
+			},
+			result: "```canvas-dashboard\n" +
+				`{"type":"dashboard","title":"Fleet health","panels":[{"type":"callout","title":"Healthy","body":"All systems operational."}]}` +
+				"\n```",
+			wantKind: CanvasHandoffResults,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := &llm.MockProvider{Responses: [][]llm.StreamEvent{
+				llm.MockToolCallResponse("render-1", "render_view", `{}`),
+				llm.MockTextResponse("must not be called"),
+			}}
+			tool := terminalTool("render_view", tt.result, nil)
+			tool.Handler = WithCanvasHandoff(tool.Handler, tt.handoff)
+			ag := New(provider, mcpclient.NewMockRouter(nil), WithInternalTools(
+				map[string]InternalTool{"render_view": tool},
+			))
+
+			events := collectEvents(t, ag, []llm.Message{{
+				Role: llm.RoleUser, Content: "show view",
+			}})
+			if len(provider.Calls) != 1 {
+				t.Fatalf("provider calls = %d, want 1", len(provider.Calls))
+			}
+			canvas := firstCanvas(events)
+			if canvas == nil || canvas.Handoff == nil {
+				t.Fatalf("handoff metadata missing: %+v", canvas)
+			}
+			if canvas.Handoff.Kind != tt.wantKind ||
+				canvas.Handoff.Heading != tt.handoff.Heading ||
+				canvas.Handoff.ActionLabel != tt.handoff.ActionLabel {
+				t.Fatalf("handoff = %+v, want %+v", canvas.Handoff, tt.handoff)
+			}
+		})
+	}
+}
+
+func TestRendererOwnedHandoffRejectsWrongKindEmptyErrorAndUnsafeCopy(t *testing.T) {
+	results := map[string]string{
+		"form_without_control": "```canvas-dashboard\n" +
+			`{"type":"dashboard","title":"Form","panels":[{"type":"callout","title":"Nothing","body":"No controls."}]}` +
+			"\n```",
+		"empty_results": "```canvas-dashboard\n" +
+			`{"type":"dashboard","title":"Results","panels":[]}` + "\n```",
+		"error_results": "```canvas-dashboard\n" +
+			`{"type":"dashboard","title":"Results","panels":[{"type":"error","error":"failed"}]}` +
+			"\n```",
+	}
+	handoffs := map[string]CanvasHandoff{
+		"form_without_control": {
+			Kind: CanvasHandoffForm, Heading: "Form is ready.",
+			ActionLabel: "Continue in the form.",
+		},
+		"empty_results": {
+			Kind: CanvasHandoffResults, Heading: "Results are ready.",
+			ActionLabel: "View results.",
+		},
+		"error_results": {
+			Kind: CanvasHandoffResults, Heading: "Results are ready.",
+			ActionLabel: "View results.",
+		},
+		"unsafe_copy": {
+			Kind: CanvasHandoffForm, Heading: "Form\nis ready.",
+			ActionLabel: "Continue.",
+		},
+	}
+	results["unsafe_copy"] = terminalCanvas
+
+	for name, result := range results {
+		t.Run(name, func(t *testing.T) {
+			provider := &llm.MockProvider{Responses: [][]llm.StreamEvent{
+				llm.MockToolCallResponse("render-1", "render_view", `{}`),
+				llm.MockTextResponse("I could not prepare that destination."),
+			}}
+			tool := terminalTool("render_view", result, nil)
+			handoff := handoffs[name]
+			tool.Handler = WithCanvasHandoff(tool.Handler, handoff)
+			ag := New(provider, mcpclient.NewMockRouter(nil), WithInternalTools(
+				map[string]InternalTool{"render_view": tool},
+			))
+			events := collectEvents(t, ag, []llm.Message{{
+				Role: llm.RoleUser, Content: "show view",
+			}})
+			if len(provider.Calls) != 2 {
+				t.Fatalf("provider calls = %d, want recovery call", len(provider.Calls))
+			}
+			if canvas := firstCanvas(events); canvas != nil && canvas.Handoff != nil {
+				t.Fatalf("invalid handoff leaked to canvas: %+v", canvas.Handoff)
+			}
+		})
 	}
 }
 
@@ -131,6 +258,9 @@ func TestTerminalInteractiveRenderDefaultStillContinues(t *testing.T) {
 	}
 	if eventIndex(events, EventAssistantCheckpoint, "") >= 0 {
 		t.Fatal("default behavior must not emit a terminal checkpoint")
+	}
+	if canvas := firstCanvas(events); canvas == nil || canvas.TerminalInteractive {
+		t.Fatalf("default canvas metadata = %+v, want nonterminal", canvas)
 	}
 	var text strings.Builder
 	for _, event := range events {

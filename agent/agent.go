@@ -138,11 +138,31 @@ type Event struct {
 
 // CanvasPayload holds the data for a canvas_open SSE event.
 type CanvasPayload struct {
-	TabID     string          `json:"tab_id"`
-	Title     string          `json:"title"`
-	Kind      string          `json:"kind"`
-	Qualifier string          `json:"qualifier"`
-	Content   json.RawMessage `json:"content"`
+	TabID               string          `json:"tab_id"`
+	Title               string          `json:"title"`
+	Kind                string          `json:"kind"`
+	Qualifier           string          `json:"qualifier"`
+	Content             json.RawMessage `json:"content"`
+	TerminalInteractive bool            `json:"terminal_interactive,omitempty"`
+	Handoff             *CanvasHandoff  `json:"handoff,omitempty"`
+}
+
+// CanvasHandoffKind controls validation for renderer-owned deterministic
+// transcript copy. It is transported for diagnostics, but the component
+// renders Heading and ActionLabel verbatim as plain text.
+type CanvasHandoffKind string
+
+const (
+	CanvasHandoffForm    CanvasHandoffKind = "form"
+	CanvasHandoffResults CanvasHandoffKind = "results"
+)
+
+// CanvasHandoff is bounded plain-text metadata owned by an interest/renderer.
+// It contains no HTML and is absent by default for backward compatibility.
+type CanvasHandoff struct {
+	Kind        CanvasHandoffKind `json:"kind"`
+	Heading     string            `json:"heading"`
+	ActionLabel string            `json:"action_label"`
 }
 
 // OpenNavPayload holds the data for an open_nav SSE event (C6). Destination
@@ -686,7 +706,10 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 						}
 						tr.isError = true
 					} else {
-						if tr.terminalEligible {
+						if canvas, ok := ParseTerminalCanvasResultWithHandoff(result); ok {
+							tr.terminalCanvas = canvas
+							tr.terminalEligible = true
+						} else if tr.terminalEligible {
 							tr.terminalCanvas, _ = ParseTerminalCanvasResult(result)
 						}
 						if it.EmitResult {
@@ -795,7 +818,10 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 					}
 					tr.isError = true
 				} else {
-					if tr.terminalEligible {
+					if canvas, ok := ParseTerminalCanvasResultWithHandoff(result); ok {
+						tr.terminalCanvas = canvas
+						tr.terminalEligible = true
+					} else if tr.terminalEligible {
 						tr.terminalCanvas, _ = ParseTerminalCanvasResult(result)
 					}
 					if tr.terminalCanvas != nil {
@@ -840,26 +866,15 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 			return
 		}
 
-		// Emit events and collect messages in original order.
-		for _, tr := range results {
-			for _, ev := range tr.events {
-				emit(ev)
-			}
-			messages = append(messages, tr.message)
-			if tr.isError {
-				hadError = true
-			}
-		}
-
-		// Terminal interactive-render policy is evaluated only after every
-		// sibling tool has settled and its events/history result have been
-		// emitted in provider order. One or more opted-in tools must each have
-		// produced a validated canvas open/update, and every sibling must have
-		// succeeded. Otherwise the normal provider recovery/explanation round
-		// remains unchanged.
+		// Decide terminal completion before flushing the buffered batch so the
+		// validated Canvas event can carry deterministic client metadata. The
+		// field remains absent for default/nonterminal/error paths.
 		var terminalTools []string
 		var invalidTerminalTools []string
 		for _, tr := range results {
+			if tr.isError {
+				hadError = true
+			}
 			if !tr.terminalEligible {
 				continue
 			}
@@ -868,13 +883,38 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message, emit func(Event
 				invalidTerminalTools = append(invalidTerminalTools, pendingToolCalls[tr.index].Name)
 			}
 		}
+		terminalComplete := len(terminalTools) > 0 &&
+			!hadError &&
+			len(invalidTerminalTools) == 0
+		if terminalComplete {
+			for i := range results {
+				if results[i].terminalCanvas != nil {
+					results[i].terminalCanvas.TerminalInteractive = true
+				}
+			}
+		}
+
+		// Emit events and collect messages in original order.
+		for _, tr := range results {
+			for _, ev := range tr.events {
+				emit(ev)
+			}
+			messages = append(messages, tr.message)
+		}
+
+		// Terminal interactive-render policy is evaluated only after every
+		// sibling tool has settled and its events/history result have been
+		// emitted in provider order. One or more opted-in tools must each have
+		// produced a validated canvas open/update, and every sibling must have
+		// succeeded. Otherwise the normal provider recovery/explanation round
+		// remains unchanged.
 		if len(terminalTools) > 0 {
 			decision := "continue"
 			reason := "invalid_canvas"
 			switch {
 			case hadError:
 				reason = "sibling_error"
-			case len(invalidTerminalTools) == 0:
+			case terminalComplete:
 				decision = "terminate"
 				reason = "validated_canvas"
 			}

@@ -148,6 +148,34 @@ in.
 
 ---
 
+## Deterministic destination handoffs
+
+A validated terminal `canvas_open` event may include renderer-owned plain-text
+metadata:
+
+```json
+{
+  "terminal_interactive": true,
+  "handoff": {
+    "kind": "form",
+    "heading": "Provision volume is ready.",
+    "action_label": "Continue in the form."
+  }
+}
+```
+
+`kind` is either `form` or `results`; the renderer supplies the exact heading
+and action copy. The component adds one local transcript item for the
+destination, announces it politely, and focuses/reveals the existing destination
+when activated. This item is not sent back as model history. Replayed updates
+reuse it by `tab_id`, and close, invalid, error, nonterminal, or unclassified
+events do not show a handoff.
+
+Heading and action fields are bounded, single-line plain text. The component
+does not infer copy from a Canvas title or dashboard envelope.
+
+---
+
 ## Driving the panel from the host
 
 The host can open the panel and **auto-send a prompt** programmatically — useful
