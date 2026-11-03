@@ -54,6 +54,9 @@ export interface PendingApproval {
 /** Chat mode: read-only or read-write. */
 export type ChatMode = 'read-only' | 'read-write';
 
+/** State of the opt-in one-slot interactive action queue. */
+export type InteractiveSubmissionState = 'idle' | 'queued' | 'continuing';
+
 /**
  * A per-tab context summary the host attaches so the LLM stays aware of what
  * is shown in a canvas tab (C5). It mirrors the engine's `CanvasTabSummary`
@@ -201,6 +204,12 @@ export interface UseChatPanelOptions {
    * omitted, the event is a safe no-op.
    */
   onOpenNav?: (destination: string) => void;
+  /**
+   * When true, Canvas and panel-extension actions submitted during an active
+   * stream occupy a one-slot queue and run once after that stream closes.
+   * Ordinary sendMessage behavior is unchanged, and the default is false.
+   */
+  queueInteractiveSubmissions?: boolean;
 }
 
 /** Describes a canvas open/update or close, for `onCanvasEvent`. */
@@ -218,6 +227,15 @@ export function useChatPanel(options?: UseChatPanelOptions) {
   const [sessionId, setSessionId] = useState<string | undefined>();
   const [configured, setConfigured] = useState<boolean>(false);
   const abortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+  const requestActiveRef = useRef(false);
+  const requestEpochRef = useRef(0);
+  const queueHandoffAllowedRef = useRef(true);
+  const queueGenerationRef = useRef(0);
+  const interactiveActiveRef = useRef(false);
+  const queuedInteractiveRef = useRef<{ message: string; generation: number } | null>(null);
+  const [interactiveSubmissionState, setInteractiveSubmissionState] =
+    useState<InteractiveSubmissionState>('idle');
 
   // Phase 2: Mode toggle
   const [mode, setModeState] = useState<ChatMode>(options?.defaultMode ?? 'read-write');
@@ -248,6 +266,30 @@ export function useChatPanel(options?: UseChatPanelOptions) {
   // Same pattern for the C6 open-nav handler.
   const onOpenNavRef = useRef(options?.onOpenNav);
   onOpenNavRef.current = options?.onOpenNav;
+
+  useEffect(() => {
+    // React StrictMode replays mount effects in development. Restore the
+    // mounted marker during setup so the replayed cleanup does not leave the
+    // live hook permanently unable to finish queued work.
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      requestEpochRef.current += 1;
+      requestActiveRef.current = false;
+      queueGenerationRef.current += 1;
+      interactiveActiveRef.current = false;
+      queuedInteractiveRef.current = null;
+      abortRef.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (options?.queueInteractiveSubmissions !== false) return;
+    queueGenerationRef.current += 1;
+    interactiveActiveRef.current = false;
+    queuedInteractiveRef.current = null;
+    setInteractiveSubmissionState('idle');
+  }, [options?.queueInteractiveSubmissions]);
 
   /** Clears the mode auto-disable timer. */
   const clearModeTimer = useCallback(() => {
@@ -499,9 +541,25 @@ export function useChatPanel(options?: UseChatPanelOptions) {
   }, []);
 
   /** Send a message and process the SSE stream. */
-  const sendMessage = useCallback(
-    async (text: string) => {
-      if (!text.trim() || streaming) return;
+  const runMessage = useCallback(
+    async (text: string, interactive = false) => {
+      if (
+        !text.trim()
+        || streaming
+        || requestActiveRef.current
+        || (!interactive && interactiveActiveRef.current)
+      ) return;
+
+      // React state is not a mutex: two callbacks can run before `streaming`
+      // is published. Claim the request synchronously so same-render sends
+      // cannot overlap or overwrite abortRef.
+      requestActiveRef.current = true;
+      const requestEpoch = requestEpochRef.current;
+      let allowQueuedHandoff = true;
+      let sawDone = false;
+      const isCurrentRequest = () => (
+        mountedRef.current && requestEpoch === requestEpochRef.current
+      );
 
       // Reset read-write timer on activity.
       if (mode === 'read-write') {
@@ -577,16 +635,25 @@ export function useChatPanel(options?: UseChatPanelOptions) {
           canvas_tabs: canvasTabSummaries.length > 0 ? canvasTabSummaries : undefined,
         }, controller.signal);
 
+        if (!isCurrentRequest()) {
+          await response.body?.cancel();
+          return;
+        }
+
         if (!response.ok || !response.body) {
+          if (response.ok && !response.body) {
+            allowQueuedHandoff = false;
+          }
           const err = await response.text();
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === assistantId
-                ? { ...m, content: `Error: ${err || response.statusText}` }
-                : m
-            )
-          );
-          setStreaming(false);
+          if (isCurrentRequest()) {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantId
+                  ? { ...m, content: `Error: ${err || response.statusText}` }
+                  : m
+              )
+            );
+          }
           return;
         }
 
@@ -597,6 +664,10 @@ export function useChatPanel(options?: UseChatPanelOptions) {
 
         while (true) {
           const { done, value } = await reader.read();
+          if (!isCurrentRequest()) {
+            await reader.cancel();
+            return;
+          }
           if (done) break;
 
           buffer += decoder.decode(value, { stream: true });
@@ -623,6 +694,9 @@ export function useChatPanel(options?: UseChatPanelOptions) {
 
             try {
               const parsed: SSEData = JSON.parse(data);
+              if (eventType === 'done') {
+                sawDone = true;
+              }
               handleSSEEvent(eventType, parsed, assistantId);
             } catch {
               reportMalformedSSEFrame();
@@ -634,8 +708,17 @@ export function useChatPanel(options?: UseChatPanelOptions) {
           // parse or surface the partial data as structured UI content.
           reportMalformedSSEFrame();
         }
+        // A clean SSE EOF without done has no client-visible guarantee that
+        // the server committed session/history state. Do not hand queued work
+        // into that ambiguous predecessor.
+        if (!sawDone) {
+          allowQueuedHandoff = false;
+        }
       } catch (err) {
-        if (err instanceof DOMException && err.name === 'AbortError') {
+        if (!isCurrentRequest()) {
+          // A stop, clear, or unmount invalidated this request. Its stale
+          // transport completion must not mutate current chat state.
+        } else if (err instanceof DOMException && err.name === 'AbortError') {
           // User stopped the stream.
         } else {
           setMessages((prev) =>
@@ -647,12 +730,110 @@ export function useChatPanel(options?: UseChatPanelOptions) {
           );
         }
       } finally {
-        setStreaming(false);
-        abortRef.current = null;
+        if (isCurrentRequest()) {
+          queueHandoffAllowedRef.current = allowQueuedHandoff;
+          requestActiveRef.current = false;
+          setStreaming(false);
+          if (abortRef.current === controller) {
+            abortRef.current = null;
+          }
+        }
       }
     },
     [sessionId, streaming, mode, setMode, canvasTabs, api]
   );
+
+  const sendMessage = useCallback(
+    (text: string) => runMessage(text, false),
+    [runMessage],
+  );
+
+  /**
+   * Submit a Canvas/extension action. With queueing enabled, one exact message
+   * snapshot can wait behind the active stream; additional clicks are rejected
+   * until that queued turn finishes. With queueing disabled this delegates to
+   * sendMessage and therefore preserves the legacy drop-while-streaming path.
+   */
+  const sendInteractiveMessage = useCallback(
+    (text: string): boolean => {
+      if (!text.trim()) return false;
+      const message = text;
+      const requestBusy = requestActiveRef.current || streaming;
+      if (!options?.queueInteractiveSubmissions) {
+        void sendMessage(message);
+        return !requestBusy;
+      }
+      if (interactiveActiveRef.current) {
+        return false;
+      }
+      if (!requestBusy) {
+        const generation = queueGenerationRef.current;
+        interactiveActiveRef.current = true;
+        setInteractiveSubmissionState('continuing');
+        void runMessage(message, true).finally(() => {
+          if (
+            mountedRef.current
+            && generation === queueGenerationRef.current
+          ) {
+            interactiveActiveRef.current = false;
+            setInteractiveSubmissionState('idle');
+          }
+        });
+        return true;
+      }
+      interactiveActiveRef.current = true;
+      queuedInteractiveRef.current = {
+        message,
+        generation: queueGenerationRef.current,
+      };
+      setInteractiveSubmissionState('queued');
+      return true;
+    },
+    [
+      interactiveSubmissionState,
+      options?.queueInteractiveSubmissions,
+      runMessage,
+      sendMessage,
+      streaming,
+    ],
+  );
+
+  // Dispatch the queued immutable snapshot only after the prior SSE reader has
+  // closed and sendMessage's finally block has returned the hook to idle.
+  useEffect(() => {
+    if (streaming || interactiveSubmissionState !== 'queued') return;
+    const queued = queuedInteractiveRef.current;
+    if (!queued) {
+      interactiveActiveRef.current = false;
+      setInteractiveSubmissionState('idle');
+      return;
+    }
+    if (queued.generation !== queueGenerationRef.current) {
+      interactiveActiveRef.current = false;
+      queuedInteractiveRef.current = null;
+      setInteractiveSubmissionState('idle');
+      return;
+    }
+    if (!queueHandoffAllowedRef.current) {
+      interactiveActiveRef.current = false;
+      queuedInteractiveRef.current = null;
+      queueHandoffAllowedRef.current = true;
+      setInteractiveSubmissionState('idle');
+      return;
+    }
+
+    queuedInteractiveRef.current = null;
+    setInteractiveSubmissionState('continuing');
+    void runMessage(queued.message, true).finally(() => {
+      if (
+        mountedRef.current
+        && queued.generation === queueGenerationRef.current
+      ) {
+        interactiveActiveRef.current = false;
+        setInteractiveSubmissionState('idle');
+      }
+    });
+  }, [interactiveSubmissionState, runMessage, streaming]);
 
   /** Handle a single parsed SSE event. */
   const handleSSEEvent = useCallback(
@@ -748,6 +929,12 @@ export function useChatPanel(options?: UseChatPanelOptions) {
           if (data.session_id) {
             setSessionId(data.session_id);
           }
+          // Terminal Canvas turns intentionally have no assistant narration.
+          // Remove their empty placeholder instead of leaving a permanent
+          // ellipsis bubble after streaming finishes.
+          setMessages((prev) => prev.filter(
+            (message) => message.id !== assistantId || message.content !== '',
+          ));
           // Clear any stale approvals from the finished stream.
           setApprovalQueue([]);
           break;
@@ -828,33 +1015,54 @@ export function useChatPanel(options?: UseChatPanelOptions) {
     []
   );
 
+  const cancelCurrentRequest = useCallback(() => {
+    requestEpochRef.current += 1;
+    requestActiveRef.current = false;
+    queueHandoffAllowedRef.current = true;
+    queueGenerationRef.current += 1;
+    interactiveActiveRef.current = false;
+    queuedInteractiveRef.current = null;
+    const controller = abortRef.current;
+    abortRef.current = null;
+    controller?.abort();
+    setStreaming(false);
+    setInteractiveSubmissionState('idle');
+    setApprovalQueue([]);
+    setMessages((prev) => prev.filter(
+      (message) => message.role !== 'assistant' || message.content !== '',
+    ));
+  }, []);
+
   /** Stop the current stream. */
   const stop = useCallback(async () => {
-    if (abortRef.current) {
-      abortRef.current.abort();
-    }
+    const stoppedSessionId = sessionId;
+    cancelCurrentRequest();
     // Also notify the backend.
-    if (sessionId) {
+    if (stoppedSessionId) {
       try {
-        await api.post('/chat/stop', { session_id: sessionId });
+        await api.post('/chat/stop', { session_id: stoppedSessionId });
       } catch {
         // best-effort
       }
     }
-  }, [sessionId]);
+  }, [cancelCurrentRequest, sessionId]);
 
   /** Clear conversation. */
   const clear = useCallback(async () => {
-    if (sessionId) {
+    const clearedSessionId = sessionId;
+    cancelCurrentRequest();
+    // Clear local state before awaiting the network so a stale stream or a
+    // slow delete response cannot restore or erase a newer conversation.
+    setMessages([]);
+    setSessionId(undefined);
+    if (clearedSessionId) {
       try {
-        await api.delete('/chat/session', { session_id: sessionId });
+        await api.delete('/chat/session', { session_id: clearedSessionId });
       } catch {
         // Best-effort clear.
       }
     }
-    setMessages([]);
-    setSessionId(undefined);
-  }, [sessionId]);
+  }, [cancelCurrentRequest, sessionId]);
 
   // Show/hide tool traces — persisted in localStorage.
   const TRACES_KEY = 'chat-component-show-traces';
@@ -885,6 +1093,8 @@ export function useChatPanel(options?: UseChatPanelOptions) {
     approveAction,
     denyAction,
     sendMessage,
+    sendInteractiveMessage,
+    interactiveSubmissionState,
     stop,
     clear,
     checkConfigured,

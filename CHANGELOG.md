@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.3.0
+
+### Added
+
+- Hosts can opt selected renderer tools into terminal interactive completion with
+  `agent.WithTerminalToolPolicy` / `agent.WithTerminalTools`, or configure the
+  HTTP server through `server.NewWithOptions` and
+  `server.WithTerminalToolPolicy`. A successful result must be exactly one
+  validated, actionable Canvas open/update; informational/error views, invalid
+  payloads, close directives, and failed siblings continue to the provider.
+- Terminal renders emit the Canvas and tool result, then a hidden assistant
+  checkpoint and `done`, without another provider round. Parallel batches settle
+  fully before the decision, and same-session turns are serialized.
+- `agent.ParseTerminalCanvasResult` exposes the same strict Canvas validation to
+  hosts with deterministic pre-provider render paths.
+- Terminal-policy and render-to-done telemetry reports the decision, reason,
+  skipped provider round, and latency after the Canvas event is flushed.
+
+### Fixed
+
+- Cancellation after provider/tool settlement no longer emits stale Canvas or
+  `done` events or starts another provider round.
+- Same-session stop and delete operations now target the acquired active turn;
+  deletion closes waiters before a same-ID session can be recreated.
+- Visible successful sibling output is retained in history ahead of a hidden
+  terminal checkpoint, and interrupted turns preserve valid role alternation.
+
 ## v0.2.2
 
 ### Fixed

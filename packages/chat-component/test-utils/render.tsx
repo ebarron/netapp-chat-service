@@ -1,5 +1,6 @@
 import { render as testingLibraryRender, renderHook as testingLibraryRenderHook } from '@testing-library/react';
 import { MantineProvider } from '@mantine/core';
+import { StrictMode } from 'react';
 import { ChatAPIProvider } from '../src/ChatAPIContext';
 import type { ChatAPI } from '../src/ChatAPI';
 import { vi } from 'vitest';
@@ -18,15 +19,16 @@ export function createMockChatAPI(overrides?: Partial<ChatAPI>): ChatAPI {
 
 const defaultMockAPI = createMockChatAPI();
 
-function createWrapper(api: ChatAPI) {
+function createWrapper(api: ChatAPI, strict = false) {
   return function Wrapper({ children }: { children: React.ReactNode }) {
-    return (
+    const content = (
       <MantineProvider>
         <ChatAPIProvider value={api}>
           {children}
         </ChatAPIProvider>
       </MantineProvider>
     );
+    return strict ? <StrictMode>{content}</StrictMode> : content;
   };
 }
 
@@ -37,9 +39,9 @@ export function render(ui: React.ReactNode, options?: { api?: ChatAPI }) {
   });
 }
 
-export function renderHook<T>(hook: () => T, options?: { api?: ChatAPI }) {
+export function renderHook<T>(hook: () => T, options?: { api?: ChatAPI; strict?: boolean }) {
   const api = options?.api ?? defaultMockAPI;
   return testingLibraryRenderHook(hook, {
-    wrapper: createWrapper(api),
+    wrapper: createWrapper(api, options?.strict),
   });
 }

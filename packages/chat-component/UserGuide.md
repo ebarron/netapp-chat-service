@@ -121,6 +121,33 @@ available.
 
 ---
 
+## Queueing interactive Canvas actions
+
+Set `queueInteractiveSubmissions` on `ChatPanel` or `ChatAppShell` when Canvas
+forms or host panel extensions can be clicked while the prior response is still
+closing:
+
+```tsx
+<ChatAppShell queueInteractiveSubmissions {...shellProps} />
+```
+
+The first interactive click captures its exact message payload in a one-slot
+queue. The control shows `Queued` and then `Continuing…`; duplicate clicks are
+rejected, and the action dispatches only after the prior SSE stream closes with
+its committed session ID when `done` was received. A failed prior request still
+releases the queued action after its stream settles. Explicit Stop, Clear, and
+unmount discard queued work.
+
+Host panel extensions receive the same `idle | queued | continuing` value as
+`context.submissionState`, allowing extension-owned controls to show or disable
+their queued handoff consistently.
+
+This option defaults to `false`. Ordinary typed messages are never queued, and
+existing hosts retain their current drop-while-streaming behavior until they opt
+in.
+
+---
+
 ## Driving the panel from the host
 
 The host can open the panel and **auto-send a prompt** programmatically — useful

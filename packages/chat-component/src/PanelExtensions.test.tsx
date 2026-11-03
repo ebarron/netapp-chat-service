@@ -38,6 +38,7 @@ const availabilityExtension: PanelExtensionDefinition<Availability> = {
     <section aria-label="Custom availability">
       {data.label}: {data.unavailableCount}
       <span>{context.readOnly ? 'read only' : 'read write'}</span>
+      {context.submissionState && <span>{context.submissionState}</span>}
       {context.sendMessage && (
         <button onClick={() => context.sendMessage?.('show eligible classes')}>
           Ask
@@ -137,6 +138,24 @@ describe('panel extension registry', () => {
     expect(screen.queryByRole('note', { name: 'Built-in fallback' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Ask' }));
     expect(onAction).toHaveBeenCalledWith('show eligible classes');
+  });
+
+  it('passes queued submission state to host extensions', () => {
+    const registry = createPanelExtensionRegistry([availabilityExtension]);
+    render(
+      <ChatRenderExtensionProvider registry={registry}>
+        <DashboardBlock
+          interactiveSubmissionState="queued"
+          json={dashboardJson({
+            kind: 'example.availability',
+            schemaVersion: 1,
+            data: { unavailableCount: 2, label: 'Unavailable' },
+          })}
+        />
+      </ChatRenderExtensionProvider>,
+    );
+
+    expect(screen.getByLabelText('Custom availability')).toHaveTextContent('queued');
   });
 
   it('isolates renderer exceptions and deterministically restores the fallback', () => {

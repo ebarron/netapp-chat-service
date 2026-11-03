@@ -15,12 +15,14 @@ import type {
   ResourceTableData,
   PanelData,
 } from './chartTypes';
+import type { InteractiveSubmissionState } from '../useChatPanel';
 
 interface ObjectDetailBlockProps {
   json: string;
   onAction?: (message: string) => void;
   onExecute?: (tool: string, params?: Record<string, unknown>) => void;
   readOnly?: boolean;
+  interactiveSubmissionState?: InteractiveSubmissionState;
 }
 
 /**
@@ -69,12 +71,14 @@ function SectionRenderer({
   onAction,
   onExecute,
   readOnly,
+  interactiveSubmissionState,
   cardQualifier,
 }: {
   section: ObjectDetailSection;
   onAction?: (message: string) => void;
   onExecute?: (tool: string, params?: Record<string, unknown>) => void;
   readOnly?: boolean;
+  interactiveSubmissionState?: InteractiveSubmissionState;
   cardQualifier?: string;
 }) {
   const { layout, data } = section;
@@ -91,6 +95,7 @@ function SectionRenderer({
           onAction={onAction}
           onExecute={onExecute}
           readOnly={readOnly}
+          interactiveSubmissionState={interactiveSubmissionState}
         />
       );
     }
@@ -139,7 +144,7 @@ function SectionRenderer({
   }
 }
 
-export function ObjectDetailBlock({ json, onAction, onExecute, readOnly }: ObjectDetailBlockProps) {
+export function ObjectDetailBlock({ json, onAction, onExecute, readOnly, interactiveSubmissionState }: ObjectDetailBlockProps) {
   const detail = parseObjectDetail(json);
   if (!detail) {
     return <Code block>{json}</Code>;
@@ -183,6 +188,7 @@ export function ObjectDetailBlock({ json, onAction, onExecute, readOnly }: Objec
               onAction={section.layout === 'properties' || section.layout === 'actions' ? onAction : enrichedOnAction}
               onExecute={onExecute}
               readOnly={readOnly}
+              interactiveSubmissionState={interactiveSubmissionState}
               cardQualifier={detail.qualifier}
             />
           </div>

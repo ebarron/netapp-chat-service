@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"log/slog"
 	"strings"
 )
@@ -59,7 +60,11 @@ func (c *canvasFenceInterceptor) HandleToken(text string) {
 			// Skip past the closing ``` and optional trailing newline.
 			if idx := strings.Index(remaining, "```"); idx >= 0 {
 				remaining = remaining[idx+3:]
-				remaining = strings.TrimPrefix(remaining, "\n")
+				// Fence separators are transport formatting, not assistant
+				// prose. EmitResult renderers commonly append two newlines;
+				// discard all immediate line breaks so a successful canvas
+				// does not create an empty chat message after canvas_open.
+				remaining = strings.TrimLeft(remaining, "\r\n")
 			}
 			c.buffer.Reset()
 			c.inside = false
@@ -185,6 +190,90 @@ func (c *canvasFenceInterceptor) emitCanvasEvent(jsonContent string) {
 			Content:   normalized,
 		},
 	})
+}
+
+// ParseTerminalCanvasResult parses a successful tool result that is exactly
+// one complete, valid, actionable canvas open/update fence. Informational
+// views and close directives are excluded: they generally require explanation
+// or confirmation and must continue through the provider.
+//
+// Hosts with a deterministic pre-provider render path may use this helper to
+// enforce the same validation contract as Agent.Run.
+func ParseTerminalCanvasResult(result string) (*CanvasPayload, bool) {
+	trimmed := strings.TrimSpace(result)
+	for _, prefix := range canvasFencePrefixes {
+		opening := prefix + "\n"
+		if !strings.HasPrefix(trimmed, opening) || !strings.HasSuffix(trimmed, "\n```") {
+			continue
+		}
+		raw := strings.TrimSpace(trimmed[len(opening) : len(trimmed)-len("\n```")])
+		normalized, meta, err := normalizeCanvasPayload(raw)
+		if err != nil {
+			return nil, false
+		}
+		var payload struct {
+			Close bool `json:"close"`
+		}
+		if json.Unmarshal(normalized, &payload) != nil || payload.Close {
+			return nil, false
+		}
+		if !hasInteractiveCanvasControl(normalized) {
+			return nil, false
+		}
+		return &CanvasPayload{
+			TabID:     meta.TabID,
+			Title:     meta.Title,
+			Kind:      meta.Kind,
+			Qualifier: meta.Qualifier,
+			Content:   normalized,
+		}, true
+	}
+	return nil, false
+}
+
+// hasInteractiveCanvasControl distinguishes a self-contained interactive view
+// from a valid informational/error Canvas. Built-in forms/buttons are detected
+// structurally. Host extensions opt in per result with
+// `extension.interactive: true`, allowing a renderer to keep its error/empty
+// states nonterminal while marking its actionable state.
+func hasInteractiveCanvasControl(normalized json.RawMessage) bool {
+	var root any
+	if json.Unmarshal(normalized, &root) != nil {
+		return false
+	}
+	var visit func(any) bool
+	visit = func(value any) bool {
+		switch typed := value.(type) {
+		case []any:
+			for _, item := range typed {
+				if visit(item) {
+					return true
+				}
+			}
+		case map[string]any:
+			panelType, _ := typed["type"].(string)
+			if panelType == "action-form" || panelType == "action-button" {
+				return true
+			}
+			if extension, ok := typed["extension"].(map[string]any); ok {
+				if interactive, _ := extension["interactive"].(bool); interactive {
+					return true
+				}
+			}
+			if toggle, ok := typed["toggle"].(map[string]any); ok {
+				if message, _ := toggle["message"].(string); message != "" {
+					return true
+				}
+			}
+			for _, child := range typed {
+				if visit(child) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return visit(root)
 }
 
 // canvasPartialMatch returns true if the end of s could still become a

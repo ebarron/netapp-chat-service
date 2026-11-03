@@ -2,17 +2,26 @@ import React from 'react';
 import { Group, Button, Tooltip } from '@mantine/core';
 import type { ActionButtonData, ActionButtonItem } from './chartTypes';
 import { applyQualifier } from './ObjectDetailBlock';
+import type { InteractiveSubmissionState } from '../useChatPanel';
 
 interface ActionButtonBlockProps {
   data: ActionButtonData;
   onAction?: (message: string) => void;
   onExecute?: (tool: string, params?: Record<string, unknown>) => void;
   readOnly?: boolean;
+  interactiveSubmissionState?: InteractiveSubmissionState;
   /** Card-level qualifier from the parent object-detail block. */
   cardQualifier?: string;
 }
 
-export function ActionButtonBlock({ data, onAction, onExecute, readOnly, cardQualifier }: ActionButtonBlockProps) {
+export function ActionButtonBlock({
+  data,
+  onAction,
+  onExecute,
+  readOnly,
+  interactiveSubmissionState = 'idle',
+  cardQualifier,
+}: ActionButtonBlockProps) {
   const buttons = Array.isArray(data.buttons)
     ? data.buttons.filter((button): button is ActionButtonItem => (
         typeof button === 'object'
@@ -34,7 +43,9 @@ export function ActionButtonBlock({ data, onAction, onExecute, readOnly, cardQua
     <Group gap="xs" role="group" aria-label="Actions">
       {buttons.map((btn, i) => {
         const action = resolveAction(btn);
-        const isDisabled = (action === 'execute' || !!btn.requiresReadWrite) && !!readOnly;
+        const readOnlyDisabled = (action === 'execute' || !!btn.requiresReadWrite) && !!readOnly;
+        const queueDisabled = action === 'message' && interactiveSubmissionState !== 'idle';
+        const isDisabled = readOnlyDisabled || queueDisabled;
         const button = (
           <Button
             size="compact-sm"
@@ -45,7 +56,7 @@ export function ActionButtonBlock({ data, onAction, onExecute, readOnly, cardQua
             {btn.label}
           </Button>
         );
-        if (isDisabled && btn.requiresReadWrite) {
+        if (readOnlyDisabled && btn.requiresReadWrite) {
           return <Tooltip key={i} label="Enable read-write mode to use this action">{button}</Tooltip>;
         }
         return <React.Fragment key={i}>{button}</React.Fragment>;

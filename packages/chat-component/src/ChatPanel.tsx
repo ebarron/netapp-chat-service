@@ -45,6 +45,7 @@ import {
   type CanvasEventInfo,
   type CanvasTabSummary,
   type HostCanvasTabInput,
+  type InteractiveSubmissionState,
 } from './useChatPanel';
 import { CodeBlock } from './CodeBlock';
 import { ModeToggle } from './ModeToggle';
@@ -106,6 +107,11 @@ interface ChatPanelProps {
    * can disable a trigger control while a turn is streaming.
    */
   onBusyChange?: (busy: boolean) => void;
+  /**
+   * Queue one Canvas/panel-extension action submitted during an active stream.
+   * Defaults to false; ordinary typed chat is never queued.
+   */
+  queueInteractiveSubmissions?: boolean;
   /**
    * Called when a canvas tab opens/updates or closes. Lets the host react to
    * a specific canvas (e.g. refresh a page when a matching canvas changes).
@@ -246,6 +252,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
   pendingPrompt,
   onPromptConsumed,
   onBusyChange,
+  queueInteractiveSubmissions = false,
   onCanvasEvent,
   variant = 'drawer',
   onOpenNav,
@@ -284,6 +291,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
     approveAction,
     denyAction,
     sendMessage,
+    sendInteractiveMessage,
+    interactiveSubmissionState,
     stop,
     clear,
     checkConfigured,
@@ -296,7 +305,12 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
     openHostCanvasTab,
     updateHostCanvasTab,
     setCanvasTabSummary,
-  } = useChatPanel({ defaultMode, onCanvasEvent, onOpenNav });
+  } = useChatPanel({
+    defaultMode,
+    onCanvasEvent,
+    onOpenNav,
+    queueInteractiveSubmissions,
+  });
 
   const docked = variant === 'docked';
 
@@ -914,7 +928,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
               <MessageBubble
                 key={msg.id}
                 message={msg}
-                onAction={sendMessage}
+                onAction={sendInteractiveMessage}
+                interactiveSubmissionState={interactiveSubmissionState}
                 readOnly={mode === 'read-only'}
                 isStreaming={messages.indexOf(msg) === lastAssistantIdx}
               />
@@ -928,6 +943,13 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
                 Thinking...
               </Text>
             </Group>
+          )}
+          {interactiveSubmissionState !== 'idle' && (
+            <Text fz="xs" c="blue" mt="xs" role="status">
+              {interactiveSubmissionState === 'queued'
+                ? 'Action queued…'
+                : 'Continuing action…'}
+            </Text>
           )}
         </ScrollArea>
 
@@ -1012,7 +1034,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
               activeTab={activeCanvasTab}
               onTabChange={setActiveCanvasTab}
               onTabClose={closeCanvasTab}
-              onAction={sendMessage}
+              onAction={sendInteractiveMessage}
+              interactiveSubmissionState={interactiveSubmissionState}
               readOnly={mode === 'read-only'}
               onHostTabPortal={onHostTabPortal}
               hideSingleTab={hideSingleTab}
@@ -1112,12 +1135,19 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
 interface MessageBubbleProps {
   message: ChatMessage;
   onAction?: (message: string) => void;
+  interactiveSubmissionState?: InteractiveSubmissionState;
   readOnly?: boolean;
   isStreaming?: boolean;
 }
 
 /** Renders a single message in the conversation. */
-function MessageBubble({ message, onAction, readOnly, isStreaming }: MessageBubbleProps) {
+function MessageBubble({
+  message,
+  onAction,
+  interactiveSubmissionState,
+  readOnly,
+  isStreaming,
+}: MessageBubbleProps) {
   if (message.role === 'tool') {
     return <ToolStatusCard message={message} />;
   }
@@ -1145,13 +1175,13 @@ function MessageBubble({ message, onAction, readOnly, isStreaming }: MessageBubb
           code: ({ className, children, ...props }: React.HTMLAttributes<HTMLElement>) => {
             const content = String(children).replace(/\n$/, '');
             if (className === 'language-dashboard') {
-              return <DashboardBlock json={content} onAction={onAction} readOnly={readOnly} />;
+              return <DashboardBlock json={content} onAction={onAction} readOnly={readOnly} interactiveSubmissionState={interactiveSubmissionState} />;
             }
             if (className === 'language-object-detail') {
-              return <ObjectDetailBlock json={content} onAction={onAction} readOnly={readOnly} />;
+              return <ObjectDetailBlock json={content} onAction={onAction} readOnly={readOnly} interactiveSubmissionState={interactiveSubmissionState} />;
             }
             if (className === 'language-chart') {
-              return <ChartBlock json={content} onAction={onAction} readOnly={readOnly} />;
+              return <ChartBlock json={content} onAction={onAction} readOnly={readOnly} interactiveSubmissionState={interactiveSubmissionState} />;
             }
             // LLMs emit chart/dashboard JSON inside ```json, ```alert-list, or other fences.
             // Try JSON parsing for any unrecognized language tag or no tag at all.
@@ -1159,13 +1189,13 @@ function MessageBubble({ message, onAction, readOnly, isStreaming }: MessageBubb
             try {
               const parsed = JSON.parse(sanitizeJson(content));
               if (Array.isArray(parsed?.panels)) {
-                return <DashboardBlock json={content} onAction={onAction} readOnly={readOnly} />;
+                return <DashboardBlock json={content} onAction={onAction} readOnly={readOnly} interactiveSubmissionState={interactiveSubmissionState} />;
               }
               if (parseObjectDetail(JSON.stringify(parsed))) {
-                return <ObjectDetailBlock json={JSON.stringify(parsed)} onAction={onAction} readOnly={readOnly} />;
+                return <ObjectDetailBlock json={JSON.stringify(parsed)} onAction={onAction} readOnly={readOnly} interactiveSubmissionState={interactiveSubmissionState} />;
               }
               if (parseChart(JSON.stringify(parsed))) {
-                return <ChartBlock json={JSON.stringify(parsed)} onAction={onAction} readOnly={readOnly} />;
+                return <ChartBlock json={JSON.stringify(parsed)} onAction={onAction} readOnly={readOnly} interactiveSubmissionState={interactiveSubmissionState} />;
               }
               if (typeof parsed === 'object' && parsed !== null) {
                 return <AutoJsonBlock json={content} />;

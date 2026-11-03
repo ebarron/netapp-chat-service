@@ -287,17 +287,37 @@ var (
 
 // Server is the chat service HTTP server.
 type Server struct {
-	deps   *ChatDeps
-	mux    *http.ServeMux
-	logger *slog.Logger
+	deps           *ChatDeps
+	mux            *http.ServeMux
+	logger         *slog.Logger
+	runChatOptions RunChatOptions
 }
 
-// New creates a new chat service server.
+// Option configures additive HTTP server behavior.
+type Option func(*Server)
+
+// WithTerminalToolPolicy opts selected tools into terminal interactive-render
+// completion for POST /chat/message. Nil preserves the default behavior.
+func WithTerminalToolPolicy(policy func(toolName string) bool) Option {
+	return func(s *Server) {
+		s.runChatOptions.TerminalToolPolicy = policy
+	}
+}
+
+// New creates a new chat service server with default behavior.
 func New(deps *ChatDeps) *Server {
+	return NewWithOptions(deps)
+}
+
+// NewWithOptions creates a chat service server with additive opt-in behavior.
+func NewWithOptions(deps *ChatDeps, opts ...Option) *Server {
 	s := &Server{
 		deps:   deps,
 		mux:    http.NewServeMux(),
 		logger: deps.Logger,
+	}
+	for _, option := range opts {
+		option(s)
 	}
 
 	s.mux.HandleFunc("POST /chat/message", s.PostChatMessage)
@@ -428,7 +448,21 @@ func (s *Server) PostChatMessage(w http.ResponseWriter, r *http.Request) {
 		emitMu.Unlock()
 	}
 
+	// Resolve and acquire the session exactly once. Only the acquired turn is
+	// registered as stoppable; a same-session waiter must never replace the
+	// active turn's cancel function.
 	sess := s.deps.Sessions.GetOrCreate(req.SessionID)
+	if !sess.AcquireTurn(ctx) {
+		message := "session is no longer available"
+		if err := ctx.Err(); err != nil {
+			message = err.Error()
+		}
+		emit("error", map[string]string{"type": "error", "message": message})
+		emit("done", map[string]string{"type": "done", "session_id": sess.ID})
+		return
+	}
+	defer sess.ReleaseTurn()
+
 	activeContexts.Store(sess.ID, cancel)
 	defer activeContexts.Delete(sess.ID)
 
@@ -465,7 +499,7 @@ func (s *Server) PostChatMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	RunChat(ctx, s.deps, req, emit, approvalFunc)
+	runChatWithOptions(ctx, s.deps, req, emit, approvalFunc, s.runChatOptions, sess, true)
 }
 
 // DeleteChatSession clears a session's conversation history.
@@ -487,7 +521,13 @@ func (s *Server) DeleteChatSession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "session_id is required"})
 		return
 	}
-	s.deps.Sessions.Delete(body.SessionID)
+	if cancel, ok := activeContexts.LoadAndDelete(body.SessionID); ok {
+		cancel.(context.CancelFunc)()
+	}
+	if !s.deps.Sessions.DeleteContext(r.Context(), body.SessionID) {
+		writeJSON(w, http.StatusRequestTimeout, map[string]string{"message": "session clear cancelled"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "session cleared"})
 }
 
@@ -848,8 +888,26 @@ func (s *Server) GetHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// RunChat runs the agent loop for a single user message, emitting SSE events.
+// RunChatOptions configures additive per-run behavior without expanding
+// ChatDeps (which existing embedders may construct with unkeyed literals).
+type RunChatOptions struct {
+	// TerminalToolPolicy opts selected tools into terminal interactive-render
+	// completion when their result is a validated actionable Canvas. Nil
+	// preserves continue-after-tool behavior.
+	TerminalToolPolicy func(toolName string) bool
+}
+
+// RunChat runs the agent loop for a single user message with default behavior.
 func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit ChatEmitter, approvalFunc func(capID, toolName string, tc llm.ToolCall) bool) {
+	RunChatWithOptions(ctx, deps, req, emit, approvalFunc, RunChatOptions{})
+}
+
+// RunChatWithOptions runs the agent loop with additive per-run options.
+func RunChatWithOptions(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit ChatEmitter, approvalFunc func(capID, toolName string, tc llm.ToolCall) bool, runOpts RunChatOptions) {
+	runChatWithOptions(ctx, deps, req, emit, approvalFunc, runOpts, nil, false)
+}
+
+func runChatWithOptions(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit ChatEmitter, approvalFunc func(capID, toolName string, tc llm.ToolCall) bool, runOpts RunChatOptions, sess *session.Session, turnAcquired bool) {
 	deps.Logger.Info("user prompt", "message", req.Message, "mode", req.Mode, "session", req.SessionID)
 
 	// The canvas caps apply wherever the request came from, not just from
@@ -868,8 +926,24 @@ func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit C
 		mode = "read-only"
 	}
 
-	// Get or create session.
-	sess := deps.Sessions.GetOrCreate(req.SessionID)
+	// Public callers resolve and acquire here. The HTTP handler passes its
+	// already-acquired session so empty IDs are not resolved twice and only
+	// the running turn is registered for stop/delete.
+	if sess == nil {
+		sess = deps.Sessions.GetOrCreate(req.SessionID)
+	}
+	if !turnAcquired {
+		if !sess.AcquireTurn(ctx) {
+			message := "session is no longer available"
+			if err := ctx.Err(); err != nil {
+				message = err.Error()
+			}
+			emit("error", map[string]string{"type": "error", "message": message})
+			emit("done", map[string]string{"type": "done", "session_id": sess.ID})
+			return
+		}
+		defer sess.ReleaseTurn()
+	}
 
 	// Append user message.
 	sess.AddMessage(llm.Message{
@@ -992,6 +1066,9 @@ func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit C
 			deps.ToolRoutingMode, groups, deps.ToolRoutingAlwaysOn,
 			deps.ToolRoutingMaxTools, deps.ToolRoutingForceLoad))
 	}
+	if runOpts.TerminalToolPolicy != nil {
+		opts = append(opts, agent.WithTerminalToolPolicy(runOpts.TerminalToolPolicy))
+	}
 	ag := agent.New(deps.Provider, deps.Router, opts...)
 
 	if approvalFunc != nil {
@@ -1003,6 +1080,9 @@ func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit C
 	// concatenation would copy the whole response per delta (quadratic in the
 	// number of deltas) for a response the model, not this code, sizes.
 	var assistantText strings.Builder
+	var assistantCheckpoint string
+	turnDone := false
+	historyCommitted := false
 
 	// Run agent loop, converting agent events to emitted events.
 	ag.Run(ctx, sess.Messages, func(evt agent.Event) {
@@ -1067,6 +1147,11 @@ func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit C
 				emit("open_nav", evt.OpenNav)
 			}
 
+		case agent.EventAssistantCheckpoint:
+			if assistantCheckpoint == "" && evt.Text != "" {
+				assistantCheckpoint = evt.Text
+			}
+
 		case agent.EventError:
 			emit("error", map[string]string{
 				"type":    "error",
@@ -1074,19 +1159,40 @@ func RunChat(ctx context.Context, deps *ChatDeps, req ChatMessageRequest, emit C
 			})
 
 		case agent.EventDone:
-			// Append assistant response to session history.
-			if text := assistantText.String(); text != "" {
-				sess.AddMessage(llm.Message{
-					Role:    llm.RoleAssistant,
-					Content: text,
-				})
+			// Commit visible assistant output when present; otherwise use the
+			// hidden terminal checkpoint. This happens synchronously before the
+			// done event, preserving both UI/history consistency and valid role
+			// alternation for the next turn.
+			text := assistantText.String()
+			if text == "" {
+				text = assistantCheckpoint
 			}
+			if text == "" {
+				text = "The previous turn completed without a text response."
+			}
+			sess.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: text})
+			historyCommitted = true
+			turnDone = true
 			emit("done", map[string]string{
 				"type":       "done",
 				"session_id": sess.ID,
 			})
 		}
 	})
+
+	// Provider failures and cancellation can end the loop without EventDone.
+	// Still close the persisted user/assistant role pair so a resumed provider
+	// request is valid. Do not emit a synthetic done for a cancelled stream.
+	if !turnDone && !historyCommitted {
+		text := assistantText.String()
+		if text == "" {
+			text = "The previous turn did not complete."
+			if ctx.Err() != nil {
+				text = "The previous turn was cancelled."
+			}
+		}
+		sess.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: text})
+	}
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

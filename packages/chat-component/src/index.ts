@@ -44,6 +44,7 @@ export type {
   Capability,
   PendingApproval,
   ChatMode,
+  InteractiveSubmissionState,
   CanvasTab,
   CanvasEventInfo,
   CanvasTabSummary,

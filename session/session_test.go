@@ -1,8 +1,10 @@
 package session
 
 import (
+	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ebarron/netapp-chat-service/llm"
 )
@@ -147,6 +149,138 @@ func TestConcurrentAccess(t *testing.T) {
 
 	if m.Count() != 50 {
 		t.Errorf("count = %d, want 50", m.Count())
+	}
+}
+
+func TestSessionTurnsSerializeAndRespectCancellation(t *testing.T) {
+	s := NewManager(20).GetOrCreate("same-session")
+	if !s.AcquireTurn(context.Background()) {
+		t.Fatal("first turn was not acquired")
+	}
+
+	acquired := make(chan bool, 1)
+	go func() {
+		acquired <- s.AcquireTurn(context.Background())
+	}()
+	select {
+	case <-acquired:
+		t.Fatal("second turn overlapped the first")
+	case <-time.After(10 * time.Millisecond):
+	}
+
+	s.ReleaseTurn()
+	select {
+	case ok := <-acquired:
+		if !ok {
+			t.Fatal("waiting turn was not acquired after release")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting turn did not resume")
+	}
+	s.ReleaseTurn()
+
+	if !s.AcquireTurn(context.Background()) {
+		t.Fatal("turn was not reacquired")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if s.AcquireTurn(ctx) {
+		t.Fatal("cancelled waiter acquired an active session")
+	}
+	s.ReleaseTurn()
+}
+
+func TestDeleteContextClosesWaitersBeforeSameIDCanBeRecreated(t *testing.T) {
+	m := NewManager(20)
+	old := m.GetOrCreate("same-session")
+	if !old.AcquireTurn(context.Background()) {
+		t.Fatal("active turn was not acquired")
+	}
+
+	waiter := make(chan bool, 1)
+	go func() {
+		waiter <- old.AcquireTurn(context.Background())
+	}()
+
+	deleted := make(chan bool, 1)
+	go func() {
+		deleted <- m.DeleteContext(context.Background(), old.ID)
+	}()
+
+	// Wait until DeleteContext has closed the old session while it waits for
+	// the active turn. A closed session must reject both existing and new
+	// waiters.
+	deadline := time.Now().Add(time.Second)
+	for {
+		old.turnMu.Lock()
+		closed := old.turnClosed
+		old.turnMu.Unlock()
+		if closed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("DeleteContext did not close the active session")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if old.AcquireTurn(context.Background()) {
+		t.Fatal("closed session accepted a new turn")
+	}
+	old.ReleaseTurn()
+
+	select {
+	case ok := <-deleted:
+		if !ok {
+			t.Fatal("DeleteContext did not complete")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("DeleteContext did not resume after active turn release")
+	}
+	select {
+	case ok := <-waiter:
+		if ok {
+			t.Fatal("waiter acquired the closed session")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("closed waiter was not awakened")
+	}
+
+	replacement := m.GetOrCreate(old.ID)
+	if replacement == old {
+		t.Fatal("same-ID session reused the closed object")
+	}
+	if !replacement.AcquireTurn(context.Background()) {
+		t.Fatal("replacement session could not acquire a turn")
+	}
+	replacement.ReleaseTurn()
+}
+
+func TestCancelledDeleteFinishesCleanupAfterActiveTurnReleases(t *testing.T) {
+	m := NewManager(20)
+	old := m.GetOrCreate("cancelled-delete")
+	if !old.AcquireTurn(context.Background()) {
+		t.Fatal("active turn was not acquired")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if m.DeleteContext(ctx, old.ID) {
+		t.Fatal("cancelled DeleteContext unexpectedly completed synchronously")
+	}
+	if old.AcquireTurn(context.Background()) {
+		t.Fatal("cancelled delete reopened the closing session")
+	}
+	old.ReleaseTurn()
+
+	deadline := time.Now().Add(time.Second)
+	for m.Get(old.ID) != nil {
+		if time.Now().After(deadline) {
+			t.Fatal("cancelled delete did not finish cleanup after release")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	replacement := m.GetOrCreate(old.ID)
+	if replacement == old {
+		t.Fatal("same-ID replacement reused the closed session")
 	}
 }
 
